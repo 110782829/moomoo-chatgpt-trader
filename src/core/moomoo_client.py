@@ -41,7 +41,7 @@ class MoomooClient:
         self.host = host
         self.port = port
         self.connected: bool = False
-        self.account_id: Optional[str] = None
+        self.account_id: int | None = None
         # Placeholder for the futu OpenAPI trading context
         self.trading_ctx = None
         if not FUTU_AVAILABLE:
@@ -108,7 +108,10 @@ class MoomooClient:
         """
         if not self.connected:
             raise RuntimeError("Not connected to OpenD")
-        self.account_id = account_id
+        try:
+            self.account_id = int(account_id)  # <<-- cast to int here
+        except ValueError:
+            raise RuntimeError(f"Invalid account_id: {account_id}")
         self.env = trd_env
     
     def get_positions(self) -> List[Dict[str, Any]]:
