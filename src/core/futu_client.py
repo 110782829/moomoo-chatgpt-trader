@@ -6,25 +6,50 @@ subscribe to quotes, and disconnect.
 
 from typing import List, Optional, Sequence, Dict, Any
 
+FUTU_AVAILABLE = False
+
 try:
-    from futu import (
-        OpenQuoteContext,
-        OpenTradeContext,
-        TrdEnv,
-        TrdSide,
-        OrderType,
-        SubType,
-        RET_OK,
-    )
-except ImportError:
-    # Dummy fallback types for type checking if futu is not installed.
-    OpenQuoteContext = object  # type: ignore
-    OpenTradeContext = object  # type: ignore
-    TrdEnv = object  # type: ignore
-    TrdSide = object  # type: ignore
-    OrderType = object  # type: ignore
-    SubType = object  # type: ignore
-    RET_OK = 0
+    import futu  # type: ignore
+    from futu import OpenQuoteContext, RET_OK  # type: ignore
+
+    # Choose an available trade context and alias it
+    TradeContext = None  # type: ignore
+    try:
+        from futu import OpenUSTradeContext as TradeContext  # type: ignore
+    except Exception:
+        try:
+            from futu import OpenSecTradeContext as TradeContext  # type: ignore
+        except Exception:
+            try:
+                from futu import OpenTradeContext as TradeContext  # legacy, if present
+            except Exception:
+                TradeContext = None  # will error later if still None
+
+    # Constants (top-level or under common.constant)
+    try:
+        from futu import TrdEnv, TrdSide, OrderType, SubType  # type: ignore
+    except Exception:
+        from futu.common.constant import TrdEnv, TrdSide, OrderType, SubType  # type: ignore
+
+    FUTU_AVAILABLE = True
+except Exception:
+    class _DummyTrdEnv:
+        SIMULATE = "SIMULATE"
+        REAL = "REAL"
+    class _DummyCtx:
+        def __init__(self, *a, **kw):
+            raise RuntimeError(
+                "futu-api is not installed or failed to import. "
+                "Use Python 3.10/3.11 and `pip install futu-api`."
+            )
+    OpenQuoteContext = _DummyCtx           # type: ignore
+    TradeContext = _DummyCtx               # type: ignore
+    TrdEnv = _DummyTrdEnv                  # type: ignore
+    class TrdSide: BUY="BUY"; SELL="SELL"  # type: ignore
+    class OrderType: NORMAL="NORMAL"       # type: ignore
+    class SubType: QUOTE="QUOTE"           # type: ignore
+    RET_OK = 0                             # type: ignore
+
 
 class MoomooClient:
     """Wrapper around the Futu OpenAPI for trading stocks via moomoo."""
@@ -49,8 +74,8 @@ class MoomooClient:
         else:
             self.env = env or TrdEnv.SIMULATE
 
-        self.quote_ctx: Optional[OpenQuoteContext] = None
-        self.trade_ctx: Optional[OpenTradeContext] = None
+        self.quote_ctx: Optional[OpenQuoteContext] = None # type: ignore
+        self.trade_ctx: Optional[TradeContext] = None  # type: ignore
         self.connected: bool = False
         self.account_id: Optional[int] = None
 
@@ -59,8 +84,8 @@ class MoomooClient:
         if self.connected:
             return
         try:
-            self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
-            self.trade_ctx = OpenTradeContext(host=self.host, port=self.port)
+            self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port) # type: ignore
+            self.trade_ctx = TradeContext(host=self.host, port=self.port)  # type: ignore
         except Exception as exc:
             raise RuntimeError(f"Failed to connect to OpenD: {exc}") from exc
         self.connected = True
@@ -134,7 +159,7 @@ class MoomooClient:
             return {}
         raise RuntimeError(f"Order placement failed: {data}")
 
-    def subscribe_quotes(self, tickers: Sequence[str], sub_types: Optional[Sequence[SubType]] = None) -> None:
+    def subscribe_quotes(self, tickers: Sequence[str], sub_types: Optional[Sequence[SubType]] = None) -> None: # type: ignore
         """Subscribe to real-time quotes for given tickers.
 
         Args:
@@ -149,7 +174,7 @@ class MoomooClient:
         if ret != RET_OK:
             raise RuntimeError("Failed to subscribe to quotes")
 
-    def unsubscribe_quotes(self, tickers: Sequence[str], sub_types: Optional[Sequence[SubType]] = None) -> None:
+    def unsubscribe_quotes(self, tickers: Sequence[str], sub_types: Optional[Sequence[SubType]] = None) -> None: # type: ignore
         """Unsubscribe from quotes.
 
         Args:

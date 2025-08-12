@@ -6,8 +6,17 @@ and placing orders. It should interact with the OpenD session and Futu API.
 
 Note: Implementation details depend on the moomoo/futu OpenAPI Python SDK.
 """
-
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from core.futu_client import (
+    FUTU_AVAILABLE,
+    TradeContext,
+    OpenQuoteContext,
+    TrdEnv,
+    TrdSide,
+    OrderType,
+    SubType,
+    RET_OK,
+)
 
 class MoomooClient:
     def __init__(self, host: str, port: int) -> None:
@@ -23,7 +32,9 @@ class MoomooClient:
         self.connected: bool = False
         # Placeholder for the futu OpenAPI trading context
         self.trading_ctx = None
-
+        if not FUTU_AVAILABLE:
+            raise RuntimeError("futu-api not available. Install on Python 3.10/3.11 via `pip install futu-api`.")
+        self.env = TrdEnv.SIMULATE
     def connect(self) -> None:
         """
         Connect to the OpenD gateway and initialize the trading context.
@@ -32,7 +43,14 @@ class MoomooClient:
         """
         # TODO: Create trading context using futu API
         # For example: self.trading_ctx = OpenSecTradeContext(host=self.host, port=self.port)
-        # You may also need to login with API key or credentials.
+        # may also need to login with API key or credentials.
+        if self.connected:
+            return
+        if TradeContext is None:
+            raise RuntimeError(
+                "Trade context class not found in futu (USTrade/SecTrade)."
+            )
+        self.trading_ctx = TradeContext(host=self.host, port=self.port)
         self.connected = True
 
     def list_accounts(self) -> List[str]:
