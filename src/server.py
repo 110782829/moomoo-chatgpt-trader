@@ -6,8 +6,25 @@ import os
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 
-# NEW: CORS so a web UI can call this API
 from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    from core.storage import (
+        init_db,
+        insert_strategy,
+        set_strategy_active,
+        get_strategy,
+        list_strategies,
+        list_runs,
+    )
+    from core.scheduler import TraderScheduler
+    from strategies.ma_crossover import step as ma_crossover_step
+    _AUTOMATION_AVAILABLE = True
+except Exception as _e:
+    _AUTOMATION_AVAILABLE = False
+    _AUTOMATION_IMPORT_ERR = _e
+    TraderScheduler = None  # type: ignore[misc]
+
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
 
@@ -22,6 +39,9 @@ app.add_middleware(
 
 # Global client instance; created on /connect
 client: Optional[MoomooClient] = None
+
+# NEW: Scheduler instance (started on app startup if automation modules are available)
+scheduler = None  # will hold TraderScheduler
 
 
 # ---------- Request Models ----------
@@ -52,11 +72,43 @@ class CancelOrderRequest(BaseModel):
 class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
 
+# NEW: MA crossover start payload
+class StartMACrossoverRequest(BaseModel):
+    symbol: str              # e.g., "US.AAPL"
+    fast: int = 20
+    slow: int = 50
+    ktype: str = "K_1M"      # bar timeframe; entitlement-dependent
+    qty: float = 1
+    interval_sec: int = 15
+    allow_real: bool = False
+
 
 # ---------- Helpers ----------
 
 def _env_from_str(name: str):
     return TrdEnv.SIMULATE if name.upper() == "SIMULATE" else TrdEnv.REAL
+
+
+# ---------- App lifecycle (automation) ----------
+
+@app.on_event("startup")
+async def _on_startup():
+    # Start scheduler if automation modules are importable
+    global scheduler
+    if _AUTOMATION_AVAILABLE:
+        init_db()
+        scheduler = TraderScheduler(lambda: client)  # type: ignore[call-arg]
+        scheduler.register("ma_crossover", ma_crossover_step)
+        scheduler.start()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    # Stop scheduler gracefully
+    global scheduler
+    if scheduler:
+        await scheduler.stop()
+        scheduler = None
 
 
 # ---------- Routes ----------
@@ -280,6 +332,85 @@ def quotes_latest(symbol: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get quote: {e}")
+
+
+# ---------- Automation: Strategies ----------
+
+@app.post("/automation/start/ma-crossover")
+def automation_start_ma(req: StartMACrossoverRequest):
+    """
+    Start an MA crossover strategy instance (persisted in SQLite; picked up by scheduler).
+    """
+    global client, scheduler
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Automation modules not available: {_AUTOMATION_IMPORT_ERR}",
+        )
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    if scheduler is None:
+        raise HTTPException(status_code=500, detail="Scheduler not available")
+    if req.slow <= req.fast:
+        raise HTTPException(status_code=400, detail="slow must be > fast")
+
+    params = {
+        "fast": int(req.fast),
+        "slow": int(req.slow),
+        "ktype": req.ktype,
+        "qty": float(req.qty),
+        "allow_real": bool(req.allow_real),
+    }
+    sid = insert_strategy("ma_crossover", req.symbol.strip(), params, int(req.interval_sec))
+    return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
+
+
+@app.post("/automation/stop/{strategy_id}")
+def automation_stop(strategy_id: int):
+    """
+    Stop a strategy (set active=0). The job remains stored; can re-activate later.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    if not get_strategy(strategy_id):
+        raise HTTPException(status_code=404, detail="strategy not found")
+    set_strategy_active(strategy_id, False)
+    return {"status": "ok", "strategy_id": strategy_id, "active": False}
+
+
+@app.post("/automation/start/{strategy_id}")
+def automation_reactivate(strategy_id: int):
+    """
+    Reactivate a previously stored strategy.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    if not get_strategy(strategy_id):
+        raise HTTPException(status_code=404, detail="strategy not found")
+    set_strategy_active(strategy_id, True)
+    return {"status": "ok", "strategy_id": strategy_id, "active": True}
+
+
+@app.get("/automation/strategies")
+def automation_list():
+    """
+    List all stored strategies with params and active flags.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    return list_strategies()
+
+
+@app.get("/automation/strategies/{strategy_id}/runs")
+def automation_runs(strategy_id: int, limit: int = 50):
+    """
+    Recent run records for a strategy.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    if not get_strategy(strategy_id):
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return list_runs(strategy_id, limit=limit)
 
 
 @app.post("/disconnect")

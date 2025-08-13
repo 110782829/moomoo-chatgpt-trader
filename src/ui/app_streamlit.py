@@ -86,3 +86,53 @@ def main():
 
 if __name__ == "__main__":
     main()
+# --- Automation: MA Crossover ---
+import json
+
+st.header("Automation — MA Crossover")
+with st.expander("Start MA Crossover Strategy", expanded=False):
+    s_symbol = st.text_input("Symbol", "US.AAPL", key="ma_symbol")
+    s_fast = st.number_input("Fast MA", value=20, min_value=1, step=1, key="ma_fast")
+    s_slow = st.number_input("Slow MA", value=50, min_value=2, step=1, key="ma_slow")
+    s_ktype = st.text_input("KType (bar timeframe)", "K_1M", key="ma_ktype")
+    s_qty = st.number_input("Qty", value=1.0, min_value=0.0, step=1.0, key="ma_qty")
+    s_interval = st.number_input("Interval (sec)", value=15, min_value=1, step=1, key="ma_interval")
+    s_allow_real = st.checkbox("Allow Real Trading", value=False, key="ma_allow_real")
+    if st.button("Start Strategy", key="btn_start_ma"):
+        payload = {
+            "symbol": s_symbol,
+            "fast": int(s_fast),
+            "slow": int(s_slow),
+            "ktype": s_ktype,
+            "qty": float(s_qty),
+            "interval_sec": int(s_interval),
+            "allow_real": bool(s_allow_real),
+        }
+        r = requests.post(f"{API_BASE}/automation/start/ma-crossover", json=payload)
+        st.write(r.status_code, r.json())
+
+with st.expander("Manage Strategies", expanded=False):
+    if st.button("List Strategies", key="btn_list_strat"):
+        r = requests.get(f"{API_BASE}/automation/strategies")
+        st.session_state["strategies"] = r.json() if r.ok else []
+        st.write(r.status_code)
+    st.json(st.session_state.get("strategies", []))
+
+    strat_id = st.text_input("Strategy ID", "", key="strat_id")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Start", key="btn_start_id"):
+            if strat_id.strip():
+                r = requests.post(f"{API_BASE}/automation/start/{int(strat_id)}")
+                st.write(r.status_code, r.json())
+    with c2:
+        if st.button("Stop", key="btn_stop_id"):
+            if strat_id.strip():
+                r = requests.post(f"{API_BASE}/automation/stop/{int(strat_id)}")
+                st.write(r.status_code, r.json())
+    with c3:
+        if st.button("Recent Runs", key="btn_runs"):
+            if strat_id.strip():
+                r = requests.get(f"{API_BASE}/automation/strategies/{int(strat_id)}/runs?limit=20")
+                st.write(r.status_code)
+                st.json(r.json())

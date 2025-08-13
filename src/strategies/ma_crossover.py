@@ -8,84 +8,84 @@ signals a sell. Orders are returned as simple dictionaries that can later be
 translated into broker-specific order requests.
 """
 
-from typing import Any, List, Dict
+# Moving-Average Crossover strategy step.
+# Buys on fast>slow cross, sells on fast<slow cross. Skips if bars unavailable.
 
-from .base import StrategyBase
+from typing import Dict, Any, List
+from core.moomoo_client import MoomooClient, TrdEnv
+from core.storage import insert_run
 
-class MACrossoverStrategy(StrategyBase):
-    """
-    Simple moving average crossover strategy.
-    """
+def _normalize(symbol: str) -> str:
+    return symbol if "." in symbol else f"US.{symbol.upper()}"
 
-    def __init__(self, config: Any) -> None:
-        super().__init__(config)
-        # Store historical prices for SMA calculations
-        self.prices: List[float] = []
-        # Track whether we are currently in a long position
-        self.in_position: bool = False
+def _get_bars(client: MoomooClient, symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
+    if not client.quote_ctx:
+        raise RuntimeError("Quote context not available")
+    code = _normalize(symbol)
+    tried = [
+        {"code": code, "ktype": ktype, "max_count": n},
+        {"code": code, "ktype": ktype, "num": n},
+        {"codes": [code], "ktype": ktype, "max_count": n},
+    ]
+    last_err = None
+    for kwargs in tried:
+        try:
+            ret, df = client.quote_ctx.get_cur_kline(**kwargs)  # type: ignore[arg-type]
+            if ret != 0:
+                raise RuntimeError(f"get_cur_kline failed: {df}")
+            from core.moomoo_client import _df_to_records
+            recs = _df_to_records(df)
+            return recs[-n:] if isinstance(recs, list) else []
+        except TypeError as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"get_cur_kline incompatible with this futu build: {last_err}")
 
-    def on_bar(self, price: float) -> None:
-        """
-        Process the latest price data point.
+def _sma(vals: List[float]) -> float:
+    return sum(vals) / len(vals) if vals else 0.0
 
-        Args:
-            price (float): Latest closing price.
-        """
-        self.prices.append(price)
-        # Limit stored prices to the maximum window needed
-        max_window = max(self.config.get("fast_window", 5), self.config.get("slow_window", 20))
-        if len(self.prices) > max_window:
-            self.prices.pop(0)
+def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, Any]) -> None:
+    fast = int(params.get("fast", 20))
+    slow = int(params.get("slow", 50))
+    ktype = str(params.get("ktype", "K_1M"))
+    qty = float(params.get("qty", 1))
+    allow_real = bool(params.get("allow_real", False))
 
-    def _sma(self, window: int) -> float:
-        """
-        Calculate the simple moving average for the given window.
+    if slow <= fast:
+        insert_run(strategy_id, "ERROR", f"Invalid params: slow({slow}) must be > fast({fast})")
+        return
 
-        Args:
-            window (int): Number of periods for the SMA.
+    try:
+        if not client.account_id:
+            insert_run(strategy_id, "SKIP", "No account selected")
+            return
+        if client.env != TrdEnv.SIMULATE and not allow_real:
+            insert_run(strategy_id, "SKIP", "Real trading disabled (allow_real=False)")
+            return
 
-        Returns:
-            float: Calculated SMA value, or 0.0 if insufficient data.
-        """
-        if len(self.prices) < window:
-            return 0.0
-        return sum(self.prices[-window:]) / window
+        bars = _get_bars(client, symbol, ktype, slow + 1)
+        closes = [float(b.get("close", 0) or 0) for b in bars if float(b.get("close", 0) or 0) > 0]
+        if len(closes) < slow:
+            insert_run(strategy_id, "SKIP", f"Not enough bars: have {len(closes)}, need {slow}")
+            return
 
-    def generate_orders(self) -> List[Dict[str, Any]]:
-        """
-        Generate buy or sell orders based on SMA crossover signals.
+        fast_prev = _sma(closes[-(fast + 1):-1])
+        slow_prev = _sma(closes[-(slow + 1):-1])
+        fast_now = _sma(closes[-fast:])
+        slow_now = _sma(closes[-slow:])
 
-        Returns:
-            List[Dict[str, Any]]: A list of order instructions.
-        """
-        orders: List[Dict[str, Any]] = []
-        fast_window = self.config.get("fast_window", 5)
-        slow_window = self.config.get("slow_window", 20)
-        position_size = self.config.get("position_size", 1)
+        decided = None
+        if fast_prev <= slow_prev and fast_now > slow_now:
+            client.place_order(symbol=symbol, qty=qty, side="BUY", order_type="MARKET")
+            decided = f"BUY {qty} (fast {fast_now:.4f} > slow {slow_now:.4f})"
+        elif fast_prev >= slow_prev and fast_now < slow_now:
+            client.place_order(symbol=symbol, qty=qty, side="SELL", order_type="MARKET")
+            decided = f"SELL {qty} (fast {fast_now:.4f} < slow {slow_now:.4f})"
 
-        fast_ma = self._sma(fast_window)
-        slow_ma = self._sma(slow_window)
+        if decided:
+            insert_run(strategy_id, "TRADE", decided)
+        else:
+            insert_run(strategy_id, "OK", f"No cross. fast={fast_now:.4f}, slow={slow_now:.4f}")
 
-        # If insufficient data, do nothing
-        if fast_ma == 0.0 or slow_ma == 0.0:
-            return orders
-
-        # Generate signals
-        if not self.in_position and fast_ma > slow_ma:
-            # Buy signal
-            orders.append({
-                "action": "BUY",
-                "size": position_size,
-                "reason": "Fast MA crossed above slow MA"
-            })
-            self.in_position = True
-        elif self.in_position and fast_ma < slow_ma:
-            # Sell signal
-            orders.append({
-                "action": "SELL",
-                "size": position_size,
-                "reason": "Fast MA crossed below slow MA"
-            })
-            self.in_position = False
-
-        return orders
+    except Exception as e:
+        insert_run(strategy_id, "SKIP", f"Bars unavailable: {e}")
