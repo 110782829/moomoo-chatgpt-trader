@@ -1,13 +1,24 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-
 import os
 
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 
+# NEW: CORS so a web UI can call this API
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="Moomoo ChatGPT Trader API")
+
+# Enable CORS (loose for now; tighten allow_origins later)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global client instance; created on /connect
 client: Optional[MoomooClient] = None
@@ -32,6 +43,14 @@ class PlaceOrderRequest(BaseModel):
     side: str                   # "BUY" or "SELL"
     order_type: str = "MARKET"  # "MARKET" or "LIMIT"
     price: Optional[float] = None
+
+# NEW: cancel-order payload
+class CancelOrderRequest(BaseModel):
+    order_id: str
+
+# NEW: quotes subscription payload
+class SubscribeQuotesRequest(BaseModel):
+    symbols: list[str]
 
 
 # ---------- Helpers ----------
@@ -104,8 +123,12 @@ def select_account(req: SelectAccountRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to select account: {e}")
 
+
 @app.get("/accounts/active")
 def accounts_active():
+    """
+    Inspect currently selected account/env.
+    """
     global client
     if client is None or not client.connected:
         raise HTTPException(status_code=400, detail="Not connected")
@@ -114,14 +137,16 @@ def accounts_active():
         "trd_env": "SIMULATE" if getattr(client, "env", None) == TrdEnv.SIMULATE else "REAL"
     }
 
+
 @app.get("/debug/accounts_raw")
 def accounts_raw():
+    """
+    Raw passthrough of get_acc_list to help debug schema/signature differences.
+    """
     global client
     if client is None or not client.connected:
         raise HTTPException(status_code=400, detail="Not connected")
-    # Direct passthrough of whatever Futu returns, to confirm shapes
     try:
-        # try preferred signature first
         ret, df = client.trading_ctx.get_acc_list(trd_env=client.env)  # type: ignore[attr-defined]
     except TypeError:
         ret, df = client.trading_ctx.get_acc_list()  # type: ignore[attr-defined]
@@ -134,6 +159,7 @@ def accounts_raw():
     except Exception:
         pass
     return df
+
 
 @app.get("/positions")
 def get_positions():
@@ -167,6 +193,22 @@ def get_orders():
         raise HTTPException(status_code=500, detail=f"Failed to get orders: {e}")
 
 
+@app.get("/orders/{order_id}")
+def get_order(order_id: str):
+    """
+    Return a single order by ID.
+    """
+    global client
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return client.get_order(order_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get order: {e}")
+
+
 @app.post("/orders/place")
 def place_order(req: PlaceOrderRequest):
     """
@@ -188,6 +230,56 @@ def place_order(req: PlaceOrderRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to place order: {e}")
+
+
+@app.post("/orders/cancel")
+def cancel_order(req: CancelOrderRequest):
+    """
+    Cancel an order by ID.
+    """
+    global client
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return client.cancel_order(req.order_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel order: {e}")
+
+
+# ---------- Quotes ----------
+
+@app.post("/quotes/subscribe")
+def quotes_subscribe(req: SubscribeQuotesRequest):
+    """
+    Subscribe to basic quotes for one or more symbols.
+    """
+    global client
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return client.subscribe_quotes(req.symbols)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to subscribe quotes: {e}")
+
+
+@app.get("/quotes/{symbol}")
+def quotes_latest(symbol: str):
+    """
+    Get the latest quote for a symbol.
+    """
+    global client
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return client.get_quote_latest(symbol)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get quote: {e}")
 
 
 @app.post("/disconnect")
