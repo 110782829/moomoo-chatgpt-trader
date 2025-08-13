@@ -7,3 +7,5 @@ streamlit>=1.21.0
 backtrader>=1.9.76.123
 python-dotenv>=1.0.0
 futu-api>=9.3.5308
+streamlit
+requests
