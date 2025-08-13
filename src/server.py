@@ -16,6 +16,7 @@ try:
         get_strategy,
         list_strategies,
         list_runs,
+        update_strategy,   # ← added
     )
     from core.scheduler import TraderScheduler
     from strategies.ma_crossover import step as ma_crossover_step
@@ -40,7 +41,6 @@ app.add_middleware(
 # Global client instance; created on /connect
 client: Optional[MoomooClient] = None
 
-# NEW: Scheduler instance (started on app startup if automation modules are available)
 scheduler = None  # will hold TraderScheduler
 
 
@@ -64,15 +64,12 @@ class PlaceOrderRequest(BaseModel):
     order_type: str = "MARKET"  # "MARKET" or "LIMIT"
     price: Optional[float] = None
 
-# NEW: cancel-order payload
 class CancelOrderRequest(BaseModel):
     order_id: str
 
-# NEW: quotes subscription payload
 class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
 
-# NEW: MA crossover start payload
 class StartMACrossoverRequest(BaseModel):
     symbol: str              # e.g., "US.AAPL"
     fast: int = 20
@@ -81,6 +78,21 @@ class StartMACrossoverRequest(BaseModel):
     qty: float = 1
     interval_sec: int = 15
     allow_real: bool = False
+
+class UpdateStrategyRequest(BaseModel):
+    # params
+    fast: Optional[int] = None
+    slow: Optional[int] = None
+    ktype: Optional[str] = None
+    qty: Optional[float] = None
+    size_mode: Optional[str] = None          # 'shares' | 'usd'
+    dollar_size: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    allow_real: Optional[bool] = None
+    # meta
+    interval_sec: Optional[int] = None
+    active: Optional[bool] = None
 
 
 # ---------- Helpers ----------
@@ -365,6 +377,68 @@ def automation_start_ma(req: StartMACrossoverRequest):
     return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
 
 
+@app.get("/automation/strategies")
+def automation_list():
+    """
+    List all stored strategies with params and active flags.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    return list_strategies()
+
+
+@app.get("/automation/strategies/{strategy_id}")
+def automation_get(strategy_id: int):
+    """
+    Get one strategy by id.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    s = get_strategy(strategy_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return s
+
+
+@app.patch("/automation/strategies/{strategy_id}")
+def automation_update(strategy_id: int, req: UpdateStrategyRequest):
+    """
+    Update params/interval/active for a strategy.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+
+    # collect params to update (only non-None)
+    p = {}
+    for k in ["fast", "slow", "ktype", "qty", "size_mode", "dollar_size",
+              "stop_loss_pct", "take_profit_pct", "allow_real"]:
+        v = getattr(req, k)
+        if v is not None:
+            p[k] = v
+
+    updated = update_strategy(
+        strategy_id,
+        params=p if p else None,
+        interval_sec=req.interval_sec,
+        active=req.active,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return updated
+
+
+@app.get("/automation/strategies/{strategy_id}/runs")
+def automation_runs(strategy_id: int, limit: int = 50):
+    """
+    Recent run records for a strategy.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Automation modules not available")
+    if not get_strategy(strategy_id):
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return list_runs(strategy_id, limit=limit)
+
+
 @app.post("/automation/stop/{strategy_id}")
 def automation_stop(strategy_id: int):
     """
@@ -389,28 +463,6 @@ def automation_reactivate(strategy_id: int):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, True)
     return {"status": "ok", "strategy_id": strategy_id, "active": True}
-
-
-@app.get("/automation/strategies")
-def automation_list():
-    """
-    List all stored strategies with params and active flags.
-    """
-    if not _AUTOMATION_AVAILABLE:
-        raise HTTPException(status_code=500, detail="Automation modules not available")
-    return list_strategies()
-
-
-@app.get("/automation/strategies/{strategy_id}/runs")
-def automation_runs(strategy_id: int, limit: int = 50):
-    """
-    Recent run records for a strategy.
-    """
-    if not _AUTOMATION_AVAILABLE:
-        raise HTTPException(status_code=500, detail="Automation modules not available")
-    if not get_strategy(strategy_id):
-        raise HTTPException(status_code=404, detail="strategy not found")
-    return list_runs(strategy_id, limit=limit)
 
 
 @app.post("/disconnect")

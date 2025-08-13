@@ -136,3 +136,51 @@ with st.expander("Manage Strategies", expanded=False):
                 r = requests.get(f"{API_BASE}/automation/strategies/{int(strat_id)}/runs?limit=20")
                 st.write(r.status_code)
                 st.json(r.json())
+
+
+# --- Automation: Edit Strategy (MA Crossover) ---
+
+st.header("Edit Strategy")
+with st.expander("Load + Edit", expanded=False):
+    es_id = st.text_input("Strategy ID", "")
+    if st.button("Load Strategy", key="btn_load_strategy"):
+        r = requests.get(f"{API_BASE}/automation/strategies/{int(es_id)}")
+        st.session_state["edit_strategy"] = r.json() if r.ok else None
+        st.write(r.status_code)
+
+    s = st.session_state.get("edit_strategy")
+    if s:
+        s_params = s.get("params", {})
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            es_fast = st.number_input("Fast", value=int(s_params.get("fast", 20)), step=1)
+            es_ktype = st.text_input("KType", value=str(s_params.get("ktype", "K_1M")))
+            es_size_mode = st.selectbox("Size Mode", ["shares","usd"], index=0 if s_params.get("size_mode","shares")=="shares" else 1)
+        with col2:
+            es_slow = st.number_input("Slow", value=int(s_params.get("slow", 50)), step=1)
+            es_qty = st.number_input("Qty (shares)", value=float(s_params.get("qty", 1.0)), step=1.0)
+            es_dollar = st.number_input("Dollar Size", value=float(s_params.get("dollar_size", 0.0)), step=10.0)
+        with col3:
+            es_sl = st.number_input("Stop Loss %", value=float(s_params.get("stop_loss_pct", 0.0)), step=0.01, format="%.4f")
+            es_tp = st.number_input("Take Profit %", value=float(s_params.get("take_profit_pct", 0.0)), step=0.01, format="%.4f")
+            es_allow_real = st.checkbox("Allow Real", value=bool(s_params.get("allow_real", False)))
+
+        es_interval = st.number_input("Interval (sec)", value=int(s.get("interval_sec", 15)), step=1)
+        es_active = st.checkbox("Active", value=bool(s.get("active", True)))
+
+        if st.button("Save Changes", key="btn_save_strategy"):
+            payload = {
+                "fast": int(es_fast),
+                "slow": int(es_slow),
+                "ktype": es_ktype,
+                "qty": float(es_qty),
+                "size_mode": es_size_mode,
+                "dollar_size": float(es_dollar),
+                "stop_loss_pct": float(es_sl),
+                "take_profit_pct": float(es_tp),
+                "allow_real": bool(es_allow_real),
+                "interval_sec": int(es_interval),
+                "active": bool(es_active),
+            }
+            r = requests.patch(f"{API_BASE}/automation/strategies/{int(es_id)}", json=payload)
+            st.write(r.status_code, r.json())
