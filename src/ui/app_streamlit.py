@@ -218,3 +218,79 @@ with st.expander("Run Backtest", expanded=False):
         r = requests.post(f"{API_BASE}/backtest/ma-crossover", json=payload)
         st.write(r.status_code)
         st.json(r.json() if r.ok else r.text)
+
+# --- Backtest: Grid Search (new) ---
+st.header("Backtest — Grid Search")
+with st.expander("MA Grid Sweep", expanded=False):
+    gs_symbol = st.text_input("Symbol", "US.AAPL", key="gs_symbol")
+    gs_ktype = st.text_input("KType", "K_1M", key="gs_ktype")
+    colA, colB, colC = st.columns(3)
+    with colA:
+        gs_fast_min = st.number_input("fast_min", value=5, step=1)
+        gs_fast_max = st.number_input("fast_max", value=30, step=1)
+        gs_fast_step = st.number_input("fast_step", value=5, step=1)
+    with colB:
+        gs_slow_min = st.number_input("slow_min", value=40, step=1)
+        gs_slow_max = st.number_input("slow_max", value=200, step=1)
+        gs_slow_step = st.number_input("slow_step", value=10, step=1)
+    with colC:
+        gs_qty = st.number_input("Qty (shares)", value=1.0, step=1.0)
+        gs_top_n = st.number_input("Top N", value=10, step=1)
+
+    if st.button("Run Grid", key="btn_grid"):
+        payload = {
+            "symbol": gs_symbol, "ktype": gs_ktype,
+            "fast_min": int(gs_fast_min), "fast_max": int(gs_fast_max), "fast_step": int(gs_fast_step),
+            "slow_min": int(gs_slow_min), "slow_max": int(gs_slow_max), "slow_step": int(gs_slow_step),
+            "qty": float(gs_qty), "top_n": int(gs_top_n),
+        }
+        r = requests.post(f"{API_BASE}/backtest/ma-grid", json=payload)
+        st.session_state["grid_results"] = r.json() if r.ok else {"error": r.text}
+        st.write(r.status_code)
+
+    st.json(st.session_state.get("grid_results", {}))
+
+    # quick apply to loaded strategy (if any)
+    s_loaded = st.session_state.get("edit_strategy")
+    if s_loaded and "results" in st.session_state.get("grid_results", {}):
+        best = st.session_state["grid_results"]["results"][0]
+        if st.button(f"Apply best to strategy {s_loaded.get('id', '')}", key="btn_apply_best"):
+            sid = s_loaded.get("id")
+            payload = {"fast": int(best["fast"]), "slow": int(best["slow"])}
+            r = requests.patch(f"{API_BASE}/automation/strategies/{int(sid)}", json=payload)
+            st.write(r.status_code, r.json())
+
+# --- Risk Manager ---
+st.header("Risk Manager")
+with st.expander("View / Update Risk Config", expanded=False):
+    if st.button("Load Config", key="btn_risk_load"):
+        st.session_state["risk_cfg"] = requests.get(f"{API_BASE}/risk/config").json()
+    st.json(st.session_state.get("risk_cfg", {}))
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        r_enabled = st.checkbox("Enabled", value=True)
+        r_max_usd = st.number_input("Max $ per trade", value=1000.0, step=50.0)
+    with col2:
+        r_max_pos = st.number_input("Max open positions", value=5, step=1)
+        r_max_dd = st.number_input("Max daily loss ($)", value=200.0, step=10.0)
+    with col3:
+        r_start = st.text_input("Start (PT)", "06:30")
+        r_end = st.text_input("End (PT)", "13:00")
+        r_flat_min = st.number_input("Flatten before close (min)", value=5, step=1)
+
+    if st.button("Save Config", key="btn_risk_save"):
+        payload = {
+            "enabled": bool(r_enabled),
+            "max_usd_per_trade": float(r_max_usd),
+            "max_open_positions": int(r_max_pos),
+            "max_daily_loss_usd": float(r_max_dd),
+            "trading_hours_pt": {"start": r_start, "end": r_end},
+            "flatten_before_close_min": int(r_flat_min),
+        }
+        r = requests.put(f"{API_BASE}/risk/config", json=payload)
+        st.write(r.status_code, r.json())
+
+    if st.button("Risk Status", key="btn_risk_status"):
+        r = requests.get(f"{API_BASE}/risk/status")
+        st.write(r.status_code, r.json())
