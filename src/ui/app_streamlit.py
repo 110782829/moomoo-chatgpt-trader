@@ -2,25 +2,21 @@
 Streamlit UI app for controlling the trading bot.
 """
 
+import time
 import requests
 import streamlit as st
 
 API_BASE = "http://127.0.0.1:8000"
 
 def connect_backend(host, port, client_id):
-    resp = requests.post(f"{API_BASE}/connect", json={
-        "host": host,
-        "port": port,
-        "client_id": client_id
-    })
-    return resp.json()
+    return requests.post(f"{API_BASE}/connect", json={
+        "host": host, "port": port, "client_id": client_id
+    }).json()
 
 def select_account(account_id, trd_env):
-    resp = requests.post(f"{API_BASE}/accounts/select", json={
-        "account_id": account_id,
-        "trd_env": trd_env
-    })
-    return resp.json()
+    return requests.post(f"{API_BASE}/accounts/select", json={
+        "account_id": account_id, "trd_env": trd_env
+    }).json()
 
 def get_positions():
     return requests.get(f"{API_BASE}/positions").json()
@@ -30,37 +26,70 @@ def get_orders():
 
 def place_order(symbol, qty, side, order_type="MARKET"):
     return requests.post(f"{API_BASE}/orders/place", json={
-        "symbol": symbol,
-        "qty": qty,
-        "side": side,
-        "order_type": order_type
+        "symbol": symbol, "qty": qty, "side": side, "order_type": order_type
     }).json()
 
 def cancel_order(order_id):
     return requests.post(f"{API_BASE}/orders/cancel", json={"order_id": order_id}).json()
 
+def risk_get():
+    return requests.get(f"{API_BASE}/risk/config").json()
+
+def risk_status():
+    return requests.get(f"{API_BASE}/risk/status").json()
+
+def runs_for_strategy(strategy_id: int, limit: int = 25):
+    return requests.get(f"{API_BASE}/automation/strategies/{strategy_id}/runs?limit={limit}").json()
+
 def main():
     st.set_page_config(page_title="Moomoo ChatGPT Trading Bot", layout="wide")
     st.title("Moomoo ChatGPT Trading Bot")
 
-    # --- Backend Connection ---
+    # ----- Status bar -----
+    col_a, col_b, col_c = st.columns([1,1,2], gap="small")
+    with col_a:
+        try:
+            acct = requests.get(f"{API_BASE}/accounts/active", timeout=2)
+            st.metric("Account", acct.json().get("account_id") if acct.ok else "—")
+            st.caption(acct.json().get("trd_env") if acct.ok else "")
+        except Exception:
+            st.metric("Account", "—")
+    with col_b:
+        try:
+            rs = risk_status()
+            cfg = rs.get("config", {}) if isinstance(rs, dict) else {}
+            enabled = cfg.get("enabled", False)
+            st.metric("Risk", "ENABLED" if enabled else "OFF")
+            st.caption(f"max ${cfg.get('max_usd_per_trade', '—')} / trade")
+        except Exception:
+            st.metric("Risk", "—")
+    with col_c:
+        try:
+            rs = risk_status()
+            opn = rs.get("open_positions", None)
+            st.metric("Open Positions", opn if opn is not None else "—")
+            st.caption("From backend /positions")
+        except Exception:
+            st.metric("Open Positions", "—")
+
+    st.divider()
+
+    # ----- Backend Connection -----
     st.sidebar.header("Backend Connection")
     host = st.sidebar.text_input("Host", "127.0.0.1")
     port = st.sidebar.number_input("Port", value=11111)
     client_id = st.sidebar.number_input("Client ID", value=1)
-
     if st.sidebar.button("Connect to Backend"):
         st.sidebar.write(connect_backend(host, port, client_id))
 
-    # --- Account Selection ---
+    # ----- Account Selection -----
     st.sidebar.header("Account Selection")
     account_id = st.sidebar.text_input("Account ID", "54871")
     trd_env = st.sidebar.selectbox("Trading Env", ["SIMULATE", "REAL"])
-
     if st.sidebar.button("Select Account"):
         st.sidebar.write(select_account(account_id, trd_env))
 
-    # --- Order Placement ---
+    # ----- Place Order -----
     st.header("Place Order")
     symbol = st.text_input("Symbol", "US.AAPL")
     qty = st.number_input("Quantity", value=1)
@@ -68,25 +97,26 @@ def main():
     if st.button("Place Order"):
         st.write(place_order(symbol, qty, side))
 
-    # --- Cancel Order ---
+    # ----- Cancel Order -----
     st.header("Cancel Order")
     cancel_id = st.text_input("Order ID to Cancel")
     if st.button("Cancel Order"):
         st.write(cancel_order(cancel_id))
 
-    # --- Positions ---
+    # ----- Positions -----
     st.header("Positions")
     if st.button("Refresh Positions"):
         st.write(get_positions())
 
-    # --- Orders ---
+    # ----- Orders -----
     st.header("Orders")
     if st.button("Refresh Orders"):
         st.write(get_orders())
 
 if __name__ == "__main__":
     main()
-# --- Automation: MA Crossover ---
+
+# ----- Automation: MA Crossover -----
 import json
 
 st.header("Automation — MA Crossover")
@@ -100,13 +130,9 @@ with st.expander("Start MA Crossover Strategy", expanded=False):
     s_allow_real = st.checkbox("Allow Real Trading", value=False, key="ma_allow_real")
     if st.button("Start Strategy", key="btn_start_ma"):
         payload = {
-            "symbol": s_symbol,
-            "fast": int(s_fast),
-            "slow": int(s_slow),
-            "ktype": s_ktype,
-            "qty": float(s_qty),
-            "interval_sec": int(s_interval),
-            "allow_real": bool(s_allow_real),
+            "symbol": s_symbol, "fast": int(s_fast), "slow": int(s_slow),
+            "ktype": s_ktype, "qty": float(s_qty),
+            "interval_sec": int(s_interval), "allow_real": bool(s_allow_real),
         }
         r = requests.post(f"{API_BASE}/automation/start/ma-crossover", json=payload)
         st.write(r.status_code, r.json())
@@ -137,12 +163,10 @@ with st.expander("Manage Strategies", expanded=False):
                 st.write(r.status_code)
                 st.json(r.json())
 
-
-# --- Automation: Edit Strategy (MA Crossover) ---
-
+# ----- Edit Strategy -----
 st.header("Edit Strategy")
 with st.expander("Load + Edit", expanded=False):
-    es_id = st.text_input("Strategy ID", "")
+    es_id = st.text_input("Strategy ID", "", key="edit_strategy_id")
     if st.button("Load Strategy", key="btn_load_strategy"):
         r = requests.get(f"{API_BASE}/automation/strategies/{int(es_id)}")
         st.session_state["edit_strategy"] = r.json() if r.ok else None
@@ -170,23 +194,16 @@ with st.expander("Load + Edit", expanded=False):
 
         if st.button("Save Changes", key="btn_save_strategy"):
             payload = {
-                "fast": int(es_fast),
-                "slow": int(es_slow),
-                "ktype": es_ktype,
-                "qty": float(es_qty),
-                "size_mode": es_size_mode,
-                "dollar_size": float(es_dollar),
-                "stop_loss_pct": float(es_sl),
-                "take_profit_pct": float(es_tp),
+                "fast": int(es_fast), "slow": int(es_slow), "ktype": es_ktype,
+                "qty": float(es_qty), "size_mode": es_size_mode, "dollar_size": float(es_dollar),
+                "stop_loss_pct": float(es_sl), "take_profit_pct": float(es_tp),
                 "allow_real": bool(es_allow_real),
-                "interval_sec": int(es_interval),
-                "active": bool(es_active),
+                "interval_sec": int(es_interval), "active": bool(es_active),
             }
             r = requests.patch(f"{API_BASE}/automation/strategies/{int(es_id)}", json=payload)
             st.write(r.status_code, r.json())
 
-
-# --- Backtest: MA Crossover ---
+# ----- Backtest: MA -----
 st.header("Backtest — MA Crossover")
 with st.expander("Run Backtest", expanded=False):
     bt_symbol = st.text_input("Symbol", "US.AAPL", key="bt_symbol")
@@ -200,26 +217,18 @@ with st.expander("Run Backtest", expanded=False):
     bt_tp = st.number_input("Take Profit %", value=0.0, step=0.01, format="%.4f", key="bt_tp")
     bt_comm = st.number_input("Commission / share", value=0.0, step=0.001, format="%.4f", key="bt_comm")
     bt_slip = st.number_input("Slippage (bps)", value=0.0, step=1.0, key="bt_slip")
-
     if st.button("Run Backtest", key="btn_bt_run"):
         payload = {
-            "symbol": bt_symbol,
-            "fast": int(bt_fast),
-            "slow": int(bt_slow),
-            "ktype": bt_ktype,
-            "qty": float(bt_qty),
-            "size_mode": bt_mode,
-            "dollar_size": float(bt_dol),
-            "stop_loss_pct": float(bt_sl),
-            "take_profit_pct": float(bt_tp),
-            "commission_per_share": float(bt_comm),
+            "symbol": bt_symbol, "fast": int(bt_fast), "slow": int(bt_slow),
+            "ktype": bt_ktype, "qty": float(bt_qty), "size_mode": bt_mode,
+            "dollar_size": float(bt_dol), "stop_loss_pct": float(bt_sl),
+            "take_profit_pct": float(bt_tp), "commission_per_share": float(bt_comm),
             "slippage_bps": float(bt_slip),
         }
         r = requests.post(f"{API_BASE}/backtest/ma-crossover", json=payload)
-        st.write(r.status_code)
-        st.json(r.json() if r.ok else r.text)
+        st.write(r.status_code); st.json(r.json() if r.ok else r.text)
 
-# --- Backtest: Grid Search (new) ---
+# ----- Backtest: Grid -----
 st.header("Backtest — Grid Search")
 with st.expander("MA Grid Sweep", expanded=False):
     gs_symbol = st.text_input("Symbol", "US.AAPL", key="gs_symbol")
@@ -247,24 +256,13 @@ with st.expander("MA Grid Sweep", expanded=False):
         r = requests.post(f"{API_BASE}/backtest/ma-grid", json=payload)
         st.session_state["grid_results"] = r.json() if r.ok else {"error": r.text}
         st.write(r.status_code)
-
     st.json(st.session_state.get("grid_results", {}))
 
-    # quick apply to loaded strategy (if any)
-    s_loaded = st.session_state.get("edit_strategy")
-    if s_loaded and "results" in st.session_state.get("grid_results", {}):
-        best = st.session_state["grid_results"]["results"][0]
-        if st.button(f"Apply best to strategy {s_loaded.get('id', '')}", key="btn_apply_best"):
-            sid = s_loaded.get("id")
-            payload = {"fast": int(best["fast"]), "slow": int(best["slow"])}
-            r = requests.patch(f"{API_BASE}/automation/strategies/{int(sid)}", json=payload)
-            st.write(r.status_code, r.json())
-
-# --- Risk Manager ---
+# ----- Risk Manager -----
 st.header("Risk Manager")
 with st.expander("View / Update Risk Config", expanded=False):
     if st.button("Load Config", key="btn_risk_load"):
-        st.session_state["risk_cfg"] = requests.get(f"{API_BASE}/risk/config").json()
+        st.session_state["risk_cfg"] = risk_get()
     st.json(st.session_state.get("risk_cfg", {}))
 
     col1, col2, col3 = st.columns(3)
@@ -278,7 +276,6 @@ with st.expander("View / Update Risk Config", expanded=False):
         r_start = st.text_input("Start (PT)", "06:30")
         r_end = st.text_input("End (PT)", "13:00")
         r_flat_min = st.number_input("Flatten before close (min)", value=5, step=1)
-
     if st.button("Save Config", key="btn_risk_save"):
         payload = {
             "enabled": bool(r_enabled),
@@ -291,6 +288,11 @@ with st.expander("View / Update Risk Config", expanded=False):
         r = requests.put(f"{API_BASE}/risk/config", json=payload)
         st.write(r.status_code, r.json())
 
-    if st.button("Risk Status", key="btn_risk_status"):
-        r = requests.get(f"{API_BASE}/risk/status")
-        st.write(r.status_code, r.json())
+# ----- Live Runs (quick monitor) -----
+st.header("Live Runs")
+with st.expander("Watch strategy logs", expanded=False):
+    mon_id = st.text_input("Strategy ID", "", key="monitor_strategy_id")
+    mon_limit = st.number_input("Rows", value=25, step=5)
+    if st.button("Refresh Logs", key="btn_refresh_runs") and mon_id.strip():
+        r = runs_for_strategy(int(mon_id), int(mon_limit))
+        st.json(r)
