@@ -1,48 +1,10 @@
-"""
-Storage utilities for the trading bot.
-
-This module encapsulates database interactions using SQLModel. It provides a
-simple interface to create the database engine and obtain sessions for
-executing queries and persisting models.
-"""
-
-from sqlmodel import SQLModel, create_engine, Session
-from typing import Generator
-
-class Storage:
-    """
-    Storage handles database connections and session management.
-    """
-
-    def __init__(self, db_url: str = "sqlite:///data/trading.db") -> None:
-        """
-        Initialize the storage backend.
-
-        Args:
-            db_url (str): Database URL. Defaults to a SQLite file in the data directory.
-        """
-        # Create the engine. The `echo` flag can be toggled for SQL debugging.
-        self.engine = create_engine(db_url, echo=False)
-        # Create all tables defined in models
-        SQLModel.metadata.create_all(self.engine)
-
-    def get_session(self) -> Generator[Session, None, None]:
-        """
-        Provide a context-managed session for database operations.
-
-        Yields:
-            Session: A SQLModel Session instance.
-        """
-        with Session(self.engine) as session:
-            yield session
-
 # SQLite-backed storage for strategies and run logs.
 
 import json
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 DB_PATH = Path(os.getenv("TRADER_DB", "data/trader.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -138,3 +100,43 @@ def list_runs(strategy_id: int, limit: int = 50) -> List[Dict[str, Any]]:
             (strategy_id, limit),
         )
         return [dict(r) for r in cur.fetchall()]
+
+def update_strategy(
+    strategy_id: int,
+    params: Optional[Dict[str, Any]] = None,
+    interval_sec: Optional[int] = None,
+    active: Optional[bool] = None,
+) -> Optional[Dict[str, Any]]:
+    cur = get_strategy(strategy_id)
+    if not cur:
+        return None
+
+    # merge params if provided
+    new_params = cur["params"].copy()
+    if params:
+        for k, v in params.items():
+            if v is not None:
+                new_params[k] = v
+
+    sets: List[str] = []
+    vals: List[Any] = []
+
+    if params is not None:
+        sets.append("params_json=?")
+        vals.append(json.dumps(new_params))
+
+    if interval_sec is not None:
+        sets.append("interval_sec=?")
+        vals.append(int(interval_sec))
+
+    if active is not None:
+        sets.append("active=?")
+        vals.append(1 if active else 0)
+
+    if sets:
+        with _conn() as c:
+            q = f"UPDATE strategies SET {', '.join(sets)} WHERE id=?"
+            vals.append(strategy_id)
+            c.execute(q, tuple(vals))
+
+    return get_strategy(strategy_id)
