@@ -17,6 +17,14 @@ import math
 from core.moomoo_client import MoomooClient, TrdEnv
 from core.storage import insert_run
 
+# risk helpers
+from risk.limits import (
+    load_cfg,
+    market_open_now,
+    in_flatten_window,
+    check_trade_limits,
+)
+
 def _normalize(symbol: str) -> str:
     return symbol if "." in symbol else f"US.{symbol.upper()}"
 
@@ -60,6 +68,13 @@ def _current_position(client: MoomooClient, symbol: str) -> tuple[float, float]:
         pass
     return 0.0, 0.0
 
+def _open_positions_count(client: MoomooClient) -> int:
+    try:
+        poss = client.get_positions()
+        return len(poss) if isinstance(poss, list) else 0
+    except Exception:
+        return 0
+
 def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, Any]) -> None:
     # core params
     fast = int(params.get("fast", 20))
@@ -101,7 +116,19 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
         fast_now = _sma(closes[-fast:])
         slow_now = _sma(closes[-slow:])
 
+        cfg = load_cfg()
+
         pos_qty, avg_cost = _current_position(client, symbol)
+        # flatten-before-close: exit positions even if no cross
+        if pos_qty > 0 and in_flatten_window(cfg=cfg):
+            client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
+            insert_run(strategy_id, "TRADE", f"FLATTEN SELL {pos_qty} @~{last_price}")
+            return
+
+        # market-hours guard: never open new outside hours; allow exits
+        if not market_open_now(cfg=cfg) and pos_qty == 0:
+            insert_run(strategy_id, "SKIP", "Outside trading hours")
+            return
 
         # exits first (if in position)
         if pos_qty > 0:
@@ -138,6 +165,20 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
                 if trade_qty < 1:
                     insert_run(strategy_id, "SKIP", f"Size too small at last={last_price:.4f}")
                     return
+
+            # risk checks (per-trade cap, max positions, whitelist)
+            open_count = _open_positions_count(client)
+            ok, reason = check_trade_limits(
+                symbol=symbol,
+                side="BUY",
+                qty=trade_qty,
+                price=last_price,
+                open_positions_count=open_count,
+            )
+            if not ok:
+                insert_run(strategy_id, "SKIP", f"Risk blocked entry: {reason}")
+                return
+
             client.place_order(symbol=symbol, qty=trade_qty, side="BUY", order_type="MARKET")
             insert_run(strategy_id, "TRADE",
                        f"BUY {trade_qty} @~{last_price} (cross-up; fast {fast_now:.4f} > slow {slow_now:.4f})")
