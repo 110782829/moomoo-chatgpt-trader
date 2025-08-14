@@ -8,6 +8,37 @@ from core.futu_client import TrdEnv
 
 from fastapi.middleware.cors import CORSMiddleware
 
+# simple risk config persistence (local file) ---
+from pathlib import Path
+import json
+
+RISK_PATH = Path(os.getenv("RISK_FILE", "data/risk.json"))
+_DEFAULT_RISK = {
+    "enabled": True,
+    "max_usd_per_trade": 1000.0,
+    "max_open_positions": 5,
+    "max_daily_loss_usd": 200.0,
+    "symbol_whitelist": [],  # empty → allow all
+    "trading_hours_pt": {"start": "06:30", "end": "13:00"},  # US market regular hours (PT)
+    "flatten_before_close_min": 5,
+}
+
+def _risk_load() -> dict:
+    try:
+        if RISK_PATH.exists():
+            return json.loads(RISK_PATH.read_text())
+    except Exception:
+        pass
+    RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RISK_PATH.write_text(json.dumps(_DEFAULT_RISK, indent=2))
+    return dict(_DEFAULT_RISK)
+
+def _risk_save(cfg: dict) -> None:
+    RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RISK_PATH.write_text(json.dumps(cfg, indent=2))
+
+# --------------------------------------------
+
 try:
     from core.storage import (
         init_db,
@@ -32,6 +63,14 @@ try:
 except Exception as _be:
     _BACKTEST_AVAILABLE = False
     _BACKTEST_IMPORT_ERR = _be
+
+# backtest grid
+try:
+    from backtest.grid import run_ma_grid
+    _GRID_AVAILABLE = True
+except Exception as _ge:
+    _GRID_AVAILABLE = False
+    _GRID_IMPORT_ERR = _ge
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
 
@@ -113,6 +152,34 @@ class BacktestMARequest(BaseModel):
     commission_per_share: Optional[float] = 0.0
     slippage_bps: Optional[float] = 0.0
 
+# New: risk config model (partial update)
+class RiskConfig(BaseModel):
+    enabled: Optional[bool] = None
+    max_usd_per_trade: Optional[float] = None
+    max_open_positions: Optional[int] = None
+    max_daily_loss_usd: Optional[float] = None
+    symbol_whitelist: Optional[list[str]] = None
+    trading_hours_pt: Optional[dict] = None  # {"start":"06:30","end":"13:00"}
+    flatten_before_close_min: Optional[int] = None
+
+# New: backtest grid request
+class BacktestMAGridRequest(BaseModel):
+    symbol: str
+    ktype: str = "K_1M"
+    fast_min: int = 5
+    fast_max: int = 30
+    fast_step: int = 5
+    slow_min: int = 40
+    slow_max: int = 200
+    slow_step: int = 10
+    qty: float = 1.0
+    size_mode: Optional[str] = "shares"
+    dollar_size: Optional[float] = 0.0
+    stop_loss_pct: Optional[float] = 0.0
+    take_profit_pct: Optional[float] = 0.0
+    commission_per_share: Optional[float] = 0.0
+    slippage_bps: Optional[float] = 0.0
+    top_n: int = 10
 
 
 # ---------- Helpers ----------
@@ -485,6 +552,50 @@ def automation_reactivate(strategy_id: int):
     return {"status": "ok", "strategy_id": strategy_id, "active": True}
 
 
+# ---------- Risk config & status ----------
+
+@app.get("/risk/config")
+def risk_get():
+    """
+    Return current risk configuration (local file).
+    """
+    try:
+        return _risk_load()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read risk config: {e}")
+
+@app.put("/risk/config")
+def risk_put(req: RiskConfig):
+    """
+    Update risk configuration (partial update).
+    """
+    try:
+        cfg = _risk_load()
+        for k, v in req.model_dump(exclude_none=True).items():
+            cfg[k] = v
+        _risk_save(cfg)
+        return cfg
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save risk config: {e}")
+
+@app.get("/risk/status")
+def risk_status():
+    """
+    Basic runtime risk status: open positions count, config snapshot.
+    """
+    global client
+    cfg = _risk_load()
+    open_positions = None
+    try:
+        if client and client.connected:
+            pos = client.get_positions()
+            if isinstance(pos, list):
+                open_positions = len(pos)
+    except Exception:
+        pass
+    return {"ok": True, "config": cfg, "open_positions": open_positions}
+
+
 @app.post("/disconnect")
 def disconnect():
     """
@@ -500,6 +611,9 @@ def disconnect():
         pass
     client = None
     return {"status": "disconnected"}
+
+
+# ---------- Backtest: single run ----------
 
 @app.post("/backtest/ma-crossover")
 def backtest_ma(req: BacktestMARequest):
@@ -535,3 +649,36 @@ def backtest_ma(req: BacktestMARequest):
         raise HTTPException(status_code=400, detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv with columns time,open,high,low,close,volume")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest failed: {e}")
+
+
+# ---------- Backtest: parameter grid ----------
+
+@app.post("/backtest/ma-grid")
+def backtest_ma_grid(req: BacktestMAGridRequest):
+    """
+    Run an MA-crossover parameter sweep; returns top-N results by gross_pnl.
+    """
+    if not _BACKTEST_AVAILABLE:
+        raise HTTPException(status_code=500, detail=f"Backtest module not available: {_BACKTEST_IMPORT_ERR}")
+    if not _GRID_AVAILABLE:
+        raise HTTPException(status_code=500, detail=f"Backtest grid not available: {_GRID_IMPORT_ERR}")
+    try:
+        bars = load_bars_csv(req.symbol, req.ktype)
+        results = run_ma_grid(
+            bars=bars,
+            fast_min=req.fast_min, fast_max=req.fast_max, fast_step=req.fast_step,
+            slow_min=req.slow_min, slow_max=req.slow_max, slow_step=req.slow_step,
+            qty=float(req.qty),
+            size_mode=(req.size_mode or "shares"),
+            dollar_size=float(req.dollar_size or 0),
+            stop_loss_pct=float(req.stop_loss_pct or 0),
+            take_profit_pct=float(req.take_profit_pct or 0),
+            commission_per_share=float(req.commission_per_share or 0),
+            slippage_bps=float(req.slippage_bps or 0),
+            top_n=int(req.top_n),
+        )
+        return {"count": len(results), "results": results}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest grid failed: {e}")
