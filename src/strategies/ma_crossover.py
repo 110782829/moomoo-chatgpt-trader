@@ -8,9 +8,6 @@ signals a sell. Orders are returned as simple dictionaries that can later be
 translated into broker-specific order requests.
 """
 
-# Moving-Average Crossover strategy step.
-# Buys on fast>slow cross, sells on fast<slow cross. Skips if bars unavailable.
-
 from typing import Dict, Any, List, Optional
 import math
 
@@ -25,31 +22,11 @@ from risk.limits import (
     check_trade_limits,
 )
 
+# data provider (futu first, yfinance fallback)
+from core.market_data import get_bars_safely
+
 def _normalize(symbol: str) -> str:
     return symbol if "." in symbol else f"US.{symbol.upper()}"
-
-def _get_bars(client: MoomooClient, symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
-    if not client.quote_ctx:
-        raise RuntimeError("Quote context not available")
-    code = _normalize(symbol)
-    tried = [
-        {"code": code, "ktype": ktype, "max_count": n},
-        {"code": code, "ktype": ktype, "num": n},
-        {"codes": [code], "ktype": ktype, "max_count": n},
-    ]
-    last_err = None
-    for kwargs in tried:
-        try:
-            ret, df = client.quote_ctx.get_cur_kline(**kwargs)  # type: ignore[arg-type]
-            if ret != 0:
-                raise RuntimeError(f"get_cur_kline failed: {df}")
-            from core.moomoo_client import _df_to_records
-            recs = _df_to_records(df)
-            return recs[-n:] if isinstance(recs, list) else []
-        except TypeError as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"get_cur_kline incompatible with this futu build: {last_err}")
 
 def _sma(vals: List[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
@@ -83,12 +60,12 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
 
     # sizing
     qty_param = float(params.get("qty", 1))
-    size_mode = str(params.get("size_mode", "shares")).lower()  # 'shares' | 'usd'
+    size_mode = str(params.get("size_mode", "shares")).lower()
     dollar_size = float(params.get("dollar_size", 0))
 
     # risk
-    sl_pct = float(params.get("stop_loss_pct", 0))         # e.g., 0.02 = 2%
-    tp_pct = float(params.get("take_profit_pct", 0))       # e.g., 0.03 = 3%
+    sl_pct = float(params.get("stop_loss_pct", 0))
+    tp_pct = float(params.get("take_profit_pct", 0))
     allow_real = bool(params.get("allow_real", False))
 
     if slow <= fast:
@@ -103,11 +80,11 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
             insert_run(strategy_id, "SKIP", "Real trading disabled (allow_real=False)")
             return
 
-        # fetch bars; last close acts as 'last price' proxy
-        bars = _get_bars(client, symbol, ktype, slow + 1)
+        # fetch bars via unified provider (futu → yfinance fallback)
+        bars, source = get_bars_safely(client, symbol, ktype, slow + 1)
         closes = [float(b.get("close", 0) or 0) for b in bars if float(b.get("close", 0) or 0) > 0]
         if len(closes) < slow:
-            insert_run(strategy_id, "SKIP", f"Not enough bars: have {len(closes)}, need {slow}")
+            insert_run(strategy_id, "SKIP", f"Not enough bars from {source}: have {len(closes)}, need {slow}")
             return
 
         last_price = closes[-1]
@@ -122,51 +99,47 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
         # flatten-before-close: exit positions even if no cross
         if pos_qty > 0 and in_flatten_window(cfg=cfg):
             client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
-            insert_run(strategy_id, "TRADE", f"FLATTEN SELL {pos_qty} @~{last_price}")
+            insert_run(strategy_id, "TRADE", f"[{source}] FLATTEN SELL {pos_qty} @~{last_price}")
             return
 
         # market-hours guard: never open new outside hours; allow exits
         if not market_open_now(cfg=cfg) and pos_qty == 0:
-            insert_run(strategy_id, "SKIP", "Outside trading hours")
+            insert_run(strategy_id, "SKIP", f"[{source}] Outside trading hours")
             return
 
         # exits first (if in position)
         if pos_qty > 0:
             exited = False
-            # TP/SL checks
             if tp_pct > 0 and last_price >= avg_cost * (1.0 + tp_pct):
                 client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
-                insert_run(strategy_id, "TRADE", f"TP SELL {pos_qty} @~{last_price} (avg {avg_cost}, tp {tp_pct})")
+                insert_run(strategy_id, "TRADE", f"[{source}] TP SELL {pos_qty} @~{last_price} (avg {avg_cost}, tp {tp_pct})")
                 exited = True
             elif sl_pct > 0 and last_price <= avg_cost * (1.0 - sl_pct):
                 client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
-                insert_run(strategy_id, "TRADE", f"SL SELL {pos_qty} @~{last_price} (avg {avg_cost}, sl {sl_pct})")
+                insert_run(strategy_id, "TRADE", f"[{source}] SL SELL {pos_qty} @~{last_price} (avg {avg_cost}, sl {sl_pct})")
                 exited = True
 
-            # optional: cross-down exit
             if not exited and fast_prev >= slow_prev and fast_now < slow_now:
                 client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
-                insert_run(strategy_id, "TRADE", f"CROSS-DOWN SELL {pos_qty} @~{last_price}")
+                insert_run(strategy_id, "TRADE", f"[{source}] CROSS-DOWN SELL {pos_qty} @~{last_price}")
                 exited = True
 
             if exited:
                 return
             else:
                 insert_run(strategy_id, "OK",
-                           f"Holding {pos_qty}; fast={fast_now:.4f}, slow={slow_now:.4f}, last={last_price:.4f}")
+                           f"[{source}] Holding {pos_qty}; fast={fast_now:.4f}, slow={slow_now:.4f}, last={last_price:.4f}")
                 return
 
         # no position: look for entry (cross-up)
         if fast_prev <= slow_prev and fast_now > slow_now:
-            # size calc
             trade_qty = qty_param
             if size_mode == "usd" and dollar_size > 0 and last_price > 0:
                 trade_qty = math.floor(dollar_size / last_price)
                 if trade_qty < 1:
-                    insert_run(strategy_id, "SKIP", f"Size too small at last={last_price:.4f}")
+                    insert_run(strategy_id, "SKIP", f"[{source}] Size too small at last={last_price:.4f}")
                     return
 
-            # risk checks (per-trade cap, max positions, whitelist)
             open_count = _open_positions_count(client)
             ok, reason = check_trade_limits(
                 symbol=symbol,
@@ -176,16 +149,16 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
                 open_positions_count=open_count,
             )
             if not ok:
-                insert_run(strategy_id, "SKIP", f"Risk blocked entry: {reason}")
+                insert_run(strategy_id, "SKIP", f"[{source}] Risk blocked entry: {reason}")
                 return
 
             client.place_order(symbol=symbol, qty=trade_qty, side="BUY", order_type="MARKET")
             insert_run(strategy_id, "TRADE",
-                       f"BUY {trade_qty} @~{last_price} (cross-up; fast {fast_now:.4f} > slow {slow_now:.4f})")
+                       f"[{source}] BUY {trade_qty} @~{last_price} (fast {fast_now:.4f} > slow {slow_now:.4f})")
             return
 
         insert_run(strategy_id, "OK",
-                   f"No cross. fast={fast_now:.4f}, slow={slow_now:.4f}, last={last_price:.4f}")
+                   f"[{source}] No cross. fast={fast_now:.4f}, slow={slow_now:.4f}, last={last_price:.4f}")
 
     except Exception as e:
         insert_run(strategy_id, "SKIP", f"Bars/exec unavailable: {e}")
