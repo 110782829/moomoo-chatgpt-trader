@@ -184,3 +184,37 @@ with st.expander("Load + Edit", expanded=False):
             }
             r = requests.patch(f"{API_BASE}/automation/strategies/{int(es_id)}", json=payload)
             st.write(r.status_code, r.json())
+
+
+# --- Backtest: MA Crossover ---
+st.header("Backtest — MA Crossover")
+with st.expander("Run Backtest", expanded=False):
+    bt_symbol = st.text_input("Symbol", "US.AAPL", key="bt_symbol")
+    bt_fast = st.number_input("Fast", value=20, step=1, key="bt_fast")
+    bt_slow = st.number_input("Slow", value=50, step=1, key="bt_slow")
+    bt_ktype = st.text_input("KType", "K_1M", key="bt_ktype")
+    bt_qty = st.number_input("Qty (shares)", value=1.0, step=1.0, key="bt_qty")
+    bt_mode = st.selectbox("Size Mode", ["shares","usd"], index=0, key="bt_mode")
+    bt_dol = st.number_input("Dollar Size", value=0.0, step=10.0, key="bt_dol")
+    bt_sl = st.number_input("Stop Loss %", value=0.0, step=0.01, format="%.4f", key="bt_sl")
+    bt_tp = st.number_input("Take Profit %", value=0.0, step=0.01, format="%.4f", key="bt_tp")
+    bt_comm = st.number_input("Commission / share", value=0.0, step=0.001, format="%.4f", key="bt_comm")
+    bt_slip = st.number_input("Slippage (bps)", value=0.0, step=1.0, key="bt_slip")
+
+    if st.button("Run Backtest", key="btn_bt_run"):
+        payload = {
+            "symbol": bt_symbol,
+            "fast": int(bt_fast),
+            "slow": int(bt_slow),
+            "ktype": bt_ktype,
+            "qty": float(bt_qty),
+            "size_mode": bt_mode,
+            "dollar_size": float(bt_dol),
+            "stop_loss_pct": float(bt_sl),
+            "take_profit_pct": float(bt_tp),
+            "commission_per_share": float(bt_comm),
+            "slippage_bps": float(bt_slip),
+        }
+        r = requests.post(f"{API_BASE}/backtest/ma-crossover", json=payload)
+        st.write(r.status_code)
+        st.json(r.json() if r.ok else r.text)

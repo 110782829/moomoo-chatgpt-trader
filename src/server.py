@@ -26,6 +26,12 @@ except Exception as _e:
     _AUTOMATION_IMPORT_ERR = _e
     TraderScheduler = None  # type: ignore[misc]
 
+try:
+    from backtest.engine import load_bars_csv, run_ma_crossover
+    _BACKTEST_AVAILABLE = True
+except Exception as _be:
+    _BACKTEST_AVAILABLE = False
+    _BACKTEST_IMPORT_ERR = _be
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
 
@@ -93,6 +99,20 @@ class UpdateStrategyRequest(BaseModel):
     # meta
     interval_sec: Optional[int] = None
     active: Optional[bool] = None
+
+class BacktestMARequest(BaseModel):
+    symbol: str
+    fast: int = 20
+    slow: int = 50
+    ktype: str = "K_1M"
+    qty: float = 1.0
+    size_mode: Optional[str] = "shares"   # 'shares' | 'usd'
+    dollar_size: Optional[float] = 0.0
+    stop_loss_pct: Optional[float] = 0.0
+    take_profit_pct: Optional[float] = 0.0
+    commission_per_share: Optional[float] = 0.0
+    slippage_bps: Optional[float] = 0.0
+
 
 
 # ---------- Helpers ----------
@@ -480,3 +500,38 @@ def disconnect():
         pass
     client = None
     return {"status": "disconnected"}
+
+@app.post("/backtest/ma-crossover")
+def backtest_ma(req: BacktestMARequest):
+    """
+    Run a local MA-crossover backtest using CSV bars in data/bars/{SYMBOL}_{KTYPE}.csv.
+    Returns metrics and the first 20 trades.
+    """
+    if not _BACKTEST_AVAILABLE:
+        raise HTTPException(status_code=500, detail=f"Backtest module not available: {_BACKTEST_IMPORT_ERR}")
+    if req.slow <= req.fast:
+        raise HTTPException(status_code=400, detail="slow must be > fast")
+    try:
+        bars = load_bars_csv(req.symbol, req.ktype)
+        res = run_ma_crossover(
+            bars=bars,
+            fast=int(req.fast),
+            slow=int(req.slow),
+            qty=float(req.qty),
+            size_mode=(req.size_mode or "shares"),
+            dollar_size=float(req.dollar_size or 0),
+            stop_loss_pct=float(req.stop_loss_pct or 0),
+            take_profit_pct=float(req.take_profit_pct or 0),
+            commission_per_share=float(req.commission_per_share or 0),
+            slippage_bps=float(req.slippage_bps or 0),
+        )
+        # keep the response small
+        trades = [{
+            "entry_ts": t.entry_ts, "exit_ts": t.exit_ts, "side": t.side,
+            "entry_px": t.entry_px, "exit_px": t.exit_px, "qty": t.qty, "pnl": t.pnl
+        } for t in res.trades[:20]]
+        return {"metrics": res.metrics, "trades_sample": trades}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv with columns time,open,high,low,close,volume")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {e}")
