@@ -20,6 +20,7 @@ from risk.limits import (
     market_open_now,
     in_flatten_window,
     check_trade_limits,
+    market_ok_to_trade,
 )
 
 # data provider (futu first, yfinance fallback)
@@ -103,8 +104,9 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
             return
 
         # market-hours guard: never open new outside hours; allow exits
-        if not market_open_now(cfg=cfg) and pos_qty == 0:
-            insert_run(strategy_id, "SKIP", f"[{source}] Outside trading hours")
+        ok_mkt, mkt_reason = market_ok_to_trade(cfg=cfg)
+        if not ok_mkt and pos_qty == 0:
+            insert_run(strategy_id, "SKIP", mkt_reason)
             return
 
         # exits first (if in position)

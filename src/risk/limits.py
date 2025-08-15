@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, json
 from pathlib import Path
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Tuple, Optional, Dict, Any, List
 
@@ -59,6 +59,41 @@ def symbol_allowed(symbol: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
     sym = symbol.split(".")[-1].upper()
     wl_norm = [s.split(".")[-1].upper() for s in wl]
     return sym in wl_norm
+
+def _is_us_holiday(d: date) -> bool:
+    """
+    Lightweight holiday check:
+    - Always skip weekends.
+    - If python-holidays is available and env US_HOLIDAYS!=0, use it.
+    - Otherwise only weekend filter is applied.
+    """
+    if d.weekday() >= 5:  # 5=Sat, 6=Sun
+        return True
+    use_holidays = os.getenv("US_HOLIDAYS", "1") != "0"
+    if use_holidays:
+        try:
+            import holidays  # type: ignore
+            us = holidays.UnitedStates()  # NYSE holidays close enough for dev
+            return d in us
+        except Exception:
+            return False
+    return False
+
+def is_trading_day_now(now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now(_PT)
+    return not _is_us_holiday(now.date())
+
+def market_ok_to_trade(cfg: Optional[Dict[str, Any]] = None, now: Optional[datetime] = None) -> Tuple[bool, str]:
+    """
+    Combined trading-day + hours gate.
+    """
+    cfg = cfg or load_cfg()
+    now = now or datetime.now(_PT)
+    if not is_trading_day_now(now):
+        return False, "Market closed today (weekend/holiday)"
+    if not market_open_now(cfg=cfg, now=now):
+        return False, "Outside trading hours"
+    return True, "ok"
 
 def check_trade_limits(
     symbol: str,

@@ -228,6 +228,66 @@ with st.expander("Run Backtest", expanded=False):
         r = requests.post(f"{API_BASE}/backtest/ma-crossover", json=payload)
         st.write(r.status_code); st.json(r.json() if r.ok else r.text)
 
+# ----- Chart: Price + MAs (yfinance) -----
+st.header("Chart — Price & MAs (yfinance)")
+with st.expander("Preview recent bars and MAs", expanded=False):
+    ch_symbol = st.text_input("Symbol", "AAPL", key="ch_sym")  # yfinance wants bare ticker
+    ch_interval = st.selectbox("Interval", ["1m","5m","15m","30m","60m","1d"], index=1, key="ch_int")
+    ch_fast = st.number_input("Fast MA", value=20, step=1, key="ch_fast")
+    ch_slow = st.number_input("Slow MA", value=50, step=1, key="ch_slow")
+    ch_rows = st.number_input("Rows", value=400, step=50, key="ch_rows")
+
+    if st.button("Load Chart", key="btn_load_chart"):
+        try:
+            import pandas as pd
+            import yfinance as yf
+
+            period = "7d" if ch_interval.endswith("m") else "60d"
+            df = yf.download(
+                tickers=ch_symbol,
+                period=period,
+                interval=ch_interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                group_by="column",   # prefer single-level columns
+            )
+            if df is None or df.empty:
+                st.warning("No data from yfinance.")
+            else:
+                # --- normalize 'Close' to a 1-D Series, even if df has MultiIndex columns ---
+                def _extract_close(_df: pd.DataFrame) -> pd.Series:
+                    cols = _df.columns
+                    if isinstance(cols, pd.MultiIndex):
+                        # Try to locate any column whose tuple contains 'Close'
+                        for col in cols:
+                            parts = col if isinstance(col, tuple) else (col,)
+                            if any(str(p).lower() == "close" for p in parts):
+                                s = _df[col]
+                                # If that slice is a DataFrame (e.g., multiple tickers), take the first series
+                                return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
+                        raise KeyError("Close column not found in MultiIndex dataframe.")
+                    # Single-level columns
+                    if "Close" not in _df.columns:
+                        raise KeyError("Close column not found.")
+                    return _df["Close"]
+
+                close = _extract_close(df)
+                # Keep only the last N rows user asked for
+                close = close.tail(int(ch_rows)).copy()
+
+                fast = close.rolling(int(ch_fast)).mean()
+                slow = close.rolling(int(ch_slow)).mean()
+
+                chart_df = pd.DataFrame({
+                    "Close": close,
+                    "fast": fast,
+                    "slow": slow,
+                })
+                st.line_chart(chart_df)
+        except Exception as e:
+            st.error(f"Chart error: {e}. Try `pip install yfinance` in your venv.")
+
 # ----- Backtest: Grid -----
 st.header("Backtest — Grid Search")
 with st.expander("MA Grid Sweep", expanded=False):
