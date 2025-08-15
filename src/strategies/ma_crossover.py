@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 import math
 
 from core.moomoo_client import MoomooClient, TrdEnv
-from core.storage import insert_run
+from core.storage import insert_run, pnl_today   # ← added
 
 # risk helpers
 from risk.limits import (
@@ -81,6 +81,23 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
             insert_run(strategy_id, "SKIP", "Real trading disabled (allow_real=False)")
             return
 
+        # daily loss guard (based on realized PnL from fills)
+        cfg = load_cfg()
+        try:
+            loss_cap = float(cfg.get("max_daily_loss_usd", 0) or 0)
+        except Exception:
+            loss_cap = 0.0
+        if loss_cap > 0:
+            today = pnl_today().get("realized_pnl", 0.0)
+            if float(today) <= -abs(loss_cap):
+                # optional: flatten if holding
+                pos_qty, _ = _current_position(client, symbol)
+                if pos_qty > 0:
+                    client.place_order(symbol=symbol, qty=pos_qty, side="SELL", order_type="MARKET")
+                    insert_run(strategy_id, "TRADE", f"[PnL] Loss cap hit; FLATTEN {pos_qty}")
+                insert_run(strategy_id, "SKIP", f"[PnL] Daily loss limit reached (today={today}, cap={loss_cap})")
+                return
+
         # fetch bars via unified provider (futu → yfinance fallback)
         bars, source = get_bars_safely(client, symbol, ktype, slow + 1)
         closes = [float(b.get("close", 0) or 0) for b in bars if float(b.get("close", 0) or 0) > 0]
@@ -93,8 +110,6 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
         slow_prev = _sma(closes[-(slow + 1):-1])
         fast_now = _sma(closes[-fast:])
         slow_now = _sma(closes[-slow:])
-
-        cfg = load_cfg()
 
         pos_qty, avg_cost = _current_position(client, symbol)
         # flatten-before-close: exit positions even if no cross

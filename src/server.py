@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import Optional
 import os
 
+from datetime import datetime
+from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
@@ -48,7 +50,11 @@ try:
         get_strategy,
         list_strategies,
         list_runs,
-        update_strategy,   # ← added
+        update_strategy,
+        record_order,
+        record_fill,
+        pnl_today,
+        pnl_history,
     )
     from core.scheduler import TraderScheduler
     from strategies.ma_crossover import step as ma_crossover_step
@@ -454,7 +460,106 @@ def quotes_latest(symbol: str):
         raise HTTPException(status_code=500, detail=f"Failed to get quote: {e}")
 
 
+@app.post("/sync/deals")
+def sync_deals(simulate_if_absent: bool = True):
+    """
+    Pull recent fills from broker and store them locally.
+
+    If the broker (paper trading) does not support deal_list_query, fall back to
+    synthesizing fills from orders:
+      - Use dealt_avg_price when available
+      - Otherwise pull a last close via unified market-data fallback and use that
+    This synthetic path is for development/testing only.
+    """
+    global client
+    if client is None or not client.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+
+    # 1) Try real fills first
+    try:
+        recs = client.get_deals()
+        inserted = 0
+        for r in recs:
+            oid = r.get("order_id") or r.get("orderId") or ""
+            code = r.get("code") or r.get("stock_code") or ""
+            side = str(r.get("trd_side") or r.get("side") or "").upper()
+            qty = float(r.get("deal_qty") or r.get("qty") or r.get("fill_qty") or 0)
+            price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
+            ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
+            if not code or not side or qty <= 0 or price <= 0 or not ts:
+                continue
+            record_fill(str(oid), str(code), "BUY" if "BUY" in side else "SELL", qty, price, ts)
+            inserted += 1
+        return {"status": "ok", "inserted": inserted, "source": "broker_deals"}
+    except RuntimeError as e:
+        msg = str(e)
+
+    # 2) Paper trading fallback (orders → fills)
+    # Only do this if explicitly allowed (default True) or message suggests no deal support
+    try_fallback = simulate_if_absent or "Simulated trade does not support deal list" in msg or "deal_list_query" in msg
+    if not try_fallback:
+        raise HTTPException(status_code=400, detail=msg)
+
+    try:
+        orders = client.get_orders()
+    except Exception as e2:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch orders for fallback: {e2}")
+
+    inserted = 0
+    for o in orders:
+        status = str(o.get("order_status") or "").upper()
+        code = str(o.get("code") or o.get("stock_code") or "")
+        side = str(o.get("trd_side") or "").upper()
+        oid = str(o.get("order_id") or o.get("orderId") or "")
+        qty = float(o.get("qty") or 0)
+
+        # Skip if critical fields are missing
+        if not code or not side or not oid or qty <= 0:
+            continue
+
+        # Determine a “filled” price
+        price = float(o.get("dealt_avg_price") or 0)
+        # Consider these statuses as filled; SUBMITTED can be synthesized if simulate_if_absent
+        is_filled = status in {"FILLED", "FILLED_ALL", "DEALT", "SUCCESS"}
+        may_synthesize = simulate_if_absent and status in {"SUBMITTED", "SUBMITTING"} and price <= 0
+
+        if price <= 0 and (is_filled or may_synthesize):
+            # Pull a last close from unified market-data (futu → yfinance fallback)
+            try:
+                bars, source = get_bars_safely(client, code, "K_1M", 1)
+                if bars:
+                    price = float(bars[-1].get("close", 0) or 0)
+            except Exception:
+                price = 0.0
+
+        if (is_filled or may_synthesize) and price > 0:
+            ts = str(o.get("updated_time") or o.get("create_time") or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+            record_fill(oid, code, "BUY" if "BUY" in side else "SELL", qty, price, ts)
+            inserted += 1
+
+    return {"status": "ok", "inserted": inserted, "source": "orders_fallback"}
+
+
+@app.get("/pnl/today")
+def pnl_today_endpoint():
+    """Realized PnL for today (computed from fills)."""
+    try:
+        return pnl_today()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute PnL: {e}")
+
+
+@app.get("/pnl/history")
+def pnl_history_endpoint(days: int = 7):
+    """Realized PnL by day for the last N days."""
+    try:
+        return pnl_history(days=days)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute PnL history: {e}")
+
+
 # ---------- Automation: Strategies ----------
+
 
 @app.post("/automation/start/ma-crossover")
 def automation_start_ma(req: StartMACrossoverRequest):

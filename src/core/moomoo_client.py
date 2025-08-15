@@ -226,6 +226,39 @@ class MoomooClient:
                 continue
         raise RuntimeError(f"order_list_query incompatible with this futu build: {last_err}")
 
+    # -------- NEW: fills (deals) -------- #
+
+    def get_deals(self) -> List[Dict[str, Any]]:
+        """
+        Return recent deals/fills for the active account.
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        if not self.account_id:
+            raise RuntimeError("No account selected")
+
+        tried = [
+            {"trd_env": self.env, "acc_id": self.account_id},
+            {"env": self.env, "acc_id": self.account_id},
+            {"acc_id": self.account_id},
+            {},
+        ]
+        last_err = None
+        for kwargs in tried:
+            try:
+                # Some builds expose 'deal_list_query'
+                fn = getattr(self.trading_ctx, "deal_list_query", None)
+                if not callable(fn):
+                    raise RuntimeError("deal_list_query not available in this futu build")
+                ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                if ret != RET_OK:
+                    raise RuntimeError(f"deal_list_query failed: {df}")
+                return _df_to_records(df)
+            except TypeError as e:
+                last_err = e
+                continue
+        raise RuntimeError(f"deal_list_query incompatible with this futu build: {last_err}")
+
     # -------- trade ops -------- #
 
     def place_order(
@@ -312,7 +345,6 @@ class MoomooClient:
             # if native cancel didn't work, fall through to modify_order
 
         # ---- Fallback: modify_order(CANCEL) with required qty/price ----
-        # Your build needs positional qty/price even for CANCEL.
         try:
             try:
                 from futu import ModifyOrderOp  # type: ignore
@@ -333,15 +365,12 @@ class MoomooClient:
         price = float(cur.get("price", 0) or 0)
 
         attempts = [
-            # Keyword styles
             {"modify_order_op": op, "order_id": int(order_id), "qty": qty, "price": price,
-            "trd_env": self.env, "acc_id": self.account_id},
+             "trd_env": self.env, "acc_id": self.account_id},
             {"op": op, "order_id": int(order_id), "qty": qty, "price": price,
-            "trd_env": self.env, "acc_id": self.account_id},
+             "trd_env": self.env, "acc_id": self.account_id},
             {"op": op, "order_id": int(order_id), "qty": qty, "price": price,
-            "env": self.env, "acc_id": self.account_id},
-
-            # Positional-first-arg style (some builds)
+             "env": self.env, "acc_id": self.account_id},
             ("positional", (op, int(order_id), qty, price), {"trd_env": self.env, "acc_id": self.account_id}),
             ("positional", (op, int(order_id), qty, price), {}),
         ]
@@ -362,7 +391,6 @@ class MoomooClient:
                 continue
 
         raise RuntimeError(f"modify_order CANCEL incompatible with this futu build: {last_err}")
-
 
     # -------- quotes -------- #
 
@@ -408,7 +436,6 @@ class MoomooClient:
             try:
                 ret, df = self.quote_ctx.get_stock_quote(**kwargs)  # type: ignore[arg-type]
                 if ret != RET_OK:
-                    # Friendlier message if it looks like a permission error
                     msg = str(df)
                     if "No right to get the quote" in msg:
                         raise RuntimeError(
