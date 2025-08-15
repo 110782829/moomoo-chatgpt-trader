@@ -233,6 +233,16 @@ def connect(req: ConnectRequest):
     try:
         client = MoomooClient(host=host, port=port)  # ← no client_id here
         client.connect()
+        # persist partial session (account may be None here)
+        try:
+            save_session(
+                host,
+                port,
+                getattr(client, "account_id", None),
+                getattr(client, "env", None).name if getattr(client, "env", None) else None,
+            )
+        except Exception:
+            pass
         return {"status": "connected", "host": host, "port": port}
     except (RuntimeError, TypeError) as e:
         client = None
@@ -240,10 +250,7 @@ def connect(req: ConnectRequest):
     except Exception as e:
         client = None
         raise HTTPException(status_code=500, detail=f"Failed to connect: {e}")
-    try:
-        save_session(host, port, getattr(client, "account_id", None), getattr(client, "env", None).name if getattr(client, "env", None) else None)
-    except Exception:
-        pass
+
 
 @app.get("/accounts")
 def list_accounts():
@@ -272,15 +279,22 @@ def select_account(req: SelectAccountRequest):
     try:
         env = _env_from_str(req.trd_env)
         client.set_account(req.account_id, env)
+        # persist full session
+        try:
+            save_session(
+                client.host,
+                client.port,
+                client.account_id,
+                client.env.name if client.env else None,
+            )
+        except Exception:
+            pass
         return {"status": "ok", "account_id": req.account_id, "trd_env": req.trd_env.upper()}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to select account: {e}")
-    try:
-        save_session(client.host, client.port, client.account_id, client.env.name if client.env else None)
-    except Exception:
-        pass
+
 
 @app.get("/accounts/active")
 def accounts_active():
