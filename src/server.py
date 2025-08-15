@@ -5,6 +5,7 @@ import os
 
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
+from core.session import load_session, save_session, clear_session
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -239,7 +240,10 @@ def connect(req: ConnectRequest):
     except Exception as e:
         client = None
         raise HTTPException(status_code=500, detail=f"Failed to connect: {e}")
-
+    try:
+        save_session(host, port, getattr(client, "account_id", None), getattr(client, "env", None).name if getattr(client, "env", None) else None)
+    except Exception:
+        pass
 
 @app.get("/accounts")
 def list_accounts():
@@ -273,7 +277,10 @@ def select_account(req: SelectAccountRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to select account: {e}")
-
+    try:
+        save_session(client.host, client.port, client.account_id, client.env.name if client.env else None)
+    except Exception:
+        pass
 
 @app.get("/accounts/active")
 def accounts_active():
@@ -682,3 +689,34 @@ def backtest_ma_grid(req: BacktestMAGridRequest):
         raise HTTPException(status_code=400, detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest grid failed: {e}")
+
+# ------------- Session --------------
+
+@app.get("/session/status")
+def session_status():
+    s = load_session()
+    return {
+        "saved": s or {},
+        "connected": bool(client and getattr(client, "connected", False)),
+        "active_account": {
+            "account_id": getattr(client, "account_id", None),
+            "trd_env": getattr(getattr(client, "env", None), "name", None),
+        } if client else None,
+    }
+
+
+@app.post("/session/save")
+def session_save(body: dict):
+    host = body.get("host")
+    port = int(body.get("port", 0))
+    account_id = body.get("account_id")
+    trd_env = body.get("trd_env")
+    if not host or not port:
+        raise HTTPException(status_code=400, detail="host and port required")
+    return {"ok": True, "saved": save_session(host, port, account_id, trd_env)}
+
+
+@app.post("/session/clear")
+def session_clear():
+    clear_session()
+    return {"ok": True}

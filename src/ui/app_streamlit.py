@@ -41,6 +41,17 @@ def risk_status():
 def runs_for_strategy(strategy_id: int, limit: int = 25):
     return requests.get(f"{API_BASE}/automation/strategies/{strategy_id}/runs?limit={limit}").json()
 
+def session_status():
+    return requests.get(f"{API_BASE}/session/status").json()
+
+def session_save(host, port, account_id, trd_env):
+    return requests.post(f"{API_BASE}/session/save", json={
+        "host": host, "port": port, "account_id": account_id, "trd_env": trd_env
+    }).json()
+
+def session_clear():
+    return requests.post(f"{API_BASE}/session/clear").json()
+
 def main():
     st.set_page_config(page_title="Moomoo ChatGPT Trading Bot", layout="wide")
     st.title("Moomoo ChatGPT Trading Bot")
@@ -79,38 +90,61 @@ def main():
     host = st.sidebar.text_input("Host", "127.0.0.1")
     port = st.sidebar.number_input("Port", value=11111)
     client_id = st.sidebar.number_input("Client ID", value=1)
-    if st.sidebar.button("Connect to Backend"):
+    if st.sidebar.button("Connect to Backend", key="btn_connect_backend"):
         st.sidebar.write(connect_backend(host, port, client_id))
+
+    if st.sidebar.button("Save Session", key="btn_save_session"):
+        st.sidebar.write(session_save(host, port, st.session_state.get("last_account_id", ""), st.session_state.get("last_trd_env", "")))
+
+    if st.sidebar.button("Reconnect (from saved)", key="btn_reconnect_saved"):
+        try:
+            s = session_status().get("saved", {})
+            if not s or not s.get("host") or not s.get("port"):
+                st.sidebar.error("No saved session.")
+            else:
+                c1 = connect_backend(s["host"], s["port"], 1)
+                st.sidebar.write(c1)
+                if s.get("account_id") and s.get("trd_env"):
+                    c2 = select_account(str(s["account_id"]), str(s["trd_env"]))
+                    st.sidebar.write(c2)
+        except Exception as e:
+            st.sidebar.error(f"Reconnect failed: {e}")
+
+    if st.sidebar.button("Clear Saved Session", key="btn_clear_session"):
+        st.sidebar.write(session_clear())
 
     # ----- Account Selection -----
     st.sidebar.header("Account Selection")
     account_id = st.sidebar.text_input("Account ID", "54871")
     trd_env = st.sidebar.selectbox("Trading Env", ["SIMULATE", "REAL"])
-    if st.sidebar.button("Select Account"):
-        st.sidebar.write(select_account(account_id, trd_env))
+    if st.sidebar.button("Select Account", key="btn_select_account"):
+        resp = select_account(account_id, trd_env)
+        st.sidebar.write(resp)
+        st.session_state["last_account_id"] = account_id
+        st.session_state["last_trd_env"] = trd_env
 
     # ----- Place Order -----
     st.header("Place Order")
     symbol = st.text_input("Symbol", "US.AAPL")
     qty = st.number_input("Quantity", value=1)
     side = st.selectbox("Side", ["BUY", "SELL"])
-    if st.button("Place Order"):
+    if st.button("Place Order", key="btn_place_order"):
         st.write(place_order(symbol, qty, side))
 
     # ----- Cancel Order -----
     st.header("Cancel Order")
     cancel_id = st.text_input("Order ID to Cancel")
-    if st.button("Cancel Order"):
+    if st.button("Cancel Order", key="btn_cancel_order"):
         st.write(cancel_order(cancel_id))
 
     # ----- Positions -----
     st.header("Positions")
-    if st.button("Refresh Positions"):
+    if st.button("Refresh Positions", key="btn_refresh_positions"):
         st.write(get_positions())
 
     # ----- Orders -----
     st.header("Orders")
-    if st.button("Refresh Orders"):
+    if st.button("Refresh Orders", key="btn_refresh_orders"):
         st.write(get_orders())
 
 if __name__ == "__main__":
