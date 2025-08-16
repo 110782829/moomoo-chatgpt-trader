@@ -1,121 +1,140 @@
-# Basic risk helpers used by strategies.
+# src/risk/limits.py
+"""
+Shared order-limit checks used by API endpoints and automated strategies.
+Raises ValueError("reason") when a check fails; callers translate to HTTP 400 or SKIP.
+"""
+
 from __future__ import annotations
-import os, json
+
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta
 from pathlib import Path
-from datetime import datetime, time, timedelta, date
-from zoneinfo import ZoneInfo
-from typing import Tuple, Optional, Dict, Any, List
+import json
+from typing import Optional, Sequence, Dict, Any
 
-RISK_PATH = Path(os.getenv("RISK_FILE", "data/risk.json"))
-_PT = ZoneInfo("America/Los_Angeles")
+from core.market_data import get_bars_safely
 
-_DEFAULT = {
+
+_DEFAULT_CFG = {
     "enabled": True,
     "max_usd_per_trade": 1000.0,
     "max_open_positions": 5,
-    "max_daily_loss_usd": 200.0,
+    "max_daily_loss_usd": 200.0,  # not enforced here yet
     "symbol_whitelist": [],
     "trading_hours_pt": {"start": "06:30", "end": "13:00"},
-    "flatten_before_close_min": 5,
+    "flatten_before_close_min": 10,
 }
 
-def load_cfg() -> Dict[str, Any]:
-    try:
-        if RISK_PATH.exists():
-            return json.loads(RISK_PATH.read_text())
-    except Exception:
-        pass
-    RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RISK_PATH.write_text(json.dumps(_DEFAULT, indent=2))
-    return dict(_DEFAULT)
+
+def load_risk_cfg() -> Dict[str, Any]:
+    """Load risk config from data/risk.json with sensible defaults."""
+    p = Path("data/risk.json")
+    if p.exists():
+        try:
+            cfg = json.loads(p.read_text())
+            # merge defaults
+            m = _DEFAULT_CFG.copy()
+            m.update({k: v for k, v in cfg.items() if v is not None})
+            return m
+        except Exception:
+            pass
+    return _DEFAULT_CFG.copy()
+
 
 def _parse_hhmm(s: str) -> time:
     hh, mm = s.split(":")
     return time(int(hh), int(mm))
 
-def market_open_now(cfg: Optional[Dict[str, Any]] = None, now: Optional[datetime] = None) -> bool:
-    cfg = cfg or load_cfg()
-    now = now or datetime.now(_PT)
-    hours = cfg.get("trading_hours_pt", {"start": "06:30", "end": "13:00"})
-    start = _parse_hhmm(hours.get("start", "06:30"))
-    end = _parse_hhmm(hours.get("end", "13:00"))
-    t = now.time()
-    return (t >= start) and (t <= end)
 
-def in_flatten_window(cfg: Optional[Dict[str, Any]] = None, now: Optional[datetime] = None) -> bool:
-    cfg = cfg or load_cfg()
-    now = now or datetime.now(_PT)
-    end_s = cfg.get("trading_hours_pt", {}).get("end", "13:00")
-    end_t = _parse_hhmm(end_s)
-    end_dt = datetime.combine(now.date(), end_t, tzinfo=_PT)
-    mins = int(cfg.get("flatten_before_close_min", 5) or 0)
-    return now >= (end_dt - timedelta(minutes=mins))
+def _now_local() -> datetime:
+    # Keep it simple: use system-local time (your dev is PT).
+    return datetime.now()
 
-def symbol_allowed(symbol: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
-    cfg = cfg or load_cfg()
-    wl: List[str] = cfg.get("symbol_whitelist") or []
-    if not wl:
-        return True
-    sym = symbol.split(".")[-1].upper()
-    wl_norm = [s.split(".")[-1].upper() for s in wl]
-    return sym in wl_norm
 
-def _is_us_holiday(d: date) -> bool:
-    """
-    Lightweight holiday check:
-    - Always skip weekends.
-    - If python-holidays is available and env US_HOLIDAYS!=0, use it.
-    - Otherwise only weekend filter is applied.
-    """
-    if d.weekday() >= 5:  # 5=Sat, 6=Sun
-        return True
-    use_holidays = os.getenv("US_HOLIDAYS", "1") != "0"
-    if use_holidays:
-        try:
-            import holidays  # type: ignore
-            us = holidays.UnitedStates()  # NYSE holidays close enough for dev
-            return d in us
-        except Exception:
-            return False
-    return False
+def _is_outside_trading_hours(cfg: Dict[str, Any]) -> bool:
+    th = cfg.get("trading_hours_pt") or {}
+    start = _parse_hhmm(str(th.get("start", "06:30")))
+    end = _parse_hhmm(str(th.get("end", "13:00")))
+    now = _now_local().time()
+    return not (start <= now <= end)
 
-def is_trading_day_now(now: Optional[datetime] = None) -> bool:
-    now = now or datetime.now(_PT)
-    return not _is_us_holiday(now.date())
 
-def market_ok_to_trade(cfg: Optional[Dict[str, Any]] = None, now: Optional[datetime] = None) -> Tuple[bool, str]:
-    """
-    Combined trading-day + hours gate.
-    """
-    cfg = cfg or load_cfg()
-    now = now or datetime.now(_PT)
-    if not is_trading_day_now(now):
-        return False, "Market closed today (weekend/holiday)"
-    if not market_open_now(cfg=cfg, now=now):
-        return False, "Outside trading hours"
-    return True, "ok"
+def _within_flatten_window(cfg: Dict[str, Any]) -> bool:
+    mins = int(cfg.get("flatten_before_close_min") or 0)
+    if mins <= 0:
+        return False
+    th = cfg.get("trading_hours_pt") or {}
+    end = _parse_hhmm(str(th.get("end", "13:00")))
+    now = _now_local()
+    close_dt = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+    return now >= (close_dt - timedelta(minutes=mins))
 
-def check_trade_limits(
+
+def _estimate_price(client, symbol: str, order_type: str, price: Optional[float]) -> float:
+    if price and float(price) > 0:
+        return float(price)
+    if (order_type or "").upper() != "MARKET":
+        return float(price or 0)
+    # try last close via safe fallback (futu→yfinance)
+    try:
+        bars, _src = get_bars_safely(client, symbol, "K_1M", 1)
+        if bars:
+            px = float(bars[-1].get("close", 0) or 0)
+            return px
+    except Exception:
+        pass
+    return 0.0
+
+
+def _count_open_positions(client) -> int:
+    try:
+        pos = client.get_positions()
+        return sum(1 for p in pos if float(p.get("qty", 0) or 0) > 0)
+    except Exception:
+        return 0
+
+
+def enforce_order_limits(
+    client,
     symbol: str,
-    side: str,
     qty: float,
-    price: float,
-    open_positions_count: int,
-    cfg: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, str]:
-    cfg = cfg or load_cfg()
+    side: str,
+    order_type: str = "MARKET",
+    price: Optional[float] = None,
+) -> None:
+    """
+    Raises ValueError with message if a limit would be violated.
+    """
+    cfg = load_risk_cfg()
     if not cfg.get("enabled", True):
-        return True, "risk disabled"
+        return
 
-    if not symbol_allowed(symbol, cfg):
-        return False, f"symbol not in whitelist: {symbol}"
+    side_u = (side or "").upper()
 
-    max_pos = int(cfg.get("max_open_positions", 5))
-    if open_positions_count is not None and open_positions_count >= max_pos and side.upper() == "BUY":
-        return False, f"max open positions reached: {open_positions_count}/{max_pos}"
+    # Whitelist (only enforced for new buys)
+    wl = cfg.get("symbol_whitelist") or []
+    if wl and side_u.startswith("BUY") and symbol not in wl:
+        raise ValueError(f"{symbol} not in whitelist")
 
-    max_usd = float(cfg.get("max_usd_per_trade", 1000.0) or 0.0)
-    notional = abs(float(qty) * float(price))
-    if max_usd > 0 and side.upper() == "BUY" and notional > max_usd:
-        return False, f"trade notional {notional:.2f} exceeds max {max_usd:.2f}"
-    return True, "ok"
+    # Trading hours (block buys outside; allow sells to exit risk)
+    if side_u.startswith("BUY") and _is_outside_trading_hours(cfg):
+        raise ValueError("outside trading hours")
+
+    # Flatten-before-close (block new buys close to end)
+    if side_u.startswith("BUY") and _within_flatten_window(cfg):
+        mins = int(cfg.get("flatten_before_close_min") or 0)
+        raise ValueError(f"within {mins} min of close")
+
+    # Per-trade notional cap
+    est_px = _estimate_price(client, symbol, order_type, price)
+    if est_px > 0:
+        cap = float(cfg.get("max_usd_per_trade") or 0)
+        if cap > 0 and est_px * float(qty) > cap:
+            raise ValueError(f"notional ${est_px * float(qty):.2f} exceeds cap ${cap:.2f}")
+
+    # Open positions count cap (buys only)
+    cap_pos = int(cfg.get("max_open_positions") or 0)
+    if side_u.startswith("BUY") and cap_pos > 0:
+        open_cnt = _count_open_positions(client)
+        if open_cnt >= cap_pos:
+            raise ValueError(f"open positions {open_cnt} reached cap {cap_pos}")
