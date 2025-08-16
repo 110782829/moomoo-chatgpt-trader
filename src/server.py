@@ -130,13 +130,25 @@ class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
 
 class StartMACrossoverRequest(BaseModel):
+    # core
     symbol: str              # e.g., "US.AAPL"
     fast: int = 20
     slow: int = 50
     ktype: str = "K_1M"      # bar timeframe; entitlement-dependent
+
+    # sizing
     qty: float = 1
+    size_mode: Optional[str] = "shares"   # 'shares' | 'usd'
+    dollar_size: Optional[float] = 0.0
+
+    # risk per-trade
+    stop_loss_pct: Optional[float] = 0.0  # e.g. 0.02 = 2%
+    take_profit_pct: Optional[float] = 0.0
+
+    # run cadence / execution
     interval_sec: int = 15
     allow_real: bool = False
+
 
 class UpdateStrategyRequest(BaseModel):
     # params
@@ -613,9 +625,17 @@ def automation_start_ma(req: StartMACrossoverRequest):
         "fast": int(req.fast),
         "slow": int(req.slow),
         "ktype": req.ktype,
+        # sizing
         "qty": float(req.qty),
+        "size_mode": (req.size_mode or "shares"),
+        "dollar_size": float(req.dollar_size or 0),
+        # risk
+        "stop_loss_pct": float(req.stop_loss_pct or 0),
+        "take_profit_pct": float(req.take_profit_pct or 0),
+        # execution
         "allow_real": bool(req.allow_real),
     }
+    
     sid = insert_strategy("ma_crossover", req.symbol.strip(), params, int(req.interval_sec))
     return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
 

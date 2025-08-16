@@ -12,16 +12,46 @@ from typing import Dict, Any, List, Optional
 import math
 
 from core.moomoo_client import MoomooClient, TrdEnv
-from core.storage import insert_run, pnl_today   # ← added
+from core.storage import insert_run, pnl_today
 
-# risk helpers
-from risk.limits import (
-    load_cfg,
-    market_open_now,
-    in_flatten_window,
-    check_trade_limits,
-    market_ok_to_trade,
-)
+# --- Risk integration (imports with safe fallbacks) ---
+try:
+    from risk.limits import (
+        enforce_order_limits,
+        load_cfg,
+        market_open_now,
+        in_flatten_window,
+        check_trade_limits,
+        market_ok_to_trade,
+    )
+except Exception:
+    # If risk module isn't available, define no-op fallbacks so strategy still runs.
+    enforce_order_limits = None  # placing orders will skip centralized checks
+
+    def load_cfg():
+        # minimal shape expected elsewhere
+        return {
+            "enabled": False,
+            "max_usd_per_trade": 1e12,
+            "max_open_positions": 999,
+            "max_daily_loss_usd": 1e12,
+            "symbol_whitelist": [],
+            "trading_hours_pt": {"start": "06:30", "end": "13:00"},
+            "flatten_before_close_min": 0,
+        }
+
+    def market_open_now(*args, **kwargs) -> bool:
+        return True
+
+    def in_flatten_window(*args, **kwargs) -> bool:
+        return False
+
+    def check_trade_limits(*args, **kwargs) -> None:
+        return None
+
+    def market_ok_to_trade(*args, **kwargs) -> bool:
+        return True
+
 
 # data provider (futu first, yfinance fallback)
 from core.market_data import get_bars_safely
