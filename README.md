@@ -4,7 +4,7 @@ This project aims to build a ChatGPT-powered automated stock trading bot for U.S
 
 - Connect to the moomoo API via a local OpenD gateway.
 - Execute a configurable trading strategy (starting with simple moving-average crossovers).
-- Expose a web-based UI for adjusting strategy parameters (e.g., moving-average windows, position sizing, stop-loss).
+- Expose a desktop UI for adjusting strategy parameters (e.g., moving-average windows, position sizing, stop-loss).
 - Provide natural-language commands to adjust settings (e.g., "only trade between 9:30 and noon", "tighten stop to 2%").
 - Later, allow the bot to learn and mimic a user's trading style from past trade history (stored locally).
 
@@ -13,7 +13,7 @@ This repository will evolve over time. For the initial version, we plan to:
 - Set up the project skeleton with `src/` modules for core functionality, strategies, natural-language parser, UI, and backtesting.
 - Implement a basic client for the moomoo OpenAPI that can authenticate, subscribe to market data, and place paper trades.
 - Add a `.env.example` file describing environment variables (OpenD host/port, etc.).
-- Provide a Streamlit-based UI skeleton for controlling strategy parameters and viewing open positions and logs.
+- Provide a PyWebview-based UI skeleton for controlling strategy parameters and viewing open positions and logs.
 - Add instructions on installing dependencies and running the application in paper-trading mode.
 
 ## Prerequisites
@@ -45,13 +45,11 @@ This repository will evolve over time. For the initial version, we plan to:
 
 3. Start the OpenD gateway provided by moomoo.
 
-4. Run the development server:
+4. Start the desktop app (launches the API and UI):
 
    ```bash
-   python src/main.py
+   python desktop-ui/main.py
    ```
-
-5. Open the Streamlit UI in your browser (the server will output a local URL).
 
 ## Contributing
 
