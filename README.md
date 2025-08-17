@@ -1,7 +1,6 @@
 # Moomoo ChatGPT Trader
 
-ChatGPT-powered trading assistant for U.S. stocks. FastAPI backend and desktop UI built with PyWebview.
-
+ChatGPT-powered trading assistant for U.S. stocks. FastAPI backend and desktop UI now rendered with a small React app (targeting a future Tauri build).
 
 ## Features
 
@@ -28,10 +27,9 @@ Start OpenD gateway, then launch desktop app.
 python desktop-ui/main.py
 ```
 
-
 ## Layout
 - `src/` backend modules
-- `desktop-ui/` PyWebview wrapper and HTML page
+- `desktop-ui/` PyWebview wrapper and React HTML page
 - `requirements.txt` dependencies
 
 4. Start the desktop app (launches the API and UI):
@@ -41,6 +39,6 @@ python desktop-ui/main.py
    ```
 
 ## Roadmap
-- Autopilot mode driven by ChatGPT
-- Natural language commands for settings
+- Autopilot mode driven by ChatGPT (skeleton in place)
+- Natural language commands for settings (basic mapping)
 - Backtesting tab for strategy validation

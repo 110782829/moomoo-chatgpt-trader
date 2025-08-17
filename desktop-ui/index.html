@@ -3,61 +3,79 @@
 <head>
   <meta charset="utf-8" />
   <title>Moomoo Trader</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; }
+    nav { background:#222; color:#fff; padding:8px; display:flex; gap:8px; }
+    nav button { background:#444; color:#fff; border:none; padding:6px 10px; cursor:pointer; }
+    nav button.active { background:#0080ff; }
+    section { padding:1rem; }
+    input { margin:0.25rem; }
+  </style>
 </head>
 <body>
-  <h1>Bot Dashboard</h1>
-  <section id="mode">
-    <h2>Autonomy Mode</h2>
-    <select id="mode-select"></select>
-  </section>
-  <section id="risk">
-    <h2>Risk Settings</h2>
-    <pre id="risk-json"></pre>
-  </section>
-  <section id="strategies">
-    <h2>Strategies</h2>
-    <ul id="strategy-list"></ul>
-  </section>
-  <section id="log">
-    <h2>Activity Log</h2>
-    <pre id="log-json"></pre>
-  </section>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script>
+    const e = React.createElement;
     const API_BASE = "http://127.0.0.1:8000";
-    async function load() {
-      const modeRes = await fetch(API_BASE + "/bot/mode");
-      const modeData = await modeRes.json();
-      const select = document.getElementById("mode-select");
-      ["assist","semi","auto"].forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        if (modeData.mode === m) opt.selected = true;
-        select.appendChild(opt);
-      });
-      select.onchange = async () => {
-        await fetch(API_BASE + "/bot/mode", {
-          method: "PUT",
+
+    function Dashboard() {
+      const [status, setStatus] = React.useState({});
+      const [cmd, setCmd] = React.useState("");
+      React.useEffect(() => { fetch(API_BASE + "/autopilot/status").then(r=>r.json()).then(setStatus); }, []);
+      function send() {
+        fetch(API_BASE + "/command", {
+          method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({mode: select.value})
-        });
-      };
-
-      const risk = await (await fetch(API_BASE + "/risk/config")).json();
-      document.getElementById("risk-json").textContent = JSON.stringify(risk, null, 2);
-
-      const strats = await (await fetch(API_BASE + "/automation/strategies")).json();
-      const list = document.getElementById("strategy-list");
-      strats.forEach(s => {
-        const li = document.createElement("li");
-        li.textContent = s.name || ("strategy " + s.id);
-        list.appendChild(li);
-      });
-
-      const log = await (await fetch(API_BASE + "/logs/actions")).json();
-      document.getElementById("log-json").textContent = JSON.stringify(log, null, 2);
+          body: JSON.stringify({text: cmd})
+        }).then(r=>r.json()).then(setStatus);
+        setCmd("");
+      }
+      return e("section", null,
+        e("h2", null, "Autopilot"),
+        e("div", null, "active: " + (status.active ? "yes" : "no")),
+        e("input", {value: cmd, onChange: ev=>setCmd(ev.target.value), placeholder:"command"}),
+        e("button", {onClick: send}, "send")
+      );
     }
-    load();
+
+    function Backtest() {
+      const [symbol, setSymbol] = React.useState("US.AAPL");
+      const [fast, setFast] = React.useState(20);
+      const [slow, setSlow] = React.useState(50);
+      const [res, setRes] = React.useState(null);
+      function run() {
+        fetch(API_BASE + "/backtest/ma-crossover", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({symbol, fast:Number(fast), slow:Number(slow)})
+        }).then(r=>r.json()).then(setRes);
+      }
+      return e("section", null,
+        e("h2", null, "Backtest"),
+        e("div", null,
+          e("input", {value: symbol, onChange:e=>setSymbol(e.target.value)}),
+          e("input", {type:"number", value: fast, onChange:e=>setFast(e.target.value)}),
+          e("input", {type:"number", value: slow, onChange:e=>setSlow(e.target.value)}),
+          e("button", {onClick: run}, "run")
+        ),
+        res && e("pre", null, JSON.stringify(res.metrics, null, 2))
+      );
+    }
+
+    function App() {
+      const [tab, setTab] = React.useState("dash");
+      return e("div", null,
+        e("nav", null,
+          e("button", {className: tab==='dash'?"active":"", onClick:()=>setTab('dash')}, "Dashboard"),
+          e("button", {className: tab==='bt'?"active":"", onClick:()=>setTab('bt')}, "Backtest")
+        ),
+        tab==='dash' ? e(Dashboard) : e(Backtest)
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(e(App));
   </script>
 </body>
 </html>
