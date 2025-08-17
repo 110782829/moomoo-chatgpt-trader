@@ -14,6 +14,8 @@ from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
+from autopilot import Autopilot
+from nlp import parse_command
 
 # Optional automation (scheduler + storage + strategy step)
 try:
@@ -79,6 +81,9 @@ client: Optional[MoomooClient] = None
 
 # Global scheduler (if automation imports are available)
 scheduler = None  # will hold TraderScheduler
+
+# Autopilot state holder
+autopilot = Autopilot()
 
 
 # ---------- Risk config (local file) ----------
@@ -215,6 +220,9 @@ class BotModeRequest(BaseModel):
 
 class FlattenAllRequest(BaseModel):
     symbols: Optional[list[str]] = None  # if provided, only flatten these symbols
+
+class CommandRequest(BaseModel):
+    text: str
 
 
 # ---------- Helpers ----------
@@ -667,6 +675,58 @@ def bot_mode_put(req: BotModeRequest):
     set_setting("bot_mode", mode)
     insert_action_log("mode_change", mode=mode, reason="user_update", status="ok")
     return {"mode": mode}
+
+
+# --- Autopilot ---
+
+class AutopilotStartRequest(BaseModel):
+    strategy: str | None = None
+
+
+@app.post("/autopilot/start")
+def autopilot_start(req: AutopilotStartRequest | None = None):
+    autopilot.start(req.strategy if req else None)
+    return autopilot.status()
+
+
+@app.post("/autopilot/stop")
+def autopilot_stop():
+    autopilot.stop()
+    return autopilot.status()
+
+
+@app.get("/autopilot/status")
+def autopilot_status():
+    return autopilot.status()
+
+
+@app.post("/autopilot/tick")
+def autopilot_tick():
+    autopilot.tick()
+    return autopilot.status()
+
+
+@app.post("/command")
+def command(req: CommandRequest):
+    result = parse_command(req.text)
+    act = result.get("action")
+    if act == "start_autopilot":
+        autopilot.start(result.get("strategy"))
+        return autopilot.status()
+    if act == "stop_autopilot":
+        autopilot.stop()
+        return autopilot.status()
+    if act == "tick":
+        autopilot.tick()
+        return autopilot.status()
+    if act == "run_backtest":
+        return {"status": "backtest_requested"}
+    if act == "set_strategy":
+        autopilot.set_strategy(result.get("name", ""))
+        return autopilot.status()
+    if act == "status":
+        return autopilot.status()
+    raise HTTPException(status_code=400, detail="unknown command")
 
 
 # --- Action Log API ---
