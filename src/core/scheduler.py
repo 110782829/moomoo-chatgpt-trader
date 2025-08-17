@@ -3,7 +3,7 @@
 import asyncio
 import time
 from typing import Dict, Callable, Any, Optional
-from core.storage import list_strategies, insert_run
+from core.storage import list_strategies, insert_run, get_setting
 from core.moomoo_client import MoomooClient
 
 StrategyStep = Callable[[int, MoomooClient, str, Dict[str, Any]], None]
@@ -35,6 +35,12 @@ class TraderScheduler:
     async def _tick_all(self) -> None:
         client = self._get_client()
         if client is None or not client.connected:
+            return
+        mode = (get_setting("bot_mode") or "assist").lower()
+        if mode not in {"semi", "auto"}:
+            for s in list_strategies():
+                if s["active"]:
+                    insert_run(s["id"], "SKIP", f"bot_mode={mode}")
             return
         now = time.time()
         for s in list_strategies():

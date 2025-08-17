@@ -891,9 +891,13 @@ def risk_put(req: RiskConfig):
     """
     try:
         cfg = _risk_load()
+        changed = []
         for k, v in req.model_dump(exclude_none=True).items():
             cfg[k] = v
+            changed.append(k)
         _risk_save(cfg)
+        # log update
+        insert_action_log("risk_update", mode=(get_setting("bot_mode") or "assist"), status="ok", extra={"fields": changed})
         return cfg
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save risk config: {e}")
