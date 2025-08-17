@@ -2,13 +2,14 @@
 
 ChatGPT-powered trading assistant for U.S. stocks. FastAPI backend and desktop UI built with PyWebview.
 
+
 ## Features
-- Connects to local OpenD gateway
-- Risk guards for size, positions, daily loss, and market hours
-- Strategy runner with moving-average crossover
-- Autonomy modes: assist and semi
-- Action log stored in SQLite
-- Desktop dashboard showing mode, risk, strategies, and activity
+
+- Connect to the moomoo API via a local OpenD gateway.
+- Execute a configurable trading strategy (starting with simple moving-average crossovers).
+- Expose a desktop UI for adjusting strategy parameters (e.g., moving-average windows, position sizing, stop-loss).
+- Provide natural-language commands to adjust settings (e.g., "only trade between 9:30 and noon", "tighten stop to 2%").
+- Later, allow the bot to learn and mimic a user's trading style from past trade history (stored locally).
 
 ## Setup
 Clone repository and install dependencies.
@@ -27,20 +28,17 @@ Start OpenD gateway, then launch desktop app.
 python desktop-ui/main.py
 ```
 
-API listens on `http://127.0.0.1:8000` and opens the dashboard window.
-
-## Development
-Run checks before committing.
-
-```bash
-python -m py_compile $(git ls-files '*.py')
-pytest
-```
 
 ## Layout
 - `src/` backend modules
 - `desktop-ui/` PyWebview wrapper and HTML page
 - `requirements.txt` dependencies
+
+4. Start the desktop app (launches the API and UI):
+
+   ```bash
+   python desktop-ui/main.py
+   ```
 
 ## Roadmap
 - Autopilot mode driven by ChatGPT
