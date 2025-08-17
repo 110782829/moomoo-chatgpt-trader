@@ -28,6 +28,10 @@ try:
         record_fill,
         pnl_today,
         pnl_history,
+        insert_action_log,
+        list_action_logs,
+        get_setting,
+        set_setting,
     )
     from core.scheduler import TraderScheduler
     from strategies.ma_crossover import step as ma_crossover_step
@@ -204,6 +208,13 @@ class RiskConfig(BaseModel):
     symbol_whitelist: Optional[list[str]] = None
     trading_hours_pt: Optional[dict] = None  # {"start":"06:30","end":"13:00"}
     flatten_before_close_min: Optional[int] = None
+
+# ---: simple models for bot mode & flatten ---
+class BotModeRequest(BaseModel):
+    mode: str  # 'assist' | 'semi' | 'auto'
+
+class FlattenAllRequest(BaseModel):
+    symbols: Optional[list[str]] = None  # if provided, only flatten these symbols
 
 
 # ---------- Helpers ----------
@@ -445,6 +456,11 @@ def place_order(req: PlaceOrderRequest):
             price=req.price,
         )
     except ValueError as e:
+        insert_action_log(
+            "place", mode=(get_setting("bot_mode") or "assist"),
+            symbol=req.symbol, side=side, qty=qty, price=req.price,
+            reason="risk_block", status="blocked", extra={"msg": str(e)}
+        )
         raise HTTPException(status_code=400, detail=f"Blocked by risk: {e}")
 
     try:
@@ -455,8 +471,18 @@ def place_order(req: PlaceOrderRequest):
             order_type=order_type,
             price=req.price,
         )
+        insert_action_log(
+            "place", mode=(get_setting("bot_mode") or "assist"),
+            symbol=req.symbol, side=side, qty=qty, price=req.price,
+            reason="manual/place_order", status="ok", extra={"result": result}
+        )
         return {"status": "ok", "result": result}
     except Exception as e:
+        insert_action_log(
+            "place", mode=(get_setting("bot_mode") or "assist"),
+            symbol=req.symbol, side=side, qty=qty, price=req.price,
+            reason="exception", status="error", extra={"msg": str(e)}
+        )
         raise HTTPException(status_code=500, detail=f"place_order failed: {e}")
 
 @app.post("/orders/cancel")
@@ -468,10 +494,18 @@ def cancel_order(req: CancelOrderRequest):
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
     try:
-        return c.cancel_order(req.order_id)
+        res = c.cancel_order(req.order_id)
+        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+                          symbol=None, side=None, qty=None, price=None,
+                          reason=f"cancel {req.order_id}", status="ok", extra={"result": res})
+        return res
     except RuntimeError as e:
+        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+                          reason=f"runtime_error {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+                          reason=f"exception {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to cancel order: {e}")
 
 
@@ -601,6 +635,114 @@ def pnl_history_endpoint(days: int = 7):
         raise HTTPException(status_code=500, detail=f"Failed to compute PnL history: {e}")
 
 
+# --- Bot Mode (persisted in settings) ---
+
+@app.get("/bot/mode")
+def bot_mode_get():
+    """
+    Return current bot autonomy mode (assist|semi|auto). Defaults to 'assist' if unset.
+    """
+    val = get_setting("bot_mode") or "assist"
+    try:
+        # Normalize JSON/string to plain string
+        if isinstance(val, str):
+            try:
+                j = json.loads(val)
+                if isinstance(j, str):
+                    val = j
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"mode": val}
+
+@app.put("/bot/mode")
+def bot_mode_put(req: BotModeRequest):
+    """
+    Update bot autonomy mode.
+    """
+    mode = (req.mode or "").lower().strip()
+    if mode not in {"assist", "semi", "auto"}:
+        raise HTTPException(status_code=400, detail="mode must be one of: assist|semi|auto")
+    set_setting("bot_mode", mode)
+    insert_action_log("mode_change", mode=mode, reason="user_update", status="ok")
+    return {"mode": mode}
+
+
+# --- Action Log API ---
+
+@app.get("/logs/actions")
+def action_logs(limit: int = 100, symbol: Optional[str] = None, since_hours: Optional[int] = None):
+    """
+    List recent action log entries for explainability/chronology.
+    """
+    try:
+        return list_action_logs(limit=limit, symbol=symbol, since_hours=since_hours)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch action logs: {e}")
+
+
+# --- Flatten All ---
+
+@app.post("/positions/flatten")
+def positions_flatten(body: FlattenAllRequest = FlattenAllRequest()):
+    """
+    Close all open positions by placing opposite MARKET orders.
+    - Disallowed when account env is REAL (safety). Revisit with explicit flag later.
+    """
+    c = get_client()
+    if c is None or not c.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    if not c.account_id:
+        raise HTTPException(status_code=400, detail="No account selected")
+    if getattr(c, "env", None) == TrdEnv.REAL:
+        insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+                          reason="blocked_real_env", status="blocked")
+        raise HTTPException(status_code=400, detail="Flatten disabled in REAL environment")
+
+    try:
+        pos = c.get_positions()
+        if not isinstance(pos, list):
+            pos = []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch positions: {e}")
+
+    target_symbols = set([s.strip() for s in (body.symbols or []) if s and s.strip()]) if body.symbols else None
+
+    attempts = []
+    for p in pos:
+        code = p.get("code") or p.get("stock_code") or p.get("symbol")
+        if not code:
+            continue
+        if target_symbols and code not in target_symbols:
+            continue
+
+        # best-effort qty detection across schemas
+        qty = float(
+            p.get("qty")
+            or p.get("qty_today")
+            or p.get("qty_total", 0)
+            or 0
+        )
+        if qty == 0:
+            continue
+
+        side = "SELL" if qty > 0 else "BUY"
+        try:
+            res = c.place_order(symbol=code, qty=abs(qty), side=side, order_type="MARKET", price=None)
+            attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "ok", "result": res})
+            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+                              symbol=code, side=side, qty=abs(qty),
+                              reason="flatten_all", status="ok", extra={"result": res})
+        except Exception as e:
+            attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "error", "error": str(e)})
+            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+                              symbol=code, side=side, qty=abs(qty),
+                              reason="exception", status="error", extra={"msg": str(e)})
+
+    return {"status": "ok", "attempts": attempts}
+
+
 # --- Automation: Strategies ---
 
 @app.post("/automation/start/ma-crossover")
@@ -637,6 +779,9 @@ def automation_start_ma(req: StartMACrossoverRequest):
     }
     
     sid = insert_strategy("ma_crossover", req.symbol.strip(), params, int(req.interval_sec))
+    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+                      symbol=req.symbol.strip(), reason="ma_crossover", status="ok",
+                      extra={"strategy_id": sid, "params": params})
     return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
 
 @app.get("/automation/strategies")
@@ -683,6 +828,8 @@ def automation_update(strategy_id: int, req: UpdateStrategyRequest):
     )
     if not updated:
         raise HTTPException(status_code=404, detail="strategy not found")
+    insert_action_log("update_strategy", mode=(get_setting("bot_mode") or "assist"),
+                      reason=f"id={strategy_id}", status="ok", extra={"params": p, "interval_sec": req.interval_sec, "active": req.active})
     return updated
 
 @app.get("/automation/strategies/{strategy_id}/runs")
@@ -706,6 +853,8 @@ def automation_stop(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, False)
+    insert_action_log("stop_strategy", mode=(get_setting("bot_mode") or "assist"),
+                      reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": False}
 
 @app.post("/automation/start/{strategy_id}")
@@ -718,6 +867,8 @@ def automation_reactivate(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, True)
+    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+                      reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": True}
 
 

@@ -78,6 +78,25 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_fills_symbol ON fills(symbol)
         """)
 
+        # --- NEW: action log (bot explainability & chronology) ---
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS action_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            mode TEXT,               -- 'assist' | 'semi' | 'auto' (optional)
+            action TEXT NOT NULL,    -- 'propose' | 'place' | 'cancel' | 'flatten' | 'error' | ...
+            symbol TEXT,
+            side TEXT,               -- 'BUY' | 'SELL' (optional)
+            qty REAL,
+            price REAL,
+            reason TEXT,             -- short explainer
+            status TEXT,             -- 'ok' | 'blocked' | 'error' | broker status
+            extra_json TEXT          -- arbitrary JSON payload
+        )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_symbol ON action_log(symbol)")
+
 
 # ----- strategies & runs (existing API) -----
 
@@ -188,6 +207,31 @@ def update_strategy(
     return get_strategy(strategy_id)
 
 
+# ----- NEW: settings helpers -----
+
+def get_setting(key: str) -> Optional[str]:
+    with _conn() as c:
+        cur = c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+def set_setting(key: str, value: Any) -> None:
+    with _conn() as c:
+        c.execute("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, json.dumps(value) if not isinstance(value, str) else value))
+
+def all_settings() -> Dict[str, Any]:
+    with _conn() as c:
+        cur = c.execute("SELECT key, value FROM settings")
+        out = {}
+        for r in cur.fetchall():
+            try:
+                out[r["key"]] = json.loads(r["value"])
+            except Exception:
+                out[r["key"]] = r["value"]
+        return out
+
+
 # ----- NEW: orders/fills recording -----
 
 def record_order(
@@ -234,7 +278,55 @@ def record_fill(
         )
 
 
-# ----- NEW: PnL (FIFO/avg-cost style, computed from fills) -----
+# ----- NEW: Action log helpers -----
+
+def insert_action_log(
+    action: str,
+    *,
+    mode: Optional[str] = None,
+    symbol: Optional[str] = None,
+    side: Optional[str] = None,
+    qty: Optional[float] = None,
+    price: Optional[float] = None,
+    reason: str = "",
+    status: str = "ok",
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    with _conn() as c:
+        c.execute(
+            """INSERT INTO action_log(mode, action, symbol, side, qty, price, reason, status, extra_json)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (mode, action, symbol, side,
+             (float(qty) if qty is not None else None),
+             (float(price) if price is not None else None),
+             reason, status,
+             (json.dumps(extra) if extra is not None else None))
+        )
+
+def list_action_logs(
+    limit: int = 100,
+    symbol: Optional[str] = None,
+    since_hours: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    where: List[str] = []
+    vals: List[Any] = []
+    if symbol:
+        where.append("symbol = ?")
+        vals.append(symbol)
+    if since_hours and since_hours > 0:
+        where.append("ts >= datetime('now', ?)")
+        vals.append(f"-{int(since_hours)} hours")
+    q = "SELECT * FROM action_log"
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY id DESC LIMIT ?"
+    vals.append(int(limit))
+    with _conn() as c:
+        cur = c.execute(q, tuple(vals))
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ----- PnL (FIFO/avg-cost style, computed from fills) -----
 
 def _iter_fills_ordered() -> List[sqlite3.Row]:
     with _conn() as c:
