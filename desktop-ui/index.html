@@ -3,61 +3,112 @@
 <head>
   <meta charset="utf-8" />
   <title>Moomoo Trader</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin:0; background:#f4f4f7; color:#222; }
+    nav { background:#0d6efd; color:#fff; padding:0.5rem; display:flex; gap:0.5rem; }
+    nav button { background:transparent; border:none; color:#fff; padding:0.5rem 1rem; border-radius:4px; cursor:pointer; }
+    nav button.active { background:rgba(255,255,255,0.2); }
+    section { max-width:800px; margin:1rem auto; background:#fff; padding:1rem; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+    label { display:block; margin-top:0.5rem; font-size:0.9rem; }
+    input { margin-top:0.25rem; padding:0.4rem; }
+    button.primary { background:#0d6efd; color:#fff; border:none; padding:0.5rem 1rem; border-radius:4px; cursor:pointer; }
+    .flex { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
+  </style>
 </head>
 <body>
-  <h1>Bot Dashboard</h1>
-  <section id="mode">
-    <h2>Autonomy Mode</h2>
-    <select id="mode-select"></select>
-  </section>
-  <section id="risk">
-    <h2>Risk Settings</h2>
-    <pre id="risk-json"></pre>
-  </section>
-  <section id="strategies">
-    <h2>Strategies</h2>
-    <ul id="strategy-list"></ul>
-  </section>
-  <section id="log">
-    <h2>Activity Log</h2>
-    <pre id="log-json"></pre>
-  </section>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script>
+    const e = React.createElement;
     const API_BASE = "http://127.0.0.1:8000";
-    async function load() {
-      const modeRes = await fetch(API_BASE + "/bot/mode");
-      const modeData = await modeRes.json();
-      const select = document.getElementById("mode-select");
-      ["assist","semi","auto"].forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        if (modeData.mode === m) opt.selected = true;
-        select.appendChild(opt);
-      });
-      select.onchange = async () => {
-        await fetch(API_BASE + "/bot/mode", {
-          method: "PUT",
+
+    function Dashboard() {
+      const [status, setStatus] = React.useState({});
+      const [cmd, setCmd] = React.useState("");
+      const [msg, setMsg] = React.useState("");
+      React.useEffect(() => { refresh(); }, []);
+      function refresh() {
+        fetch(API_BASE + "/autopilot/status").then(r=>r.json()).then(setStatus);
+      }
+      function start() {
+        fetch(API_BASE + "/autopilot/start", {method:"POST"}).then(r=>r.json()).then(setStatus);
+      }
+      function stop() {
+        fetch(API_BASE + "/autopilot/stop", {method:"POST"}).then(r=>r.json()).then(setStatus);
+      }
+      function send() {
+        fetch(API_BASE + "/command", {
+          method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({mode: select.value})
-        });
-      };
-
-      const risk = await (await fetch(API_BASE + "/risk/config")).json();
-      document.getElementById("risk-json").textContent = JSON.stringify(risk, null, 2);
-
-      const strats = await (await fetch(API_BASE + "/automation/strategies")).json();
-      const list = document.getElementById("strategy-list");
-      strats.forEach(s => {
-        const li = document.createElement("li");
-        li.textContent = s.name || ("strategy " + s.id);
-        list.appendChild(li);
-      });
-
-      const log = await (await fetch(API_BASE + "/logs/actions")).json();
-      document.getElementById("log-json").textContent = JSON.stringify(log, null, 2);
+          body: JSON.stringify({text: cmd})
+        }).then(r=>r.json()).then(r=>{setStatus(r); setMsg(JSON.stringify(r));});
+        setCmd("");
+      }
+      return e("section", null,
+        e("h2", null, "Autopilot"),
+        e("div", {className:"flex"},
+          e("span", null, "Status: " + (status.active ? "Active" : "Idle")),
+          e("button", {className:"primary", onClick:start, disabled: status.active}, "Start"),
+          e("button", {className:"primary", onClick:stop, disabled: !status.active}, "Stop")
+        ),
+        status.strategy && e("div", null, "Strategy: " + status.strategy),
+        status.last_command && e("div", null, "Last: " + status.last_command),
+        e("div", {className:"flex"},
+          e("input", {value: cmd, onChange: ev=>setCmd(ev.target.value), placeholder:"command"}),
+          e("button", {className:"primary", onClick: send}, "Send")
+        ),
+        msg && e("pre", null, msg)
+      );
     }
-    load();
+
+    function Backtest() {
+      const [symbol, setSymbol] = React.useState("US.AAPL");
+      const [fast, setFast] = React.useState(20);
+      const [slow, setSlow] = React.useState(50);
+      const [res, setRes] = React.useState(null);
+      function run() {
+        fetch(API_BASE + "/backtest/ma-crossover", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({symbol, fast:Number(fast), slow:Number(slow)})
+        }).then(r=>r.json()).then(setRes);
+      }
+      return e("section", null,
+        e("h2", null, "Backtest"),
+        e("div", {className:"flex"},
+          e("label", null, "Symbol"),
+          e("input", {value: symbol, onChange:e=>setSymbol(e.target.value)}),
+          e("label", null, "Fast"),
+          e("input", {type:"number", value: fast, onChange:e=>setFast(e.target.value)}),
+          e("label", null, "Slow"),
+          e("input", {type:"number", value: slow, onChange:e=>setSlow(e.target.value)}),
+          e("button", {className:"primary", onClick: run}, "Run")
+        ),
+        res && e("pre", null, JSON.stringify(res.metrics, null, 2))
+      );
+    }
+
+    function Settings() {
+      return e("section", null,
+        e("h2", null, "Settings"),
+        e("p", null, "Future controls go here")
+      );
+    }
+
+    function App() {
+      const [tab, setTab] = React.useState("dash");
+      return e("div", null,
+        e("nav", null,
+          e("button", {className: tab==='dash'?"active":"", onClick:()=>setTab('dash')}, "Dashboard"),
+          e("button", {className: tab==='bt'?"active":"", onClick:()=>setTab('bt')}, "Backtest"),
+          e("button", {className: tab==='settings'?"active":"", onClick:()=>setTab('settings')}, "Settings")
+        ),
+        tab==='dash' ? e(Dashboard) : tab==='bt' ? e(Backtest) : e(Settings)
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(e(App));
   </script>
 </body>
 </html>
