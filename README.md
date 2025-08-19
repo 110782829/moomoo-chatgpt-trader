@@ -28,10 +28,18 @@ This repository will evolve over time. For the initial version, we plan to:
 1. Clone this repository and install dependencies:
 
    ```bash
-   git clone https://github.com/yourusername/moomoo-chatgpt-trader.git
+   git clone --branch main --single-branch https://github.com/110782829/moomoo-chatgpt-trader.git
    cd moomoo-chatgpt-trader
-   python3 -m venv venv
-   source venv/bin/activate
+
+   # create & activate a virtual env (macOS/Linux)
+   python3 -m venv .venv
+   source .venv/bin/activate
+
+   # on Windows (PowerShell):
+   # py -3 -m venv .venv
+   # .\.venv\Scripts\Activate.ps1
+
+   python -m pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
@@ -41,18 +49,36 @@ This repository will evolve over time. For the initial version, we plan to:
    MOOMOO_HOST=127.0.0.1
    MOOMOO_PORT=11111
    MOOMOO_CLIENT_ID=1
+
+   # Optional (used by the Streamlit diagnostics UI)
+   API_BASE_URL=http://127.0.0.1:8000
+
+   # Optional feature flags for Streamlit diagnostics
+   UI_SHOW_DIAGNOSTICS=true
+   UI_ALLOW_MANUAL_ORDERS=false
+   UI_SHOW_CHARTS=false
    ```
 
 3. Start the OpenD gateway provided by moomoo.
+   Launch the moomoo OpenD process on your machine and ensure it’s reachable at the host/port you configured.
 
 4. Run the development server:
 
    ```bash
-   python src/main.py
+   uvicorn --app-dir src server:app --reload --port 8000
    ```
 
 5. Open the Streamlit UI in your browser (the server will output a local URL).
 
-## Contributing
+'''bash
+(Optional) Launch the Streamlit diagnostics UI
 
-We plan to use a branch-based workflow (`main`, `dev`, and feature branches). Feel free to open issues for bugs or feature suggestions.
+Helpful during development for inspecting positions/orders, tweaking risk, and checking PnL.
+
+streamlit run src/ui/app_streamlit.py
+'''
+## Notes
+
+The Streamlit app is intended as a developer diagnostics console. The long-term plan is a desktop app (e.g., Tauri + React) focused on bot configuration, autonomy, and action logs.
+
+Paper trading is strongly recommended while testing. Real trading requires careful configuration of risk limits and explicit enablement.

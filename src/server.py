@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional 
 import os
 import json
 from datetime import datetime
@@ -15,7 +15,7 @@ from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
 
-# Optional automation (scheduler + storage + strategy step)
+# Automation (scheduler + storage + strategy step)
 try:
     from core.storage import (
         init_db,
@@ -132,6 +132,9 @@ class CancelOrderRequest(BaseModel):
 
 class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
+
+class FlattenRequest(BaseModel):
+    symbols: Optional[List[str]] = None  # optional subset; if omitted, flatten all
 
 class StartMACrossoverRequest(BaseModel):
     # core
@@ -856,6 +859,31 @@ def automation_stop(strategy_id: int):
     insert_action_log("stop_strategy", mode=(get_setting("bot_mode") or "assist"),
                       reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": False}
+
+@app.post("/automation/stop_all")
+def automation_stop_all():
+    """
+    Stop all active strategies (set active=0 in SQLite).
+    Works even if you are not connected to the broker.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Automation modules not available: {_AUTOMATION_IMPORT_ERR}",
+        )
+
+    rows = list_strategies()
+    def _is_active(v):
+        s = str(v).strip().lower()
+        return v is True or s in {"1", "true", "yes"}
+
+    stopped = 0
+    for r in rows or []:
+        if _is_active(r.get("active")):
+            set_strategy_active(int(r["id"]), False)
+            stopped += 1
+
+    return {"status": "ok", "stopped": stopped}
 
 @app.post("/automation/start/{strategy_id}")
 def automation_reactivate(strategy_id: int):
