@@ -18,10 +18,7 @@ const css = `
   --brand:#7c3aed; --brand2:#06b6d4; --red:#ef4444; --amber:#f59e0b; --green:#22c55e; --border:#1f2937; --hover:#0f172a;
 }
 *{box-sizing:border-box} html,body,#root{height:100%}
-body{margin:0;background:
-  radial-gradient(1200px 600px at 20% -10%, rgba(124,58,237,.12), transparent 60%),
-  radial-gradient(1000px 500px at 100% 0%, rgba(6,182,212,.12), transparent 60%),
-  var(--bg);
+body{margin:0;background:var(--bg);
  color:var(--text); font:14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
 .app{max-width:1180px;margin:0 auto;padding:18px 20px 28px}
@@ -143,7 +140,33 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .sticky-controls{position: sticky; top: 0; background: #0f1420; padding: 6px 0; z-index: 2; border-bottom: 1px solid var(--border);}
 .note{font-size:12px;color:var(--muted)}
-`;
+
+/* indicator font tweak */
+.indicator{font-size:12px;font-weight:600}
+
+.header, .title, .header-quick{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial }
+
+.grid-2{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+@media (max-width:980px){.grid-2{grid-template-columns:1fr}}
+.panel.thick{padding:22px}
+/* Autopilot switch (solid color) */
+.switch-lg{position:relative;width:60px;height:30px;border-radius:999px;background:#334155;border:1px solid #475569;display:inline-flex;align-items:center;transition:background .18s ease,border-color .18s ease}
+.switch-lg .thumb{position:absolute;left:3px;width:24px;height:24px;border-radius:999px;background:#0b1220;box-shadow:0 6px 16px rgba(0,0,0,.35);transition:transform .2s ease, background .2s ease}
+.switch-lg.on{background:#22a6f2;border-color:#22a6f2}
+.switch-lg.on .thumb{transform:translateX(30px);background:#ffffff}
+.help.strong{font-weight:600;color:var(--text)}
+
+/* Align with KPI 3-column track; panels span to align edges */
+.panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:12px}
+.panels3 .span-2{grid-column:span 2 / span 2}
+@media (max-width:980px){.panels3{grid-template-columns:1fr}.panels3 .span-2{grid-column:auto}}
+
+/* Fixed gradient overlay to avoid scroll seams */
+.bgfx{position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(139,92,246,.12), transparent 60%),
+    radial-gradient(1000px 500px at 100% 0%, rgba(34,211,238,.10), transparent 60%);
+}`;
 
 // ---------- Types ----------
 type Mode = "assist" | "semi" | "auto";
@@ -433,6 +456,7 @@ export default function App() {
   // ---------- Render ----------
   return (
     <div className="app">
+      <div className="bgfx" aria-hidden="true"></div>
       <style>{css}</style>
 
       <header className="header">
@@ -446,7 +470,7 @@ export default function App() {
             </defs>
           </svg>
           <div>
-            <div style={{fontSize:18,fontWeight:700}}>Moomoo ChatGPT Trading Bot</div>
+            <div style={{fontSize:24,fontWeight:800}}>Moomoo ChatGPT Trading Bot</div>
             <div className="help">API: <small className="code">{API_BASE}</small></div>
           </div>
         </div>
@@ -460,18 +484,7 @@ export default function App() {
             <span>{activeAccount?.account_id || "—"}</span>
             {activeAccount?.trd_env ? <span>• {activeAccount.trd_env}</span> : null}
           </span>
-          <div className="indicator" title="Autonomy Mode" style={{border:"none", background:"transparent", padding:0}}>
-            <NiceSelect
-              value={mode}
-              onChange={(v)=>setBotMode(v as Mode)}
-              options={[
-                { value: "assist", label: "assist" },
-                { value: "semi", label: "semi" },
-                { value: "auto", label: "auto" },
-              ]}
-              width={140}
-            />
-          </div>
+          <span className="indicator" title="Bot Mode"><span>Bot mode: {(mode==="auto"||mode==="semi") ? "Automatic" : "Manual"}</span></span>
         </div>
       </header>
 
@@ -528,20 +541,6 @@ export default function App() {
               <button className="btn brand" onClick={doSelect}>Select Account</button>
               <button className="btn" onClick={()=>api.sessionSave(host as string, Number(port), String(accountId), String(trdEnv)).then(()=>toast.show("Session saved.")).catch(e=>toast.show(brief(e)))}>Save Session</button>
               <button className="btn" onClick={()=>api.sessionClear().then(()=>toast.show("Saved session cleared.")).catch(e=>toast.show(brief(e)))}>Clear Saved</button>
-            </div>
-          </div>
-
-          {/* Autonomy */}
-          <div className="panel">
-            <h2 style={{marginTop:0,marginBottom:10}}>Autonomy</h2>
-            <div className="row" style={{alignItems:"center"}}>
-              {(["assist","semi","auto"] as Mode[]).map(m => (
-                <label key={m} style={{display:"flex",alignItems:"center",gap:8}}>
-                  <input type="radio" name="mode" checked={mode===m} onChange={()=>setBotMode(m)} />
-                  <span style={{textTransform:"capitalize"}}>{m}</span>
-                </label>
-              ))}
-              <div className="help">Assist: propose only • Semi: auto within small risk budget • Auto: full autonomy (bounded by risk)</div>
             </div>
           </div>
 
@@ -614,12 +613,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className="panel">
+          <div className="grid-3 panels3">
+<div className="panel thick span-2">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
               <h2 style={{margin:0}}>Controls</h2>
               <div className="note">Last updated: {statusAt}</div>
             </div>
-            <div className="row">
+            <div className="row" style={{marginTop:14}}>
               <button className="btn red" onClick={killSwitch}>Kill Switch (Stop Strategies)</button>
               <button className="btn amber" onClick={doFlattenAll} disabled={!connected}>Flatten All Now</button>
               <button className="btn" onClick={()=>refreshStatus(true)}>{statusLoading?"Refreshing…":"Refresh"}</button>
@@ -639,6 +639,27 @@ export default function App() {
               />
             </div>
           </div>
+
+<div className="panel">
+  <h2 style={{marginTop:0,marginBottom:10}}>Autopilot</h2>
+  <div className="row" style={{alignItems:"center", gap:12, marginTop:14}}>
+    <button
+      className={`switch-lg ${(mode==="auto"||mode==="semi") ? "on" : ""}`}
+      role="switch"
+      aria-checked={(mode==="auto"||mode==="semi")}
+      onClick={()=> setBotMode((mode==="auto"||mode==="semi") ? "assist" : "auto")}
+      title="Toggle Autopilot On/Off"
+    >
+      <span className="thumb" />
+    </button>
+    <div className="help strong">{(mode==="auto"||mode==="semi") ? "On" : "Off"}</div>
+  </div>
+  <div className="help" aria-live="polite" style={{marginTop:6}}>
+    {(mode==="auto"||mode==="semi") ? "Autopilot is running" : "Autopilot is off"}
+  </div>
+</div>
+
+</div>
 
           <div className="panel">
             <h2 style={{marginTop:0,marginBottom:10}}>Active Strategies</h2>
