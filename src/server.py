@@ -1,4 +1,7 @@
-from fastapi import FastAPI, HTTPException
+'''
+Start command: uvicorn --app-dir src server:app --reload --port 8000"
+'''
+from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import List, Optional 
 import os
@@ -1067,3 +1070,89 @@ def backtest_ma_grid(req: BacktestMAGridRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest grid failed: {e}")
+
+
+# --- Autopilot (planner/executor) scaffold ---
+try:
+    from autopilot.worker import AutopilotManager
+    from autopilot import schemas as ap_schemas
+    _AUTOPILOT_AVAILABLE = True
+    _AUTOPILOT_IMPORT_ERR = None
+except Exception as _ae:
+    AutopilotManager = None  # type: ignore
+    ap_schemas = None        # type: ignore
+    _AUTOPILOT_AVAILABLE = False
+    _AUTOPILOT_IMPORT_ERR = _ae
+
+autopilot_router = APIRouter(prefix="/autopilot", tags=["autopilot"])
+
+_autopilot_mgr = None  # lazy singleton
+
+def _get_autopilot():
+    global _autopilot_mgr
+    if _autopilot_mgr is None:
+        if not _AUTOPILOT_AVAILABLE:
+            raise HTTPException(status_code=500, detail=f"Autopilot unavailable: {_AUTOPILOT_IMPORT_ERR}")
+        # lazy-create manager; pass client accessor and risk-loader
+        def _risk_loader():
+            try:
+                return _risk_load()
+            except Exception:
+                return {}
+        _autopilot_mgr = AutopilotManager(get_client, _risk_loader)
+    return _autopilot_mgr
+
+@autopilot_router.post("/enable")
+async def autopilot_enable(body: dict):
+    """
+    Enable/disable the Autopilot worker loop.
+    Body: {"on": bool}
+    """
+    on = bool(body.get("on", False))
+    mgr = _get_autopilot()
+    if on:
+        await mgr.start()
+        return {"on": True, "status": "started"}
+    else:
+        await mgr.stop()
+        return {"on": False, "status": "stopped"}
+
+@autopilot_router.get("/status")
+async def autopilot_status():
+    mgr = _get_autopilot()
+    return mgr.status()
+
+@autopilot_router.post("/preview")
+async def autopilot_preview():
+    """
+    Run a single Sense→Think (no Act). Returns planner input, raw planner output, and validation details.
+    """
+    mgr = _get_autopilot()
+    return await mgr.preview()
+
+@autopilot_router.get("/context")
+async def autopilot_context():
+    mgr = _get_autopilot()
+    return {"last_input": mgr.last_input or {}}
+
+@autopilot_router.get("/last_output")
+async def autopilot_last_output():
+    mgr = _get_autopilot()
+    return {"last_output": mgr.last_output or {}}
+
+@autopilot_router.get("/logs")
+async def autopilot_logs(limit: int = 100, offset: int = 0):
+    mgr = _get_autopilot()
+    return mgr.get_logs(limit=limit, offset=offset)
+
+# stop Autopilot cleanly on shutdown (in addition to scheduler)
+@app.on_event("shutdown")
+async def _autopilot_shutdown():
+    try:
+        mgr = _get_autopilot()
+        await mgr.stop()
+    except Exception:
+        pass
+
+# mount the router
+app.include_router(autopilot_router)

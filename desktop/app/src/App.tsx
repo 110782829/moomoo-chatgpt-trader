@@ -255,6 +255,10 @@ const api = {
   // strategy starters (live)
   startMA: (payload: any) => SEND("/automation/start/ma-crossover", payload),
   // startGrid: (payload: any) => SEND("/automation/start/ma-grid", payload),
+  // autopilot
+  autopilotStatus: () => GET("/autopilot/status"),
+  autopilotEnable: (on: boolean) => SEND("/autopilot/enable", { on }),
+  autopilotPreview: () => SEND("/autopilot/preview", {}),
 };
 
 // ---------- Toast ----------
@@ -294,6 +298,10 @@ export default function App() {
   const [saving, setSaving] = useState(false);
 
   // status
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewResult, setPreviewResult] = useState<any|null>(null);
+
   const [pnl, setPnl] = useState<number | null>(null);
   const [openPositions, setOpenPositions] = useState<number | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -453,7 +461,21 @@ export default function App() {
     } catch (e: any) { toast.show(`Reconnect failed: ${brief(e)}`); }
   }
 
-  // ---------- Render ----------
+  
+
+async function doPreview() {
+  try {
+    setPreviewLoading(true);
+    const res = await api.autopilotPreview();
+    setPreviewResult(res);
+    setPreviewOpen(true);
+  } catch (e: any) {
+    toast.show(`Preview failed: ${brief(e)}`);
+  } finally {
+    setPreviewLoading(false);
+  }
+}
+// ---------- Render ----------
   return (
     <div className="app">
       <div className="bgfx" aria-hidden="true"></div>
@@ -647,12 +669,22 @@ export default function App() {
       className={`switch-lg ${(mode==="auto"||mode==="semi") ? "on" : ""}`}
       role="switch"
       aria-checked={(mode==="auto"||mode==="semi")}
-      onClick={()=> setBotMode((mode==="auto"||mode==="semi") ? "assist" : "auto")}
+      onClick={async()=> { const turnOn = !(mode==="auto"||mode==="semi"); try { await api.autopilotEnable(turnOn); } catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`);} setBotMode(turnOn ? "auto" : "assist"); }}
       title="Toggle Autopilot On/Off"
     >
       <span className="thumb" />
     </button>
     <div className="help strong">{(mode==="auto"||mode==="semi") ? "On" : "Off"}</div>
+<button
+  className="btn brand"
+  style={{marginLeft:"auto"}}
+  onClick={doPreview}
+  disabled={previewLoading}
+  title="Run a dry-run tick (no orders)"
+>
+  {previewLoading ? "Running Preview…" : "Preview Decisions"}
+</button>
+
   </div>
   <div className="help" aria-live="polite" style={{marginTop:6}}>
     {(mode==="auto"||mode==="semi") ? "Autopilot is running" : "Autopilot is off"}
@@ -681,6 +713,25 @@ export default function App() {
 
       {/* ===== Backtest ===== */}
       {tab===Tab.Backtest && <BacktestPanel />}
+
+      {previewOpen && createPortal(
+        <div id="preview-modal" style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
+        }} onClick={()=>setPreviewOpen(false)}>
+          <div className="panel" style={{width: "min(860px, 94vw)", maxHeight: "80vh", overflow: "auto"}} onClick={e=>e.stopPropagation()}>
+            <h2 style={{marginTop:0}}>Autopilot Preview</h2>
+            <div className="help" style={{marginBottom:8}}>Raw planner input/output and validation (read-only)</div>
+            <pre style={{whiteSpace:"pre-wrap", background:"#0b1220", padding:"12px", borderRadius:"8px", border:"1px solid var(--border)"}}>
+{JSON.stringify(previewResult, null, 2)}
+            </pre>
+            <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
+              <button className="btn" onClick={()=>setPreviewOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
       {toast.msg && <div className="toast" role="status" aria-live="polite">{toast.msg}</div>}
     </div>
   );
