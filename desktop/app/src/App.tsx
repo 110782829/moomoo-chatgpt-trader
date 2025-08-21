@@ -305,6 +305,9 @@ export default function App() {
   const [pnl, setPnl] = useState<number | null>(null);
   const [openPositions, setOpenPositions] = useState<number | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
+  const [autoStatus, setAutoStatus] = useState<any|null>(null);
+  const [autoEvery, setAutoEvery] = useLocalStorage("auto.ms", 4000);
+  const [autoAt, setAutoAt] = useState<string>("—");
   const [autoRefresh, setAutoRefresh] = useLocalStorage("status.auto", true);
   const [statusEvery, setStatusEvery] = useLocalStorage("status.ms", 5000);
   const [statusAt, setStatusAt] = useState<string>("—");
@@ -342,8 +345,9 @@ export default function App() {
   useEffect(() => {
     if (!autoRefresh || tab !== Tab.Status) return;
     const id = window.setInterval(() => refreshStatus(false), statusEvery);
-    return () => window.clearInterval(id);
-  }, [autoRefresh, tab, statusEvery]);
+    const idAuto = window.setInterval(() => refreshAutoStatus(), autoEvery);
+    return () => { window.clearInterval(id); window.clearInterval(idAuto); };
+  }, [autoRefresh, tab, statusEvery, autoEvery]);
 
   useEffect(() => {
     if (!logsAuto || tab !== Tab.Activity) return;
@@ -475,6 +479,18 @@ async function doPreview() {
     setPreviewLoading(false);
   }
 }
+
+
+async function refreshAutoStatus() {
+  try {
+    const st = await api.autopilotStatus();
+    setAutoStatus(st || null);
+    setAutoAt(nowIso());
+  } catch (e:any) {
+    // silent
+  }
+}
+
 // ---------- Render ----------
   return (
     <div className="app">
@@ -688,6 +704,7 @@ async function doPreview() {
   </div>
   <div className="help" aria-live="polite" style={{marginTop:6}}>
     {(mode==="auto"||mode==="semi") ? "Autopilot is running" : "Autopilot is off"}
+    {autoStatus ? ` • Last tick: ${autoStatus.last_tick || "—"} • Reject streak: ${autoStatus.reject_streak || 0}` : ""}
   </div>
 </div>
 
