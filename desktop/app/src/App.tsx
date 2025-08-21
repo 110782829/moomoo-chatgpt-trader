@@ -259,6 +259,7 @@ const api = {
   autopilotStatus: () => GET("/autopilot/status"),
   autopilotEnable: (on: boolean) => SEND("/autopilot/enable", { on }),
   autopilotPreview: () => SEND("/autopilot/preview", {}),
+  autopilotLogs: (limit: number) => GET("/autopilot/logs", { limit }),
 };
 
 // ---------- Toast ----------
@@ -320,6 +321,7 @@ export default function App() {
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsAuto, setLogsAuto] = useLocalStorage("logs.auto", true);
   const [logsEvery, setLogsEvery] = useLocalStorage("logs.ms", 6000);
+  const [logsSource, setLogsSource] = useLocalStorage<"system"|"autopilot">("logs.source", "system");
   const [logsAt, setLogsAt] = useState<string>("—");
 
   // initial: load session + mode + risk
@@ -370,113 +372,20 @@ export default function App() {
   }
 
   async function refreshLogs(show = true) {
-    try {
-      setLogsLoading(true);
-      const ls = await api.getActionLogs({ limit: logLimit, symbol: logSymbol || undefined, since_hours: logSince });
-      setLogs(ls || []);
-      setLogsAt(nowIso());
-    } catch (e: any) {
-      show && toast.show(`Logs refresh failed: ${brief(e)}`);
-    } finally {
-      setLogsLoading(false);
-    }
-  }
-
-  function cfgGet<K extends keyof RiskConfig>(k: K, fallback: any) {
-    return (cfg?.[k] ?? fallback) as NonNullable<RiskConfig[K]>;
-  }
-
-  async function saveRisk() {
-    if (!cfg) return;
-    try {
-      setSaving(true);
-      setCfg(await api.putRiskConfig(cfg));
-      toast.show("Risk configuration saved.");
-    } catch (e: any) {
-      toast.show(`Save failed: ${brief(e)}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function setBotMode(m: Mode) {
-    try { setMode((await api.setBotMode(m)).mode); toast.show(`Mode set to ${m}`); }
-    catch (e: any) { toast.show(`Failed to set mode: ${brief(e)}`); }
-  }
-
-  async function killSwitch() {
-    // Confirmation disabled to ensure click path in Tauri is reliable
-    try {
-      console.log("KillSwitch: sending /automation/stop_all");
-      const res = await SEND("/automation/stop_all", {});  // POST
-      const n = (res as any)?.stopped ?? 0;
-      toast.show(`Stopped ${n} strategies.`);
-      setStratRefreshTick(t => t + 1);
-    } catch (e: any) {
-      toast.show(`Kill switch failed: ${brief(e)}`);
-    }
-  }
-
-  async function doFlattenAll() {
-    if (!connected) { toast.show("Not connected."); return; }
-    try {
-      console.log("FlattenAll: sending /positions/flatten");
-      await api.flattenAll();      // POST /positions/flatten
-      toast.show("Flatten command sent.");
-      await refreshLogs(false);
-    } catch (e: any) {
-      toast.show(`Flatten failed: ${brief(e)}`);
-    }
-  }
-
-  // Connect helpers
-  async function doConnect() {
-    try {
-      await SEND("/connect", { host: host as string, port: Number(port), client_id: Number(clientId) });
-      setConnected(true);
-      toast.show("Connected to OpenD gateway.");
-    } catch (e: any) {
-      setConnected(false);
-      toast.show(`Connect failed: ${brief(e)}`);
-    }
-  }
-  async function doSelect() {
-    try {
-      await api.selectAccount(String(accountId), trdEnv as "SIMULATE"|"REAL");
-      const a = await api.accountsActive();
-      setActiveAccount(a);
-      toast.show(`Account selected: ${a.account_id} • ${a.trd_env}`);
-      await api.sessionSave(host as string, Number(port), String(accountId), String(trdEnv));
-    } catch (e: any) {
-      toast.show(`Select failed: ${brief(e)}`);
-    }
-  }
-  async function reconnectFromSaved() {
-    try {
-      const st = await api.sessionStatus();
-      if (!st.saved?.host || !st.saved?.port) { toast.show("No saved session."); return; }
-      await SEND("/connect", { host: st.saved.host, port: Number(st.saved.port), client_id: 1 });
-      if (st.saved.account_id && st.saved.trd_env) {
-        await api.selectAccount(String(st.saved.account_id), String(st.saved.trd_env).toUpperCase() === "REAL" ? "REAL" : "SIMULATE");
-      }
-      const a = await api.accountsActive();
-      setConnected(true); setActiveAccount(a);
-      toast.show(`Reconnected: ${a.account_id || "—"} • ${a.trd_env || "—"}`);
-    } catch (e: any) { toast.show(`Reconnect failed: ${brief(e)}`); }
-  }
-
-  
-
-async function doPreview() {
   try {
-    setPreviewLoading(true);
-    const res = await api.autopilotPreview();
-    setPreviewResult(res);
-    setPreviewOpen(true);
+    setLogsLoading(true);
+    let ls: any[] = [];
+    if (logsSource === "autopilot") {
+      ls = await api.autopilotLogs(logLimit) as any[];
+    } else {
+      ls = await api.getActionLogs({ limit: logLimit, symbol: logSymbol || undefined, since_hours: logSince });
+    }
+    setLogs(ls || []);
+    setLogsAt(nowIso());
   } catch (e: any) {
-    toast.show(`Preview failed: ${brief(e)}`);
+    show && toast.show(`Logs refresh failed: ${brief(e)}`);
   } finally {
-    setPreviewLoading(false);
+    setLogsLoading(false);
   }
 }
 
@@ -721,12 +630,19 @@ async function refreshAutoStatus() {
       )}
 
       {/* ===== Activity Log ===== */}
-      {tab===Tab.Activity && <ActivityLog logs={logs} logsAt={logsAt} logsEvery={logsEvery} setLogsEvery={setLogsEvery}
-                                          logsAuto={logsAuto} setLogsAuto={setLogsAuto}
-                                          logSymbol={logSymbol} setLogSymbol={setLogSymbol}
-                                          logSince={logSince} setLogSince={setLogSince}
-                                          logLimit={logLimit} setLogLimit={setLogLimit}
-                                          refreshLogs={()=>refreshLogs(true)} logsLoading={logsLoading} />}
+      {tab===Tab.Activity && (<>
+  <div className="row" style={{marginBottom:8, gap:8}}>
+    <span className="label">Source</span>
+    <button className="btn" onClick={()=>setLogsSource("system")} disabled={logsSource==="system"}>System</button>
+    <button className="btn" onClick={()=>setLogsSource("autopilot")} disabled={logsSource==="autopilot"}>Autopilot</button>
+  </div>
+  <ActivityLog logs={logs} logsAt={logsAt} logsEvery={logsEvery} setLogsEvery={setLogsEvery}
+               logsAuto={logsAuto} setLogsAuto={setLogsAuto}
+               logSymbol={logSymbol} setLogSymbol={setLogSymbol}
+               logSince={logSince} setLogSince={setLogSince}
+               logLimit={logLimit} setLogLimit={setLogLimit}
+               refreshLogs={()=>refreshLogs(true)} logsLoading={logsLoading} />
+</>)}
 
       {/* ===== Backtest ===== */}
       {tab===Tab.Backtest && <BacktestPanel />}
@@ -752,6 +668,112 @@ async function refreshAutoStatus() {
       {toast.msg && <div className="toast" role="status" aria-live="polite">{toast.msg}</div>}
     </div>
   );
+
+// ===== Handlers & helpers (scoped to App) =====
+async function doConnect() {
+  try {
+    await api.connect(String(host), Number(port), Number(clientId));
+    setConnected(true);
+    try { setActiveAccount(await api.accountsActive()); } catch {}
+    toast.show("Connected.");
+  } catch (e:any) {
+    toast.show(`Connect failed: ${brief(e)}`);
+  }
+}
+
+async function reconnectFromSaved() {
+  try {
+    const st = await api.sessionStatus();
+    const saved = st?.saved || {};
+    const h = String(saved.host || host);
+    const p = Number(saved.port || port);
+    const cid = Number(saved.client_id || clientId);
+    await api.connect(h, p, cid);
+    setHost(h); setPort(p); setClientId(cid);
+    setConnected(true);
+    try { setActiveAccount(await api.accountsActive()); } catch {}
+    toast.show("Reconnected from saved.");
+  } catch (e:any) {
+    toast.show(`Reconnect failed: ${brief(e)}`);
+  }
+}
+
+async function doSelect() {
+  try {
+    const resp = await api.selectAccount(String(accountId), trdEnv);
+    setActiveAccount(resp as any);
+    toast.show("Account selected.");
+  } catch (e:any) {
+    toast.show(`Select failed: ${brief(e)}`);
+  }
+}
+
+function cfgGet<K extends keyof RiskConfig, T = any>(key: K, def: T): any {
+  const c: any = cfg || {};
+  const v = c[key];
+  if (v === undefined || v === null) return def;
+  return v;
+}
+
+async function saveRisk() {
+  if (!cfg) return;
+  try {
+    setSaving(true);
+    const r = await api.putRiskConfig(cfg);
+    setCfg(r);
+    toast.show("Risk config saved.");
+  } catch (e:any) {
+    toast.show(`Save failed: ${brief(e)}`);
+  } finally {
+    setSaving(false);
+  }
+}
+
+async function killSwitch() {
+  const ok = await askConfirm("Stop all running automations NOW?");
+  if (!ok) return;
+  try {
+    await SEND("/automation/stop_all", {});
+    toast.show("Kill switch sent.");
+    setStratRefreshTick(t=>t+1);
+  } catch (e:any) {
+    toast.show(`Kill switch failed: ${brief(e)}`);
+  }
+}
+
+async function doFlattenAll() {
+  const ok = await askConfirm("Flatten ALL positions now? (SIMULATE is allowed; REAL is blocked by server)");
+  if (!ok) return;
+  try {
+    await api.flattenAll();
+    toast.show("Flatten sent.");
+  } catch (e:any) {
+    toast.show(`Flatten failed: ${brief(e)}`);
+  }
+}
+
+async function setBotMode(next: Mode) {
+  try {
+    const r = await api.setBotMode(next);
+    setMode(r.mode as Mode);
+  } catch (e:any) {
+    toast.show(`Set mode failed: ${brief(e)}`);
+  }
+}
+
+async function doPreview() {
+  try {
+    setPreviewLoading(true);
+    const r = await api.autopilotPreview();
+    setPreviewResult(r);
+    setPreviewOpen(true);
+  } catch (e:any) {
+    toast.show(`Preview failed: ${brief(e)}`);
+  } finally {
+    setPreviewLoading(false);
+  }
+}
+
 
   function brief(err: any) {
     try { const j = JSON.parse(String(err?.message || err)); return j?.detail || err?.message || String(err); }

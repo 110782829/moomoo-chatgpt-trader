@@ -201,11 +201,31 @@ class AutopilotManager:
         out_model = self._planner.plan(ctx)
         return out_model.dict()
 
-    def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
-        if out.decisions:
-            self._log("planner_decisions", {"n": len(out.decisions)})
-        else:
-            self._log("planner_idle", {"msg": "no decisions"})
+    
+def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
+    if out.decisions:
+        # Summary entry
+        self._log("planner_decisions", {"n": len(out.decisions)})
+        # Row-level entries for Activity Log (Autopilot)
+        for d in out.decisions:
+            try:
+                row = {
+                    "ts": _utcnow_iso(),
+                    "mode": "auto",
+                    "action": getattr(d, "action", None),
+                    "symbol": getattr(d, "sym", None),
+                    "side": getattr(d, "side", None),
+                    "qty": f"{getattr(d, 'size_type', '')}:{getattr(d, 'size_value', '')}",
+                    "price": getattr(d, "limit_price", None) or "",
+                    "reason": f"{getattr(d, 'rationale', '')} (conf={getattr(d, 'confidence', 0.0):.2f})",
+                    "status": "planned",
+                }
+                self._logs.append(row)
+            except Exception:
+                # best-effort logging
+                pass
+    else:
+        self._log("planner_idle", {"msg": "no decisions"})
 
     def _log(self, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
         entry = {"ts": _utcnow_iso(), "reason": reason, "extra": extra or {}}
