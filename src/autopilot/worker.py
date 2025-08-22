@@ -1,4 +1,3 @@
-
 # src/autopilot/worker.py
 from __future__ import annotations
 
@@ -55,6 +54,7 @@ class AutopilotManager:
         self.risk_loader = risk_loader
         self._task: Optional[asyncio.Task] = None
         self._running: bool = False
+        self._lock: asyncio.Lock = asyncio.Lock()
         self.tick_sec: int = 15
 
         self.last_input: Optional[Dict[str, Any]] = None
@@ -68,25 +68,32 @@ class AutopilotManager:
         self._logs: List[Dict[str, Any]] = []
 
     async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run())
+        """Idempotent start of the worker loop."""
+        async with self._lock:
+            if self._running and self._task and not self._task.done():
+                return
+            self._running = True
+            self.reject_streak = 0
+            self._task = asyncio.create_task(self._run(), name="autopilot_worker")
 
     async def stop(self) -> None:
-        self._running = False
-        task = self._task
-        self._task = None
+        """Idempotent stop of the worker loop. Never raises due to internal task errors."""
+        async with self._lock:
+            self._running = False
+            task = self._task
+            self._task = None
         if task:
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception as e:  # pragma: no cover
+                self._log("autopilot_stop_exception", {"error": str(e)})
 
     def status(self) -> Dict[str, Any]:
         return {
-            "on": self._running,
+            "on": self._running and self._task is not None and not self._task.done(),
             "last_tick": self.last_tick_ts,
             "last_decision": (self.last_output or {}).get("decisions", [])[:3],
             "stats": dict(self.stats),
@@ -124,14 +131,23 @@ class AutopilotManager:
                     self.stats["rejected"] += 1
                     self.reject_streak += 1
                     self._log("planner_invalid_json", {"error": str(e)})
+                    self.last_tick_ts = _utcnow_iso()
                     await asyncio.sleep(self.tick_sec)
                     continue
 
-                self._act(ctx, validated)
+                # Act stage (guardrail stubs + logging)
+                try:
+                    self._act(ctx, validated)
+                except Exception as e:  # pragma: no cover
+                    self._log("act_exception", {"error": str(e)})
+
                 self.last_input = ctx
                 self.last_output = out
                 self.last_tick_ts = _utcnow_iso()
                 self.stats["ticks"] += 1
+            except asyncio.CancelledError:
+                # graceful shutdown
+                break
             except Exception as e:  # pragma: no cover
                 self._log("autopilot_exception", {"error": str(e)})
             await asyncio.sleep(self.tick_sec)
@@ -201,31 +217,31 @@ class AutopilotManager:
         out_model = self._planner.plan(ctx)
         return out_model.dict()
 
-    
-def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
-    if out.decisions:
-        # Summary entry
-        self._log("planner_decisions", {"n": len(out.decisions)})
-        # Row-level entries for Activity Log (Autopilot)
-        for d in out.decisions:
-            try:
-                row = {
-                    "ts": _utcnow_iso(),
-                    "mode": "auto",
-                    "action": getattr(d, "action", None),
-                    "symbol": getattr(d, "sym", None),
-                    "side": getattr(d, "side", None),
-                    "qty": f"{getattr(d, 'size_type', '')}:{getattr(d, 'size_value', '')}",
-                    "price": getattr(d, "limit_price", None) or "",
-                    "reason": f"{getattr(d, 'rationale', '')} (conf={getattr(d, 'confidence', 0.0):.2f})",
-                    "status": "planned",
-                }
-                self._logs.append(row)
-            except Exception:
-                # best-effort logging
-                pass
-    else:
-        self._log("planner_idle", {"msg": "no decisions"})
+    def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
+        """Stub Act stage: only logs decisions; no real orders."""
+        if out.decisions:
+            # Summary entry
+            self._log("planner_decisions", {"n": len(out.decisions)})
+            # Row-level entries for Activity Log (Autopilot)
+            for d in out.decisions:
+                try:
+                    row = {
+                        "ts": _utcnow_iso(),
+                        "mode": "auto",
+                        "action": getattr(d, "action", None),
+                        "symbol": getattr(d, "sym", None),
+                        "side": getattr(d, "side", None),
+                        "qty": f"{getattr(d, 'size_type', '')}:{getattr(d, 'size_value', '')}",
+                        "price": getattr(d, "limit_price", None) or "",
+                        "reason": f"{getattr(d, 'rationale', '')} (conf={getattr(d, 'confidence', 0.0):.2f})",
+                        "status": "planned",
+                    }
+                    self._logs.append(row)
+                except Exception:
+                    # best-effort logging
+                    pass
+        else:
+            self._log("planner_idle", {"msg": "no decisions"})
 
     def _log(self, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
         entry = {"ts": _utcnow_iso(), "reason": reason, "extra": extra or {}}
@@ -234,4 +250,5 @@ def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
             try:
                 insert_action_log("autopilot", mode="auto", reason=reason, status="ok", extra=extra or {})
             except Exception:
+                # storage is optional; never crash the worker due to logging
                 pass

@@ -169,7 +169,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 }`;
 
 // ---------- Types ----------
-type Mode = "assist" | "semi" | "auto";
+type Mode = "automatic" | "manual";
 type RiskConfig = {
   enabled?: boolean;
   max_usd_per_trade?: number;
@@ -294,7 +294,7 @@ export default function App() {
   const [activeAccount, setActiveAccount] = useState<{ account_id: string | null; trd_env: string | null } | null>(null);
 
   // bot state
-  const [mode, setMode] = useState<Mode>("assist");
+  const [mode, setMode] = useState<Mode>("manual");
   const [cfg, setCfg] = useState<RiskConfig | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -431,7 +431,7 @@ async function refreshAutoStatus() {
             <span>{activeAccount?.account_id || "—"}</span>
             {activeAccount?.trd_env ? <span>• {activeAccount.trd_env}</span> : null}
           </span>
-          <span className="indicator" title="Bot Mode"><span>Bot mode: {(mode==="auto"||mode==="semi") ? "Automatic" : "Manual"}</span></span>
+          <span className="indicator" title="Bot Mode"><span>Bot mode: {mode==="automatic" ? "Automatic" : "Manual"}</span></span>
         </div>
       </header>
 
@@ -591,15 +591,15 @@ async function refreshAutoStatus() {
   <h2 style={{marginTop:0,marginBottom:10}}>Autopilot</h2>
   <div className="row" style={{alignItems:"center", gap:12, marginTop:14}}>
     <button
-      className={`switch-lg ${(mode==="auto"||mode==="semi") ? "on" : ""}`}
+      className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
       role="switch"
-      aria-checked={(mode==="auto"||mode==="semi")}
-      onClick={async()=> { const turnOn = !(mode==="auto"||mode==="semi"); try { await api.autopilotEnable(turnOn); } catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`);} setBotMode(turnOn ? "auto" : "assist"); }}
+      aria-checked={mode==="automatic"}
+      onClick={async()=> { const turnOn = !(mode==="automatic"); try { await api.autopilotEnable(turnOn); } catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`);} setBotMode(turnOn ? "automatic" : "manual"); }}
       title="Toggle Autopilot On/Off"
     >
       <span className="thumb" />
     </button>
-    <div className="help strong">{(mode==="auto"||mode==="semi") ? "On" : "Off"}</div>
+    <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
 <button
   className="btn brand"
   style={{marginLeft:"auto"}}
@@ -612,7 +612,7 @@ async function refreshAutoStatus() {
 
   </div>
   <div className="help" aria-live="polite" style={{marginTop:6}}>
-    {(mode==="auto"||mode==="semi") ? "Autopilot is running" : "Autopilot is off"}
+    {mode==="automatic" ? "Autopilot is running" : "Autopilot is off"}
     {autoStatus ? ` • Last tick: ${autoStatus.last_tick || "—"} • Reject streak: ${autoStatus.reject_streak || 0}` : ""}
   </div>
 </div>

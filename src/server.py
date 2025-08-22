@@ -217,13 +217,29 @@ class RiskConfig(BaseModel):
 
 # ---: simple models for bot mode & flatten ---
 class BotModeRequest(BaseModel):
-    mode: str  # 'assist' | 'semi' | 'auto'
+    mode: str  # 'automatic' | 'manual'
 
 class FlattenAllRequest(BaseModel):
     symbols: Optional[list[str]] = None  # if provided, only flatten these symbols
 
 
 # ---------- Helpers ----------
+
+def _two_mode() -> str:
+    """
+    Returns 'automatic' if Autopilot is ON, else 'manual'.
+    Falls back to persisted bot_mode only to disambiguate when manager is unavailable.
+    """
+    try:
+        mgr = _get_autopilot()
+        st = mgr.status()
+        if bool(st.get("on")):
+            return "automatic"
+        return "manual"
+    except Exception:
+        val = get_setting("bot_mode") or "manual"
+        return "automatic" if str(val).lower().strip() == "automatic" else "manual"
+
 
 def _env_from_str(name: str):
     return TrdEnv.SIMULATE if name.upper() == "SIMULATE" else TrdEnv.REAL
@@ -463,7 +479,7 @@ def place_order(req: PlaceOrderRequest):
         )
     except ValueError as e:
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="risk_block", status="blocked", extra={"msg": str(e)}
         )
@@ -478,14 +494,14 @@ def place_order(req: PlaceOrderRequest):
             price=req.price,
         )
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="manual/place_order", status="ok", extra={"result": result}
         )
         return {"status": "ok", "result": result}
     except Exception as e:
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="exception", status="error", extra={"msg": str(e)}
         )
@@ -501,16 +517,16 @@ def cancel_order(req: CancelOrderRequest):
         raise HTTPException(status_code=400, detail="Not connected")
     try:
         res = c.cancel_order(req.order_id)
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           symbol=None, side=None, qty=None, price=None,
                           reason=f"cancel {req.order_id}", status="ok", extra={"result": res})
         return res
     except RuntimeError as e:
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           reason=f"runtime_error {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           reason=f"exception {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to cancel order: {e}")
 
@@ -646,36 +662,42 @@ def pnl_history_endpoint(days: int = 7):
 @app.get("/bot/mode")
 def bot_mode_get():
     """
-    Return current bot autonomy mode (assist|semi|auto). Defaults to 'assist' if unset.
+    Two-mode model: 'automatic' when Autopilot is ON, else 'manual'.
+    Strict two-mode only: 'automatic' or 'manual'.
     """
-    val = get_setting("bot_mode") or "assist"
     try:
-        # Normalize JSON/string to plain string
-        if isinstance(val, str):
-            try:
-                j = json.loads(val)
-                if isinstance(j, str):
-                    val = j
-            except Exception:
-                pass
+        mgr = _get_autopilot()
+        st = mgr.status()
+        if bool(st.get("on")):
+            return {"mode": "automatic"}
     except Exception:
         pass
-    return {"mode": val}
+    return {"mode": "manual"}
 
 @app.put("/bot/mode")
-def bot_mode_put(req: BotModeRequest):
+async def bot_mode_put(req: BotModeRequest):
     """
-    Update bot autonomy mode.
+    Set mode to 'automatic' or 'manual' and sync Autopilot accordingly.
     """
-    mode = (req.mode or "").lower().strip()
-    if mode not in {"assist", "semi", "auto"}:
-        raise HTTPException(status_code=400, detail="mode must be one of: assist|semi|auto")
-    set_setting("bot_mode", mode)
-    insert_action_log("mode_change", mode=mode, reason="user_update", status="ok")
-    return {"mode": mode}
+    mode_in = (req.mode or "").lower().strip()
+    if mode_in not in {"automatic", "manual"}:
+        raise HTTPException(status_code=400, detail="mode must be 'automatic' or 'manual'")
 
+    # Persist the exact value (for transparency), though GET derives mode from Autopilot status.
+    set_setting("bot_mode", mode_in)
+    insert_action_log("mode_change", mode=mode_in, reason="user_update", status="ok")
 
-# --- Action Log API ---
+    try:
+        mgr = _get_autopilot()
+        if mode_in == "automatic":
+            await mgr.start()
+        else:
+            await mgr.stop()
+    except Exception:
+        # If Autopilot manager isn't available yet, GET will report 'manual' until running.
+        pass
+
+    return {"mode": mode_in}
 
 @app.get("/logs/actions")
 def action_logs(limit: int = 100, symbol: Optional[str] = None, since_hours: Optional[int] = None):
@@ -702,7 +724,7 @@ def positions_flatten(body: FlattenAllRequest = FlattenAllRequest()):
     if not c.account_id:
         raise HTTPException(status_code=400, detail="No account selected")
     if getattr(c, "env", None) == TrdEnv.REAL:
-        insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("flatten", mode=_two_mode(),
                           reason="blocked_real_env", status="blocked")
         raise HTTPException(status_code=400, detail="Flatten disabled in REAL environment")
 
@@ -737,12 +759,12 @@ def positions_flatten(body: FlattenAllRequest = FlattenAllRequest()):
         try:
             res = c.place_order(symbol=code, qty=abs(qty), side=side, order_type="MARKET", price=None)
             attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "ok", "result": res})
-            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+            insert_action_log("flatten", mode=_two_mode(),
                               symbol=code, side=side, qty=abs(qty),
                               reason="flatten_all", status="ok", extra={"result": res})
         except Exception as e:
             attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "error", "error": str(e)})
-            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+            insert_action_log("flatten", mode=_two_mode(),
                               symbol=code, side=side, qty=abs(qty),
                               reason="exception", status="error", extra={"msg": str(e)})
 
@@ -785,7 +807,7 @@ def automation_start_ma(req: StartMACrossoverRequest):
     }
     
     sid = insert_strategy("ma_crossover", req.symbol.strip(), params, int(req.interval_sec))
-    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("start_strategy", mode=_two_mode(),
                       symbol=req.symbol.strip(), reason="ma_crossover", status="ok",
                       extra={"strategy_id": sid, "params": params})
     return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
@@ -834,7 +856,7 @@ def automation_update(strategy_id: int, req: UpdateStrategyRequest):
     )
     if not updated:
         raise HTTPException(status_code=404, detail="strategy not found")
-    insert_action_log("update_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("update_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok", extra={"params": p, "interval_sec": req.interval_sec, "active": req.active})
     return updated
 
@@ -859,7 +881,7 @@ def automation_stop(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, False)
-    insert_action_log("stop_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("stop_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": False}
 
@@ -898,7 +920,7 @@ def automation_reactivate(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, True)
-    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("start_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": True}
 
