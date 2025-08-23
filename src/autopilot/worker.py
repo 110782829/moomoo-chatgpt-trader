@@ -12,16 +12,37 @@ try:
 except Exception:  # pragma: no cover
     yf = None  # type: ignore
 
-# Storage (optional)
+# Storage (optional, best-effort)
 try:
-    from ..core.storage import insert_action_log  # type: ignore
+    from core.storage import insert_action_log  # type: ignore
     _HAS_STORAGE = True
 except Exception:  # pragma: no cover
     _HAS_STORAGE = False
 
-from .planner_client import get_planner_client
-from .schemas import PlannerOutput, validate_output
-from . import indicators as ind
+# Planner/schema/indicators live inside the autopilot package
+from autopilot.planner_client import get_planner_client
+from autopilot.schemas import PlannerOutput, validate_output
+from autopilot import indicators as ind
+
+# Execution service (SIM / broker-agnostic). Use ABSOLUTE imports to avoid
+# "attempted relative import beyond top-level package".
+try:
+    from execution.base import ExecutionContext  # type: ignore
+    from execution.types import OrderSpec, OrderSide, OrderType, TimeInForce  # type: ignore
+except Exception:
+    ExecutionContext = None  # type: ignore
+    OrderSpec = None  # type: ignore
+    OrderSide = None  # type: ignore
+    OrderType = None  # type: ignore
+    TimeInForce = None  # type: ignore
+
+# Guardrails (risk checks)
+try:
+    from risk.limits import enforce_order_limits  # type: ignore
+except Exception:
+    def enforce_order_limits(**kwargs):
+        # If limits aren't available, allow all. This keeps the worker resilient in dev.
+        return None
 
 
 def _utcnow_iso() -> str:
@@ -49,9 +70,16 @@ def _fetch_bars(symbol: str, period: str = "6mo", interval: str = "1d") -> tuple
 
 
 class AutopilotManager:
-    def __init__(self, get_client, risk_loader):
+    def __init__(self, get_client, risk_loader, get_execution=None):
+        """
+        get_client: () -> broker client (for positions, account snapshots)
+        risk_loader: () -> dict risk config snapshot
+        get_execution: Optional[() -> ExecutionService]  # NEW: execution driver getter
+        """
         self.get_client = get_client
         self.risk_loader = risk_loader
+        self._get_execution = get_execution or (lambda: None)
+
         self._task: Optional[asyncio.Task] = None
         self._running: bool = False
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -64,9 +92,13 @@ class AutopilotManager:
         self.stats: Dict[str, int] = {"ticks": 0, "accepted": 0, "rejected": 0}
         self.reject_streak: int = 0
 
+        # Planner client
         self._planner = get_planner_client()
+
+        # In-memory logs for /autopilot/logs
         self._logs: List[Dict[str, Any]] = []
 
+    # ---------- Public API ----------
     async def start(self) -> None:
         """Idempotent start of the worker loop."""
         async with self._lock:
@@ -118,6 +150,7 @@ class AutopilotManager:
         self.last_output = out
         return res
 
+    # ---------- Loop ----------
     async def _run(self) -> None:
         while self._running:
             try:
@@ -135,7 +168,7 @@ class AutopilotManager:
                     await asyncio.sleep(self.tick_sec)
                     continue
 
-                # Act stage (guardrail stubs + logging)
+                # Act stage (guardrails + execution)
                 try:
                     self._act(ctx, validated)
                 except Exception as e:  # pragma: no cover
@@ -152,8 +185,9 @@ class AutopilotManager:
                 self._log("autopilot_exception", {"error": str(e)})
             await asyncio.sleep(self.tick_sec)
 
+    # ---------- Sense / Think / Act ----------
     async def _sense(self) -> Dict[str, Any]:
-        # Account + positions
+        # Account + positions from broker client (best-effort)
         c = self.get_client()
         account: Dict[str, float] = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
         positions_raw: List[Dict[str, Any]] = []
@@ -181,7 +215,7 @@ class AutopilotManager:
             "per_symbol_max_bps": 0,
         }
 
-        # Universe with indicators
+        # Universe with indicators from yfinance (optional)
         watchlist = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA").split(",")
         universe: List[Dict[str, Any]] = []
         for sym in [s.strip() for s in watchlist if s.strip()]:
@@ -217,32 +251,164 @@ class AutopilotManager:
         out_model = self._planner.plan(ctx)
         return out_model.dict()
 
-    def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
-        """Stub Act stage: only logs decisions; no real orders."""
-        if out.decisions:
-            # Summary entry
-            self._log("planner_decisions", {"n": len(out.decisions)})
-            # Row-level entries for Activity Log (Autopilot)
-            for d in out.decisions:
-                try:
-                    row = {
-                        "ts": _utcnow_iso(),
-                        "mode": "auto",
-                        "action": getattr(d, "action", None),
-                        "symbol": getattr(d, "sym", None),
-                        "side": getattr(d, "side", None),
-                        "qty": f"{getattr(d, 'size_type', '')}:{getattr(d, 'size_value', '')}",
-                        "price": getattr(d, "limit_price", None) or "",
-                        "reason": f"{getattr(d, 'rationale', '')} (conf={getattr(d, 'confidence', 0.0):.2f})",
-                        "status": "planned",
-                    }
-                    self._logs.append(row)
-                except Exception:
-                    # best-effort logging
-                    pass
-        else:
-            self._log("planner_idle", {"msg": "no decisions"})
+    # --- Helpers for Act() ---
+    @staticmethod
+    def _last_price_map(ctx: Dict[str, Any]) -> Dict[str, float]:
+        return {u["sym"]: float(u.get("px") or 0.0) for u in ctx.get("universe", [])}
 
+    @staticmethod
+    def _pos_map(ctx: Dict[str, Any]) -> Dict[str, float]:
+        m: Dict[str, float] = {}
+        for p in ctx.get("positions", []) or []:
+            m[p["sym"]] = float(p.get("qty") or 0.0)
+        return m
+
+    @staticmethod
+    def _qty_from_size(d, last_px: float, equity: float) -> int:
+        size_type = getattr(d, "size_type", "shares")
+        size_value = float(getattr(d, "size_value", 0.0) or 0.0)
+        if last_px <= 0:
+            return 0
+        if size_type == "shares":
+            return max(0, int(size_value))
+        if size_type == "notional":
+            return max(0, int(size_value // last_px))
+        if size_type == "risk_bps":
+            notional = max(0.0, float(equity) * (size_value / 10000.0))
+            return max(0, int(notional // last_px))
+        return 0
+
+    def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
+        """Translate decisions → orders under guardrails; place via execution service if available."""
+        exec_service = None
+        try:
+            exec_service = self._get_execution()
+        except Exception:
+            exec_service = None
+
+        last_prices = self._last_price_map(ctx)
+        pos = self._pos_map(ctx)
+        equity = float((ctx.get("account") or {}).get("equity") or 0.0)
+        client = self.get_client()
+
+        decisions = list(getattr(out, "decisions", []) or [])
+        if not decisions:
+            self._log("planner_idle", {"msg": "no_decisions"})
+            return
+
+        self._log("planner_decisions", {"n": len(decisions)})
+
+        for d in decisions:
+            sym = getattr(d, "sym", None) or getattr(d, "symbol", None)
+            if not sym:
+                self._logs.append({"ts": _utcnow_iso(), "status": "rejected", "reason": "missing_symbol"})
+                continue
+
+            side_field = getattr(d, "side", "buy")   # 'buy' | 'sell'
+            action = getattr(d, "action", "open")    # 'open' | 'add' | 'trim' | 'close' | 'hold'
+
+            # Resolve side for 'close'
+            side = side_field
+            if action == "close":
+                cur_qty = float(pos.get(sym) or 0.0)
+                if cur_qty == 0:
+                    self._logs.append({
+                        "ts": _utcnow_iso(), "mode": "auto", "action": "close",
+                        "symbol": sym, "side": None, "qty": "", "price": "",
+                        "reason": "no_position_to_close", "status": "skipped"
+                    })
+                    continue
+                side = "sell" if cur_qty > 0 else "buy"
+
+            # Quantity estimate for guardrails
+            last_px = float(last_prices.get(sym) or 0.0)
+            est_qty = self._qty_from_size(d, last_px, equity)
+
+            # Guardrails
+            order_type = "MARKET" if getattr(d, "entry", "market") == "market" else "LIMIT"
+            limit_price = getattr(d, "limit_price", None)
+            try:
+                enforce_order_limits(
+                    client=client,
+                    symbol=sym,
+                    qty=float(est_qty),
+                    side="BUY" if side == "buy" else "SELL",
+                    order_type=order_type,
+                    price=limit_price,
+                )
+            except ValueError as e:
+                self.reject_streak += 1
+                self._logs.append({
+                    "ts": _utcnow_iso(), "mode": "auto",
+                    "action": action, "symbol": sym, "side": side,
+                    "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}", "price": limit_price or "",
+                    "reason": f"guardrail:{str(e)}", "status": "rejected",
+                })
+                if _HAS_STORAGE:
+                    try:
+                        insert_action_log("autopilot_act", mode="auto",
+                                          symbol=sym, side=side.upper(), qty=est_qty, price=limit_price,
+                                          reason="guardrail", status="blocked", extra={"msg": str(e)})
+                    except Exception:
+                        pass
+                continue
+
+            # If no execution service, only log
+            if exec_service is None or OrderSpec is None:
+                self._logs.append({
+                    "ts": _utcnow_iso(), "mode": "auto",
+                    "action": action, "symbol": sym, "side": side,
+                    "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}", "price": limit_price or "",
+                    "reason": "no_execution_service", "status": "planned",
+                })
+                continue
+
+            # Build OrderSpec
+            tif = getattr(d, "time_in_force", "day")
+            spec = OrderSpec(
+                symbol=sym,
+                side=OrderSide.buy if side == "buy" else OrderSide.sell,
+                order_type=OrderType.market if getattr(d, "entry", "market") == "market" else OrderType.limit,
+                limit_price=limit_price,
+                size_type=str(getattr(d, "size_type", "shares")),
+                size_value=float(getattr(d, "size_value", 0.0) or 0.0),
+                tif=TimeInForce.day if tif == "day" else TimeInForce.gtc,
+                decision_id=None,  # optional: wire to a stored decision id later
+            )
+
+            # Place via ExecutionService
+            ctx_exec = ExecutionContext(
+                account_id=getattr(self.get_client(), "account_id", None) or "SIM-LOCAL",
+                last_prices=last_prices,
+                equity=equity,
+                simulate=True,
+            )
+            order = exec_service.place_order(spec, ctx_exec)
+
+            # Log outcome
+            self._logs.append({
+                "ts": _utcnow_iso(), "mode": "auto",
+                "action": action, "symbol": sym, "side": side,
+                "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}", "price": limit_price or "",
+                "reason": f"order:{order.order_id}", "status": str(order.status.value),
+            })
+            if _HAS_STORAGE:
+                try:
+                    insert_action_log("autopilot_act", mode="auto",
+                                      symbol=sym, side=side.upper(), qty=est_qty, price=limit_price,
+                                      reason="order", status=str(order.status.value),
+                                      extra={"order_id": order.order_id})
+                except Exception:
+                    pass
+
+        # Try to fill any resting limits opportunistically
+        try:
+            if exec_service is not None:
+                exec_service.try_fill_resting(last_prices)
+        except Exception:
+            pass
+
+    # ---------- Logging helper ----------
     def _log(self, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
         entry = {"ts": _utcnow_iso(), "reason": reason, "extra": extra or {}}
         self._logs.append(entry)

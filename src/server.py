@@ -1,6 +1,4 @@
-'''
-Start command: uvicorn --app-dir src server:app --reload --port 8000"
-'''
+# Start command: uvicorn --app-dir src server:app --reload --port 8000
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import List, Optional 
@@ -17,6 +15,10 @@ from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
+
+# Execution container + /exec router
+from execution.container import init_execution
+from routers import exec_orders as exec_orders_router
 
 # Automation (scheduler + storage + strategy step)
 try:
@@ -73,6 +75,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize execution service (SIM broker on SQLite)
+init_execution(app)  # sets app.state.execution_service
 
 
 # ---------- Globals ----------
@@ -1121,7 +1126,10 @@ def _get_autopilot():
                 return _risk_load()
             except Exception:
                 return {}
-        _autopilot_mgr = AutopilotManager(get_client, _risk_loader)
+        # Pass an execution getter for Act()
+        def _exec_getter():
+            return getattr(app.state, "execution_service", None)
+        _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=_exec_getter)
     return _autopilot_mgr
 
 @autopilot_router.post("/enable")
@@ -1176,5 +1184,6 @@ async def _autopilot_shutdown():
     except Exception:
         pass
 
-# mount the router
+# mount routers
 app.include_router(autopilot_router)
+app.include_router(exec_orders_router.router)  # /exec endpoints

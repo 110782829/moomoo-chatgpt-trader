@@ -260,6 +260,11 @@ const api = {
   autopilotEnable: (on: boolean) => SEND("/autopilot/enable", { on }),
   autopilotPreview: () => SEND("/autopilot/preview", {}),
   autopilotLogs: (limit: number) => GET("/autopilot/logs", { limit }),
+  // execution (SIM)
+  listExecOrders: (q: { symbol?: string; status?: string; limit?: number }) => GET<any[]>("/exec/orders", q),
+  cancelExecOrder: (id: string) => SEND(`/exec/orders/${id}/cancel`, {}, "POST"),
+  listExecFills: (q: { symbol?: string; limit?: number }) => GET<any[]>("/exec/fills", q),
+
 };
 
 // ---------- Toast ----------
@@ -324,6 +329,17 @@ export default function App() {
   const [logsSource, setLogsSource] = useLocalStorage<"system"|"autopilot">("logs.source", "system");
   const [logsAt, setLogsAt] = useState<string>("—");
 
+  // execution (orders/fills)
+  const [exTab, setExTab] = useLocalStorage<"orders"|"fills">("exec.tab", "orders");
+  const [exSymbol, setExSymbol] = useLocalStorage("exec.symbol", "");
+  const [exAuto, setExAuto] = useLocalStorage("exec.auto", true);
+  const [exEvery, setExEvery] = useLocalStorage("exec.ms", 5000);
+  const [exAt, setExAt] = useState<string>("—");
+  const [orders, setOrders] = useState<any[]>([]);
+  const [fills, setFills] = useState<any[]>([]);
+  const [exLoading, setExLoading] = useState(false);
+
+
   // initial: load session + mode + risk
   useEffect(() => {
     (async () => {
@@ -340,8 +356,9 @@ export default function App() {
       try { setCfg(await api.getRiskConfig()); } catch {}
       await refreshStatus(false);
       await refreshLogs(false);
+      await refreshExec(false);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+// eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -357,7 +374,43 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [logsAuto, tab, logsEvery, logSymbol, logSince, logLimit]);
 
-  async function refreshStatus(show = true) {
+  useEffect(() => {
+    if (!exAuto || tab !== Tab.Status) return;
+    const id = window.setInterval(() => refreshExec(false), exEvery);
+    return () => window.clearInterval(id);
+  }, [exAuto, tab, exEvery, exSymbol, exTab]);
+
+
+  
+  async function refreshExec(show = true) {
+    try {
+      setExLoading(true);
+      if (exTab === "orders") {
+        const q: any = {};
+        if (exSymbol) q.symbol = exSymbol;
+        setOrders(await api.listExecOrders(q));
+      } else {
+        const q: any = {};
+        if (exSymbol) q.symbol = exSymbol;
+        setFills(await api.listExecFills(q));
+      }
+      setExAt(nowIso());
+    } catch (e:any) {
+      show && toast.show(`Exec refresh failed: ${brief(e)}`);
+    } finally {
+      setExLoading(false);
+    }
+  }
+  async function cancelOrder(id: string) {
+    try {
+      await api.cancelExecOrder(id);
+      toast.show("Cancel sent.");
+      refreshExec(false);
+    } catch (e:any) {
+      toast.show(`Cancel failed: ${brief(e)}`);
+    }
+  }
+async function refreshStatus(show = true) {
     try {
       setStatusLoading(true);
       const [rs, pt] = await Promise.all([api.getRiskStatus(), api.getPnlToday()]);
@@ -626,6 +679,86 @@ async function refreshAutoStatus() {
               onStopped={() => setStratRefreshTick(t => t + 1)}
             />
           </div>
+          <div className="panel">
+            <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+              <h2 style={{margin:0}}>Orders & Fills (SIM)</h2>
+              <div className="note">Last updated: {exAt}</div>
+            </div>
+            <div className="row" style={{alignItems:"end", gap:12, marginTop:8}}>
+              <div className="row" style={{gap:8}}>
+                <button className="btn" onClick={()=>setExTab("orders")} disabled={exTab==="orders"}>Orders</button>
+                <button className="btn" onClick={()=>setExTab("fills")} disabled={exTab==="fills"}>Fills</button>
+              </div>
+              <div style={{minWidth:180}}>
+                <div className="label">Symbol (optional)</div>
+                <input className="input" value={exSymbol} onChange={e=>setExSymbol(e.target.value)} placeholder="US.AAPL" />
+              </div>
+              <button className="btn" onClick={()=>refreshExec(true)}>{exLoading?"Refreshing…":"Refresh"}</button>
+              <label style={{display:"flex",alignItems:"center",gap:8, marginLeft:"auto"}}>
+                <input type="checkbox" checked={exAuto} onChange={e=>setExAuto(e.target.checked)} /> Auto
+              </label>
+              <NiceSelect
+                value={String(exEvery)}
+                onChange={(v)=>setExEvery(Number(v))}
+                options={[
+                  { value: "3000", label: "3s" },
+                  { value: "5000", label: "5s" },
+                  { value: "10000", label: "10s" },
+                  { value: "30000", label: "30s" },
+                ]}
+                width={120}
+              />
+            </div>
+
+            {exTab === "orders" ? (
+              <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
+                <table>
+                  <thead>
+                    <tr>{["id","symbol","side","type","status","req_qty","filled_qty","avg_price","tif","created_at","actions"].map(h=><th key={h}>{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {(orders||[]).length ? orders.map((o:any)=>(
+                      <tr key={o.id}>
+                        <td>{o.id}</td>
+                        <td>{o.symbol}</td>
+                        <td>{o.side}</td>
+                        <td>{o.type}</td>
+                        <td>{o.status}</td>
+                        <td>{o.req_qty}</td>
+                        <td>{o.filled_qty}</td>
+                        <td>{o.avg_price ?? ""}</td>
+                        <td>{o.tif ?? ""}</td>
+                        <td>{o.created_at ?? ""}</td>
+                        <td>
+                          {(o.status==="open"||o.status==="pending") && <button className="btn red" onClick={()=>cancelOrder(o.id)}>Cancel</button>}
+                        </td>
+                      </tr>
+                    )) : <tr><td>No orders.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
+                <table>
+                  <thead>
+                    <tr>{["ts","order_id","symbol","qty","price"].map(h=><th key={h}>{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {(fills||[]).length ? fills.map((f:any)=>(
+                      <tr key={`${f.ts}-${f.order_id}`}>
+                        <td>{f.ts}</td>
+                        <td>{f.order_id}</td>
+                        <td>{f.symbol}</td>
+                        <td>{f.qty}</td>
+                        <td>{f.price}</td>
+                      </tr>
+                    )) : <tr><td>No fills.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
         </section>
       )}
 
