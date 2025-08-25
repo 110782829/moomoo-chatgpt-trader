@@ -1,7 +1,7 @@
 import sqlite3
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from .base import ExecutionService, ExecutionContext
 from .types import OrderSpec, PlacedOrder, FillRecord, OrderStatus, OrderType, OrderSide, TimeInForce
 
@@ -10,21 +10,42 @@ def _utc_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# Positions schema (defensive; container can also create this)
+_POSITIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS positions (
+  symbol TEXT PRIMARY KEY,
+  qty INTEGER NOT NULL,
+  avg_cost REAL NOT NULL,
+  realized_today REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+"""
+
+
 class SimBroker(ExecutionService):
     """
     Simple paper engine backed by SQLite.
-    - Market orders: immediate fill at last price.
-    - Limit orders: fill immediately only if price crosses; else remain OPEN until try_fill_resting().
-    - Sizing:
-        shares: size_value treated as desired share count
-        notional: floor(size_value / last_price)
-        risk_bps: floor((equity * (bps/10000)) / last_price)
+
+    Fills:
+      - Market: immediate at last price (from last known tick/fill you pass in).
+      - Limit: fill if crossed, else remains OPEN; try_fill_resting() attempts later fills.
+
+    Sizing:
+      - shares   -> size_value
+      - notional -> floor(size_value / last)
+      - risk_bps -> floor((equity * bps/10000) / last)
+
+    Maintains positions (symbol, signed qty, avg_cost, realized_today).
+    Exposes list_positions() and pnl_today().
     """
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
         self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(_POSITIONS_SCHEMA)
+        self.conn.commit()
 
-    # --- Internals ---
+    # ---------------- internals: order/fill rows ----------------
+
     def _insert_order(self, row) -> None:
         self.conn.execute(
             """
@@ -44,10 +65,7 @@ class SimBroker(ExecutionService):
 
     def _insert_fill(self, fill) -> None:
         self.conn.execute(
-            """
-            INSERT INTO fills (fill_id, order_id, ts, symbol, qty, price)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
+            "INSERT INTO fills (fill_id, order_id, ts, symbol, qty, price) VALUES (?, ?, ?, ?, ?, ?)",
             (fill["fill_id"], fill["order_id"], fill["ts"], fill["symbol"], fill["qty"], fill["price"]),
         )
         self.conn.commit()
@@ -83,6 +101,82 @@ class SimBroker(ExecutionService):
             return max(0, int(notional // last))
         return 0
 
+    # ---------------- positions helpers ----------------
+
+    def _recent_last(self, symbol: str) -> Optional[float]:
+        cur = self.conn.execute(
+            "SELECT price FROM fills WHERE symbol = ? ORDER BY ts DESC LIMIT 1", (symbol,)
+        )
+        r = cur.fetchone()
+        return float(r["price"]) if r else None
+
+    def _load_pos(self, symbol: str) -> Optional[sqlite3.Row]:
+        cur = self.conn.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,))
+        return cur.fetchone()
+
+    def _save_pos(self, symbol: str, qty: int, avg_cost: float, realized_today_add: float = 0.0) -> None:
+        cur = self.conn.execute("SELECT realized_today FROM positions WHERE symbol = ?", (symbol,))
+        row = cur.fetchone()
+        if row:
+            realized = float(row["realized_today"]) + float(realized_today_add)
+            self.conn.execute(
+                "UPDATE positions SET qty = ?, avg_cost = ?, realized_today = ? WHERE symbol = ?",
+                (qty, avg_cost, realized, symbol),
+            )
+        else:
+            self.conn.execute(
+                "INSERT INTO positions (symbol, qty, avg_cost, realized_today) VALUES (?, ?, ?, ?)",
+                (symbol, qty, avg_cost, float(realized_today_add)),
+            )
+        self.conn.commit()
+
+    def _realize(self, side: str, qty: int, price: float, cur_qty: int, avg_cost: float) -> float:
+        """Realized PnL for the portion that closes existing exposure."""
+        realized = 0.0
+        if side == OrderSide.sell.value and cur_qty > 0:
+            close_qty = min(qty, cur_qty)
+            realized += (price - avg_cost) * close_qty
+        elif side == OrderSide.buy.value and cur_qty < 0:
+            close_qty = min(qty, -cur_qty)
+            realized += (avg_cost - price) * close_qty
+        return realized
+
+    def _update_position_on_fill(self, symbol: str, side: str, qty: int, price: float) -> None:
+        r = self._load_pos(symbol)
+        cur_qty = int(r["qty"]) if r else 0
+        avg_cost = float(r["avg_cost"]) if r else 0.0
+
+        realized_add = self._realize(side, qty, price, cur_qty, avg_cost)
+
+        if side == OrderSide.buy.value:
+            if cur_qty >= 0:
+                new_qty = cur_qty + qty
+                new_avg = ((cur_qty * avg_cost) + (qty * price)) / max(1, new_qty)
+            else:
+                new_qty = cur_qty + qty
+                if new_qty < 0:
+                    new_avg = avg_cost
+                elif new_qty == 0:
+                    new_avg = 0.0
+                else:
+                    new_avg = price  # flipped to long; start fresh
+        else:  # sell
+            if cur_qty <= 0:
+                new_qty = cur_qty - qty  # more short
+                new_avg = ((abs(cur_qty) * avg_cost) + (qty * price)) / max(1, abs(new_qty))
+            else:
+                new_qty = cur_qty - qty
+                if new_qty > 0:
+                    new_avg = avg_cost
+                elif new_qty == 0:
+                    new_avg = 0.0
+                else:
+                    new_avg = price  # flipped to short; start fresh
+
+        self._save_pos(symbol, int(new_qty), float(new_avg), realized_today_add=realized_add)
+
+    # ---------------- fill logic ----------------
+
     def _maybe_fill_now(self, order_row, last_price: Optional[float]) -> Optional[FillRecord]:
         if last_price is None:
             return None
@@ -90,7 +184,7 @@ class SimBroker(ExecutionService):
         if order_row["order_type"] == OrderType.market.value:
             qty = order_row["requested_qty"]
             price = float(last_price)
-        else:  # limit
+        else:
             lp = order_row["limit_price"]
             if lp is None:
                 return None
@@ -100,14 +194,13 @@ class SimBroker(ExecutionService):
                     price = float(min(lp, last_price))
                 else:
                     return None
-            else:  # sell or sell_short
+            else:
                 if last_price >= lp:
                     qty = order_row["requested_qty"]
                     price = float(max(lp, last_price))
                 else:
                     return None
 
-        # Fill
         fill_id = uuid.uuid4().hex
         ts = _utc_ts()
         self._insert_fill({
@@ -115,17 +208,16 @@ class SimBroker(ExecutionService):
             "symbol": order_row["symbol"], "qty": qty, "price": price
         })
         self.conn.execute(
-            """
-            UPDATE orders
-            SET status = ?, filled_qty = ?, avg_fill_price = ?, updated_at = ?
-            WHERE order_id = ?
-            """,
+            "UPDATE orders SET status = ?, filled_qty = ?, avg_fill_price = ?, updated_at = ? WHERE order_id = ?",
             (OrderStatus.filled.value, qty, price, ts, order_row["order_id"]),
         )
         self.conn.commit()
+
+        self._update_position_on_fill(order_row["symbol"], side, int(qty), float(price))
         return FillRecord(fill_id=fill_id, order_id=order_row["order_id"], symbol=order_row["symbol"], qty=qty, price=price, ts=ts)
 
-    # --- Interface impl ---
+    # ---------------- ExecutionService interface ----------------
+
     def place_order(self, spec: OrderSpec, ctx: ExecutionContext) -> PlacedOrder:
         ts = _utc_ts()
         last = ctx.last_prices.get(spec.symbol)
@@ -150,27 +242,23 @@ class SimBroker(ExecutionService):
             "reject_reason": None,
         }
 
-        # Guardrail: qty must be >=1 after sizing
         if requested_qty < 1:
             row["status"] = OrderStatus.rejected.value
             row["reject_reason"] = "sizing_zero_qty"
             self._insert_order(row)
             return self._row_to_order(row)
 
-        # Insert first, then attempt immediate fill
         row["status"] = OrderStatus.open.value if spec.order_type == OrderType.limit else OrderStatus.pending.value
         self._insert_order(row)
 
         fill = self._maybe_fill_now(row, last)
         if not fill:
-            # If not filled immediately, ensure status is OPEN
             self.conn.execute(
                 "UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?",
                 (OrderStatus.open.value, _utc_ts(), order_id),
             )
             self.conn.commit()
 
-        # Read-back
         cur = self.conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
         return self._row_to_order(cur.fetchone())
 
@@ -203,11 +291,9 @@ class SimBroker(ExecutionService):
         q = "SELECT * FROM orders"
         clauses, params = [], []
         if symbol:
-            clauses.append("symbol = ?")
-            params.append(symbol)
+            clauses.append("symbol = ?"); params.append(symbol)
         if status:
-            clauses.append("status = ?")
-            params.append(status)
+            clauses.append("status = ?"); params.append(status)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         q += " ORDER BY created_at DESC LIMIT ?"
@@ -219,8 +305,7 @@ class SimBroker(ExecutionService):
         q = "SELECT * FROM fills"
         params = []
         if symbol:
-            q += " WHERE symbol = ?"
-            params.append(symbol)
+            q += " WHERE symbol = ?"; params.append(symbol)
         q += " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
         cur = self.conn.execute(q, tuple(params))
@@ -231,3 +316,32 @@ class SimBroker(ExecutionService):
                 symbol=r["symbol"], qty=r["qty"], price=r["price"]
             ))
         return out
+
+    # ---------------- NEW: positions & pnl ----------------
+
+    def list_positions(self) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT symbol, qty, avg_cost, realized_today FROM positions ORDER BY symbol"
+        )
+        rows = cur.fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            sym = r["symbol"]
+            qty = int(r["qty"])
+            avg = float(r["avg_cost"])
+            last = self._recent_last(sym)
+            mv = (last * qty) if last is not None else None
+            upl = ((last - avg) * qty) if (last is not None and qty != 0) else None
+            out.append({
+                "symbol": sym, "qty": qty, "avg_cost": avg,
+                "last": last, "mv": mv, "upl": upl, "rpl_today": float(r["realized_today"])
+            })
+        return out
+
+    def pnl_today(self) -> Dict[str, Any]:
+        cur = self.conn.execute("SELECT COALESCE(SUM(realized_today), 0.0) AS r FROM positions")
+        r = cur.fetchone()
+        realized = float(r["r"] if r and r["r"] is not None else 0.0)
+        # Date in YYYY-MM-DD based on UTC
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        return {"date": day, "realized_pnl": realized}

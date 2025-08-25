@@ -264,6 +264,10 @@ const api = {
   listExecOrders: (q: { symbol?: string; status?: string; limit?: number }) => GET<any[]>("/exec/orders", q),
   cancelExecOrder: (id: string) => SEND(`/exec/orders/${id}/cancel`, {}, "POST"),
   listExecFills: (q: { symbol?: string; limit?: number }) => GET<any[]>("/exec/fills", q),
+  // execution (SIM) – positions
+  listExecPositions: (q?: { symbol?: string; limit?: number }) => GET<any[]>("/exec/positions", q || {}),
+  flattenExecPositions: (symbols?: string[]) => SEND("/exec/flatten", symbols?.length ? { symbols } : {}),
+
 
 };
 
@@ -338,6 +342,14 @@ export default function App() {
   const [orders, setOrders] = useState<any[]>([]);
   const [fills, setFills] = useState<any[]>([]);
   const [exLoading, setExLoading] = useState(false);
+  // positions (SIM)
+  const [posSymbol, setPosSymbol] = useLocalStorage("pos.symbol", "");
+  const [posAuto, setPosAuto] = useLocalStorage("pos.auto", true);
+  const [posEvery, setPosEvery] = useLocalStorage("pos.ms", 5000);
+  const [posAt, setPosAt] = useState<string>("—");
+  const [positions, setPositions] = useState<any[]>([]);
+  const [posLoading, setPosLoading] = useState(false);
+
 
 
   // initial: load session + mode + risk
@@ -357,6 +369,7 @@ export default function App() {
       await refreshStatus(false);
       await refreshLogs(false);
       await refreshExec(false);
+      await refreshPositions(false);
     })();
 // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -379,6 +392,12 @@ export default function App() {
     const id = window.setInterval(() => refreshExec(false), exEvery);
     return () => window.clearInterval(id);
   }, [exAuto, tab, exEvery, exSymbol, exTab]);
+  useEffect(() => {
+    if (!posAuto || tab !== Tab.Status) return;
+    const id = window.setInterval(() => refreshPositions(false), posEvery);
+    return () => window.clearInterval(id);
+  }, [posAuto, tab, posEvery, posSymbol]);
+
 
 
   
@@ -401,7 +420,47 @@ export default function App() {
       setExLoading(false);
     }
   }
-  async function cancelOrder(id: string) {
+  
+async function refreshPositions(show = true) {
+    try {
+      setPosLoading(true);
+      const data = await api.listExecPositions({});
+      let arr: any[] = data || [];
+      if (posSymbol) {
+        const q = String(posSymbol).toLowerCase();
+        arr = arr.filter((r:any) => String(r?.symbol || "").toLowerCase().includes(q));
+      }
+      setPositions(arr);
+      setPosAt(nowIso());
+    } catch (e:any) {
+      show && toast.show(`Positions refresh failed: ${brief(e)}`);
+    } finally {
+      setPosLoading(false);
+    }
+  }
+  async function flattenSymbol(sym: string) {
+    try {
+      await api.flattenExecPositions([sym]);
+      toast.show(`Flattened ${sym}`);
+      refreshPositions(false);
+      refreshExec(false);
+    } catch (e:any) {
+      toast.show(`Flatten failed: ${brief(e)}`);
+    }
+  }
+  async function flattenVisible() {
+    try {
+      const syms = (positions || []).map((p:any) => p.symbol);
+      if (!syms.length) { toast.show("No positions."); return; }
+      await api.flattenExecPositions(syms);
+      toast.show(`Flattened ${syms.length} symbol(s)`);
+      refreshPositions(false);
+      refreshExec(false);
+    } catch (e:any) {
+      toast.show(`Flatten-all failed: ${brief(e)}`);
+    }
+  }
+async function cancelOrder(id: string) {
     try {
       await api.cancelExecOrder(id);
       toast.show("Cancel sent.");
@@ -600,9 +659,11 @@ async function refreshAutoStatus() {
         </section>
       )}
 
+      
       {/* ===== Bot Status ===== */}
       {tab===Tab.Status && (
         <section className="stack">
+          {/* KPIs */}
           <div className="grid-3">
             <div className="card"><h3>Connection</h3><div className="value">{connected ? "CONNECTED" : "NOT CONNECTED"}</div></div>
             <div className="card"><h3>Open Positions</h3><div className="value">{openPositions ?? "—"}</div></div>
@@ -613,22 +674,96 @@ async function refreshAutoStatus() {
             </div>
           </div>
 
+          {/* Controls + Autopilot */}
           <div className="grid-3 panels3">
-<div className="panel thick span-2">
-            <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
-              <h2 style={{margin:0}}>Controls</h2>
-              <div className="note">Last updated: {statusAt}</div>
+            <div className="panel thick span-2">
+              <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+                <h2 style={{margin:0}}>Controls</h2>
+                <div className="note">Last updated: {statusAt}</div>
+              </div>
+              <div className="row" style={{marginTop:14}}>
+                <button className="btn red" onClick={killSwitch}>Kill Switch (Stop Strategies)</button>
+                <button className="btn amber" onClick={doFlattenAll} disabled={!connected}>Flatten All Now</button>
+                <button className="btn" onClick={()=>refreshStatus(true)}>{statusLoading?"Refreshing…":"Refresh"}</button>
+                <label style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
+                  <input type="checkbox" checked={autoRefresh} onChange={e=>setAutoRefresh(e.target.checked)} /> Auto-refresh
+                </label>
+                <NiceSelect
+                  value={String(statusEvery)}
+                  onChange={(v)=>setStatusEvery(Number(v))}
+                  options={[
+                    { value: "3000", label: "3s" },
+                    { value: "5000", label: "5s" },
+                    { value: "10000", label: "10s" },
+                    { value: "30000", label: "30s" },
+                  ]}
+                  width={120}
+                />
+              </div>
             </div>
-            <div className="row" style={{marginTop:14}}>
-              <button className="btn red" onClick={killSwitch}>Kill Switch (Stop Strategies)</button>
-              <button className="btn amber" onClick={doFlattenAll} disabled={!connected}>Flatten All Now</button>
-              <button className="btn" onClick={()=>refreshStatus(true)}>{statusLoading?"Refreshing…":"Refresh"}</button>
-              <label style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
-                <input type="checkbox" checked={autoRefresh} onChange={e=>setAutoRefresh(e.target.checked)} /> Auto-refresh
+
+            <div className="panel">
+              <h2 style={{marginTop:0,marginBottom:10}}>Autopilot</h2>
+              <div className="row" style={{alignItems:"center", gap:12, marginTop:14}}>
+                <button
+                  className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
+                  role="switch"
+                  aria-checked={mode==="automatic"}
+                  onClick={async()=> {
+                    const turnOn = !(mode==="automatic");
+                    try { await api.autopilotEnable(turnOn); }
+                    catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`); }
+                    setBotMode(turnOn ? "automatic" : "manual");
+                  }}
+                  title="Toggle Autopilot On/Off"
+                >
+                  <span className="thumb" />
+                </button>
+                <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
+                <button
+                  className="btn brand"
+                  style={{marginLeft:"auto"}}
+                  onClick={doPreview}
+                  disabled={previewLoading}
+                  title="Run a dry-run tick (no orders)"
+                >
+                  {previewLoading ? "Running Preview…" : "Preview Decisions"}
+                </button>
+              </div>
+              <div className="help" aria-live="polite" style={{marginTop:6}}>
+                {mode==="automatic" ? "Autopilot is running" : "Autopilot is off"}
+                {autoStatus ? ` • Last tick: ${autoStatus.last_tick || "—"} • Reject streak: ${autoStatus.reject_streak || 0}` : ""}
+              </div>
+            </div>
+          </div>
+
+          {/* Active strategies */}
+          <div className="panel">
+            <h2 style={{marginTop:0,marginBottom:10}}>Active Strategies</h2>
+            <ActiveStrategies
+              refreshKey={stratRefreshTick}
+              onStopped={() => setStratRefreshTick(t => t + 1)}
+            />
+          </div>
+
+          {/* Positions (SIM) – its own panel */}
+          <div className="panel">
+            <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+              <h2 style={{margin:0}}>Positions (SIM)</h2>
+              <div className="note">Last updated: {posAt}</div>
+            </div>
+            <div className="row" style={{alignItems:"end", gap:12, marginTop:8}}>
+              <div style={{minWidth:180}}>
+                <div className="label">Filter symbol</div>
+                <input className="input" value={posSymbol} onChange={e=>setPosSymbol(e.target.value)} placeholder="US.AAPL (optional)" />
+              </div>
+              <button className="btn" onClick={()=>refreshPositions(true)}>{posLoading ? "Refreshing…" : "Refresh"}</button>
+              <label style={{display:"flex",alignItems:"center",gap:8, marginLeft:"auto"}}>
+                <input type="checkbox" checked={posAuto} onChange={e=>setPosAuto(e.target.checked)} /> Auto
               </label>
               <NiceSelect
-                value={String(statusEvery)}
-                onChange={(v)=>setStatusEvery(Number(v))}
+                value={String(posEvery)}
+                onChange={(v)=>setPosEvery(Number(v))}
                 options={[
                   { value: "3000", label: "3s" },
                   { value: "5000", label: "5s" },
@@ -637,48 +772,39 @@ async function refreshAutoStatus() {
                 ]}
                 width={120}
               />
+              <button className="btn amber" onClick={()=>flattenVisible()} title="Flatten all visible positions">Flatten Visible</button>
             </div>
+            <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
+              <table>
+                <thead>
+                  <tr>{"symbol qty avg last mv upl rpl_today actions".split(" ").map(h=>(<th key={h}>{h}</th>))}</tr>
+                </thead>
+                <tbody>
+                  {(positions||[]).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).length ?
+                    (positions||[]).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).map((p:any)=>(
+                      <tr key={p.symbol}>
+                        <td>{p.symbol}</td>
+                        <td>{p.qty}</td>
+                        <td>{p.avg_cost?.toFixed ? p.avg_cost.toFixed(2) : p.avg_cost}</td>
+                        <td>{p.last==null ? "" : (p.last?.toFixed ? p.last.toFixed(2) : p.last)}</td>
+                        <td>{p.mv==null ? "" : (p.mv?.toFixed ? p.mv.toFixed(2) : p.mv)}</td>
+                        <td style={{color: p.upl==null ? "inherit" : (p.upl>=0 ? "var(--green)" : "var(--red)")}}>
+                          {p.upl==null ? "" : (p.upl?.toFixed ? p.upl.toFixed(2) : p.upl)}
+                        </td>
+                        <td style={{color: p.rpl_today==null ? "inherit" : (p.rpl_today>=0 ? "var(--green)" : "var(--red)")}}>
+                          {p.rpl_today==null ? "" : (p.rpl_today?.toFixed ? p.rpl_today.toFixed(2) : p.rpl_today)}
+                        </td>
+                        <td><button className="btn red" onClick={()=>flattenSymbol(p.symbol)}>Flatten</button></td>
+                      </tr>
+                    ))
+                  : <tr><td>No positions.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="help" style={{marginTop:8}}>SIM pricing uses most recent fill as last; flatten sends MARKET orders opposite to current qty.</div>
           </div>
 
-<div className="panel">
-  <h2 style={{marginTop:0,marginBottom:10}}>Autopilot</h2>
-  <div className="row" style={{alignItems:"center", gap:12, marginTop:14}}>
-    <button
-      className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
-      role="switch"
-      aria-checked={mode==="automatic"}
-      onClick={async()=> { const turnOn = !(mode==="automatic"); try { await api.autopilotEnable(turnOn); } catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`);} setBotMode(turnOn ? "automatic" : "manual"); }}
-      title="Toggle Autopilot On/Off"
-    >
-      <span className="thumb" />
-    </button>
-    <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
-<button
-  className="btn brand"
-  style={{marginLeft:"auto"}}
-  onClick={doPreview}
-  disabled={previewLoading}
-  title="Run a dry-run tick (no orders)"
->
-  {previewLoading ? "Running Preview…" : "Preview Decisions"}
-</button>
-
-  </div>
-  <div className="help" aria-live="polite" style={{marginTop:6}}>
-    {mode==="automatic" ? "Autopilot is running" : "Autopilot is off"}
-    {autoStatus ? ` • Last tick: ${autoStatus.last_tick || "—"} • Reject streak: ${autoStatus.reject_streak || 0}` : ""}
-  </div>
-</div>
-
-</div>
-
-          <div className="panel">
-            <h2 style={{marginTop:0,marginBottom:10}}>Active Strategies</h2>
-            <ActiveStrategies
-              refreshKey={stratRefreshTick}
-              onStopped={() => setStratRefreshTick(t => t + 1)}
-            />
-          </div>
+          {/* Orders & Fills (SIM) – separate panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
               <h2 style={{margin:0}}>Orders & Fills (SIM)</h2>
@@ -714,26 +840,33 @@ async function refreshAutoStatus() {
               <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
                 <table>
                   <thead>
-                    <tr>{["id","symbol","side","type","status","req_qty","filled_qty","avg_price","tif","created_at","actions"].map(h=><th key={h}>{h}</th>)}</tr>
+                    <tr>
+                      {["created_at","order_id","symbol","side","type","tif","status","req_qty","filled","avg","limit","actions"].map(h=>(
+                        <th key={h}>{h}</th>
+                      ))}
+                    </tr>
                   </thead>
                   <tbody>
-                    {(orders||[]).length ? orders.map((o:any)=>(
-                      <tr key={o.id}>
-                        <td>{o.id}</td>
+                    {orders?.length ? orders
+                      .filter((o:any)=>!exSymbol || String(o.symbol||"").toLowerCase().includes(String(exSymbol).toLowerCase()))
+                      .map((o:any)=>(
+                      <tr key={o.order_id}>
+                        <td className="small">{o.created_at}</td>
+                        <td className="small">{o.order_id}</td>
                         <td>{o.symbol}</td>
                         <td>{o.side}</td>
-                        <td>{o.type}</td>
+                        <td>{o.order_type}</td>
+                        <td>{o.tif}</td>
                         <td>{o.status}</td>
-                        <td>{o.req_qty}</td>
+                        <td>{o.requested_qty}</td>
                         <td>{o.filled_qty}</td>
-                        <td>{o.avg_price ?? ""}</td>
-                        <td>{o.tif ?? ""}</td>
-                        <td>{o.created_at ?? ""}</td>
+                        <td>{o.avg_fill_price==null ? "" : o.avg_fill_price}</td>
+                        <td>{o.limit_price==null ? "" : o.limit_price}</td>
                         <td>
-                          {(o.status==="open"||o.status==="pending") && <button className="btn red" onClick={()=>cancelOrder(o.id)}>Cancel</button>}
+                          <button className="btn red" disabled={o.status!=="open" && o.status!=="pending"} onClick={()=>cancelOrder(o.order_id)}>Cancel</button>
                         </td>
                       </tr>
-                    )) : <tr><td>No orders.</td></tr>}
+                    )) : <tr><td>No orders yet.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -741,24 +874,30 @@ async function refreshAutoStatus() {
               <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
                 <table>
                   <thead>
-                    <tr>{["ts","order_id","symbol","qty","price"].map(h=><th key={h}>{h}</th>)}</tr>
+                    <tr>
+                      {["ts","fill_id","order_id","symbol","qty","price"].map(h=>(
+                        <th key={h}>{h}</th>
+                      ))}
+                    </tr>
                   </thead>
                   <tbody>
-                    {(fills||[]).length ? fills.map((f:any)=>(
-                      <tr key={`${f.ts}-${f.order_id}`}>
-                        <td>{f.ts}</td>
-                        <td>{f.order_id}</td>
+                    {fills?.length ? fills
+                      .filter((f:any)=>!exSymbol || String(f.symbol||"").toLowerCase().includes(String(exSymbol).toLowerCase()))
+                      .map((f:any)=>(
+                      <tr key={f.fill_id}>
+                        <td className="small">{f.ts}</td>
+                        <td className="small">{f.fill_id}</td>
+                        <td className="small">{f.order_id}</td>
                         <td>{f.symbol}</td>
                         <td>{f.qty}</td>
                         <td>{f.price}</td>
                       </tr>
-                    )) : <tr><td>No fills.</td></tr>}
+                    )) : <tr><td>No fills yet.</td></tr>}
                   </tbody>
                 </table>
               </div>
             )}
           </div>
-
         </section>
       )}
 

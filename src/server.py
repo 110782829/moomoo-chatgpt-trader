@@ -17,7 +17,7 @@ from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
 
 # Execution container + /exec router
-from execution.container import init_execution
+from execution.container import init_execution, get_execution
 from routers import exec_orders as exec_orders_router
 
 # Automation (scheduler + storage + strategy step)
@@ -67,6 +67,7 @@ except Exception as _ge:
 # ---------- App + CORS ----------
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
+init_execution(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1112,7 +1113,7 @@ except Exception as _ae:
     _AUTOPILOT_IMPORT_ERR = _ae
 
 autopilot_router = APIRouter(prefix="/autopilot", tags=["autopilot"])
-
+app.include_router(exec_orders_router.router)
 _autopilot_mgr = None  # lazy singleton
 
 def _get_autopilot():
@@ -1129,7 +1130,7 @@ def _get_autopilot():
         # Pass an execution getter for Act()
         def _exec_getter():
             return getattr(app.state, "execution_service", None)
-        _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=_exec_getter)
+        _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=get_execution)
     return _autopilot_mgr
 
 @autopilot_router.post("/enable")
