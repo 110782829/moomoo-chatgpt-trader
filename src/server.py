@@ -2,12 +2,9 @@
 Start command: uvicorn --app-dir src server:app --reload --port 8000"
 '''
 from fastapi import FastAPI, HTTPException, APIRouter
-from pydantic import BaseModel
-from typing import List, Optional 
+from typing import Optional
 import os
-import json
 from datetime import datetime
-from pathlib import Path
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,6 +24,10 @@ try:
     from routers import exec_orders as exec_orders_router
 except Exception:
     exec_orders_router = None  # type: ignore
+try:
+    from routers.backtest import router as backtest_router
+except Exception:
+    backtest_router = None  # type: ignore
 
 
 # --- Internal modules ---
@@ -35,6 +36,20 @@ from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
+from risk.config import load_config as risk_load, save_config as risk_save
+from schemas import (
+    ConnectRequest,
+    SelectAccountRequest,
+    PlaceOrderRequest,
+    CancelOrderRequest,
+    SubscribeQuotesRequest,
+    FlattenRequest,
+    StartMACrossoverRequest,
+    UpdateStrategyRequest,
+    RiskConfig,
+    BotModeRequest,
+    FlattenAllRequest,
+)
 
 # Automation (scheduler + storage + strategy step)
 try:
@@ -62,23 +77,6 @@ except Exception as _e:
     _AUTOMATION_IMPORT_ERR = _e
     TraderScheduler = None  # type: ignore[misc]
 
-# Backtest modules
-try:
-    from backtest.engine import load_bars_csv, run_ma_crossover
-    _BACKTEST_AVAILABLE = True
-    _BACKTEST_IMPORT_ERR = None
-except Exception as _be:
-    _BACKTEST_AVAILABLE = False
-    _BACKTEST_IMPORT_ERR = _be
-
-try:
-    from backtest.grid import run_ma_grid
-    _GRID_AVAILABLE = True
-    _GRID_IMPORT_ERR = None
-except Exception as _ge:
-    _GRID_AVAILABLE = False
-    _GRID_IMPORT_ERR = _ge
-
 
 # ---------- App + CORS ----------
 
@@ -86,6 +84,8 @@ app = FastAPI(title="Moomoo ChatGPT Trader API")
 init_execution(app)  # ensure SIM tables exist
 if exec_orders_router is not None:
     app.include_router(exec_orders_router.router)
+if backtest_router is not None:
+    app.include_router(backtest_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -105,144 +105,8 @@ client: Optional[MoomooClient] = None
 scheduler = None  # will hold TraderScheduler
 
 
-# ---------- Risk config (local file) ----------
-
-RISK_PATH = Path(os.getenv("RISK_FILE", "data/risk.json"))
-_DEFAULT_RISK = {
-    "enabled": True,
-    "max_usd_per_trade": 1000.0,
-    "max_open_positions": 5,
-    "max_daily_loss_usd": 200.0,
-    "symbol_whitelist": [],  # empty → allow all
-    "trading_hours_pt": {"start": "06:30", "end": "13:00"},  # US market regular hours (PT)
-    "flatten_before_close_min": 5,
-}
-
-def _risk_load() -> dict:
-    try:
-        if RISK_PATH.exists():
-            return json.loads(RISK_PATH.read_text())
-    except Exception:
-        pass
-    RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RISK_PATH.write_text(json.dumps(_DEFAULT_RISK, indent=2))
-    return dict(_DEFAULT_RISK)
-
-def _risk_save(cfg: dict) -> None:
-    RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RISK_PATH.write_text(json.dumps(cfg, indent=2))
-
 
 # ---------- Request Models ----------
-
-class ConnectRequest(BaseModel):
-    host: Optional[str] = None
-    port: Optional[int] = None
-    client_id: Optional[int] = None  # parity only
-
-class SelectAccountRequest(BaseModel):
-    account_id: str
-    trd_env: str = "SIMULATE"  # "SIMULATE" or "REAL"
-
-class PlaceOrderRequest(BaseModel):
-    symbol: str                 # e.g., "AAPL" or "US.AAPL"
-    qty: float
-    side: str                   # "BUY" or "SELL"
-    order_type: str = "MARKET"  # "MARKET" or "LIMIT"
-    price: Optional[float] = None
-
-class CancelOrderRequest(BaseModel):
-    order_id: str
-
-class SubscribeQuotesRequest(BaseModel):
-    symbols: list[str]
-
-class FlattenRequest(BaseModel):
-    symbols: Optional[List[str]] = None  # optional subset; if omitted, flatten all
-
-class StartMACrossoverRequest(BaseModel):
-    # core
-    symbol: str              # e.g., "US.AAPL"
-    fast: int = 20
-    slow: int = 50
-    ktype: str = "K_1M"      # bar timeframe; entitlement-dependent
-
-    # sizing
-    qty: float = 1
-    size_mode: Optional[str] = "shares"   # 'shares' | 'usd'
-    dollar_size: Optional[float] = 0.0
-
-    # risk per-trade
-    stop_loss_pct: Optional[float] = 0.0  # e.g. 0.02 = 2%
-    take_profit_pct: Optional[float] = 0.0
-
-    # run cadence / execution
-    interval_sec: int = 15
-    allow_real: bool = False
-
-
-class UpdateStrategyRequest(BaseModel):
-    # params
-    fast: Optional[int] = None
-    slow: Optional[int] = None
-    ktype: Optional[str] = None
-    qty: Optional[float] = None
-    size_mode: Optional[str] = None          # 'shares' | 'usd'
-    dollar_size: Optional[float] = None
-    stop_loss_pct: Optional[float] = None
-    take_profit_pct: Optional[float] = None
-    allow_real: Optional[bool] = None
-    # meta
-    interval_sec: Optional[int] = None
-    active: Optional[bool] = None
-
-class BacktestMARequest(BaseModel):
-    symbol: str
-    fast: int = 20
-    slow: int = 50
-    ktype: str = "K_1M"
-    qty: float = 1.0
-    size_mode: Optional[str] = "shares"   # 'shares' | 'usd'
-    dollar_size: Optional[float] = 0.0
-    stop_loss_pct: Optional[float] = 0.0
-    take_profit_pct: Optional[float] = 0.0
-    commission_per_share: Optional[float] = 0.0
-    slippage_bps: Optional[float] = 0.0
-
-class BacktestMAGridRequest(BaseModel):
-    symbol: str
-    ktype: str = "K_1M"
-    fast_min: int = 5
-    fast_max: int = 30
-    fast_step: int = 5
-    slow_min: int = 40
-    slow_max: int = 200
-    slow_step: int = 10
-    qty: float = 1.0
-    size_mode: Optional[str] = "shares"
-    dollar_size: Optional[float] = 0.0
-    stop_loss_pct: Optional[float] = 0.0
-    take_profit_pct: Optional[float] = 0.0
-    commission_per_share: Optional[float] = 0.0
-    slippage_bps: Optional[float] = 0.0
-    top_n: int = 10
-
-class RiskConfig(BaseModel):
-    enabled: Optional[bool] = None
-    max_usd_per_trade: Optional[float] = None
-    max_open_positions: Optional[int] = None
-    max_daily_loss_usd: Optional[float] = None
-    symbol_whitelist: Optional[list[str]] = None
-    trading_hours_pt: Optional[dict] = None  # {"start":"06:30","end":"13:00"}
-    flatten_before_close_min: Optional[int] = None
-
-# ---: simple models for bot mode & flatten ---
-class BotModeRequest(BaseModel):
-    mode: str  # 'automatic' | 'manual'
-
-class FlattenAllRequest(BaseModel):
-    symbols: Optional[list[str]] = None  # if provided, only flatten these symbols
-
 
 # ---------- Helpers ----------
 
@@ -954,7 +818,7 @@ def risk_get():
     Return current risk configuration (local file).
     """
     try:
-        return _risk_load()
+        return risk_load()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read risk config: {e}")
 
@@ -964,10 +828,10 @@ def risk_put(req: RiskConfig):
     Update risk configuration (partial update).
     """
     try:
-        cfg = _risk_load()
+        cfg = risk_load()
         for k, v in req.model_dump(exclude_none=True).items():
             cfg[k] = v
-        _risk_save(cfg)
+        risk_save(cfg)
         return cfg
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save risk config: {e}")
@@ -977,7 +841,7 @@ def risk_status():
     """
     Basic runtime risk status: open positions count, config snapshot.
     """
-    cfg = _risk_load()
+    cfg = risk_load()
     open_positions = None
     try:
         c = get_client()
@@ -1039,82 +903,6 @@ def disconnect():
     return {"status": "disconnected"}
 
 
-# --- Backtest: single run ---
-
-@app.post("/backtest/ma-crossover")
-def backtest_ma(req: BacktestMARequest):
-    """
-    Run a local MA-crossover backtest using CSV bars in data/bars/{SYMBOL}_{KTYPE}.csv.
-    Returns metrics and the first 20 trades.
-    """
-    if not _BACKTEST_AVAILABLE:
-        raise HTTPException(status_code=500, detail=f"Backtest module not available: {_BACKTEST_IMPORT_ERR}")
-    if req.slow <= req.fast:
-        raise HTTPException(status_code=400, detail="slow must be > fast")
-    try:
-        bars = load_bars_csv(req.symbol, req.ktype)
-        res = run_ma_crossover(
-            bars=bars,
-            fast=int(req.fast),
-            slow=int(req.slow),
-            qty=float(req.qty),
-            size_mode=(req.size_mode or "shares"),
-            dollar_size=float(req.dollar_size or 0),
-            stop_loss_pct=float(req.stop_loss_pct or 0),
-            take_profit_pct=float(req.take_profit_pct or 0),
-            commission_per_share=float(req.commission_per_share or 0),
-            slippage_bps=float(req.slippage_bps or 0),
-        )
-        trades = [{
-            "entry_ts": t.entry_ts, "exit_ts": t.exit_ts, "side": t.side,
-            "entry_px": t.entry_px, "exit_px": t.exit_px, "qty": t.qty, "pnl": t.pnl
-        } for t in res.trades[:20]]
-        return {"metrics": res.metrics, "trades_sample": trades}
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv with columns time,open,high,low,close,volume"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backtest failed: {e}")
-
-
-# --- Backtest: parameter grid ---
-
-@app.post("/backtest/ma-grid")
-def backtest_ma_grid(req: BacktestMAGridRequest):
-    """
-    Run an MA-crossover parameter sweep; returns top-N results by gross_pnl.
-    """
-    if not _BACKTEST_AVAILABLE:
-        raise HTTPException(status_code=500, detail=f"Backtest module not available: {_BACKTEST_IMPORT_ERR}")
-    if not _GRID_AVAILABLE:
-        raise HTTPException(status_code=500, detail=f"Backtest grid not available: {_GRID_IMPORT_ERR}")
-    try:
-        bars = load_bars_csv(req.symbol, req.ktype)
-        results = run_ma_grid(
-            bars=bars,
-            fast_min=req.fast_min, fast_max=req.fast_max, fast_step=req.fast_step,
-            slow_min=req.slow_min, slow_max=req.slow_max, slow_step=req.slow_step,
-            qty=float(req.qty),
-            size_mode=(req.size_mode or "shares"),
-            dollar_size=float(req.dollar_size or 0),
-            stop_loss_pct=float(req.stop_loss_pct or 0),
-            take_profit_pct=float(req.take_profit_pct or 0),
-            commission_per_share=float(req.commission_per_share or 0),
-            slippage_bps=float(req.slippage_bps or 0),
-            top_n=int(req.top_n),
-        )
-        return {"count": len(results), "results": results}
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{e}. Put a CSV at data/bars/{req.symbol.split('.')[-1].upper()}_{req.ktype}.csv"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backtest grid failed: {e}")
-
-
 # --- Autopilot (planner/executor) scaffold ---
 try:
     from autopilot.worker import AutopilotManager
@@ -1139,7 +927,7 @@ def _get_autopilot():
         # lazy-create manager; pass client accessor and risk-loader
         def _risk_loader():
             try:
-                return _risk_load()
+                return risk_load()
             except Exception:
                 return {}
         _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=get_execution)
