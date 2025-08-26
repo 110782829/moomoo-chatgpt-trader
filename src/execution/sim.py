@@ -1,14 +1,27 @@
+# src/execution/sim.py
 import sqlite3
 import time
 import uuid
 from typing import Dict, List, Optional, Any
+
 from .base import ExecutionService, ExecutionContext
-from .types import OrderSpec, PlacedOrder, FillRecord, OrderStatus, OrderType, OrderSide, TimeInForce
+from .types import (
+    OrderSpec,
+    PlacedOrder,
+    FillRecord,
+    OrderStatus,
+    OrderType,
+    OrderSide,
+    TimeInForce,
+)
 
 
 def _utc_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+
+# Synthetic fallback price for MARKET fills when no last is available
+DEFAULT_MARKET_SYNTH_PRICE = 100.0
 
 # Positions schema (defensive; container can also create this)
 _POSITIONS_SCHEMA = """
@@ -28,6 +41,7 @@ class SimBroker(ExecutionService):
 
     Fills:
       - Market: immediate at last price (from last known tick/fill you pass in).
+               If last is missing/zero, falls back to most recent fill; else a synthetic price.
       - Limit: fill if crossed, else remains OPEN; try_fill_resting() attempts later fills.
 
     Sizing:
@@ -38,6 +52,7 @@ class SimBroker(ExecutionService):
     Maintains positions (symbol, signed qty, avg_cost, realized_today).
     Exposes list_positions() and pnl_today().
     """
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
         self.conn.row_factory = sqlite3.Row
@@ -56,9 +71,21 @@ class SimBroker(ExecutionService):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["order_id"], row["created_at"], row["updated_at"], row["status"], row["account_id"],
-                row["symbol"], row["side"], row["order_type"], row["limit_price"], row["tif"],
-                row["requested_qty"], row["filled_qty"], row["avg_fill_price"], row["decision_id"], row["reject_reason"],
+                row["order_id"],
+                row["created_at"],
+                row["updated_at"],
+                row["status"],
+                row["account_id"],
+                row["symbol"],
+                row["side"],
+                row["order_type"],
+                row["limit_price"],
+                row["tif"],
+                row["requested_qty"],
+                row["filled_qty"],
+                row["avg_fill_price"],
+                row["decision_id"],
+                row["reject_reason"],
             ),
         )
         self.conn.commit()
@@ -89,24 +116,31 @@ class SimBroker(ExecutionService):
         )
 
     def _compute_qty(self, spec: OrderSpec, ctx: ExecutionContext) -> int:
-        last = ctx.last_prices.get(spec.symbol)
-        if last is None or last <= 0:
-            return 0
+        # Shares don't need last price
         if spec.size_type == "shares":
             return max(0, int(spec.size_value))
+
+        # For notional / risk_bps we need a price; try ctx, then recent fill
+        last = (ctx.last_prices or {}).get(spec.symbol)
+        if last is None or last <= 0:
+            try:
+                last = self._recent_last(spec.symbol)  # falls back to last fill if you have it
+            except Exception:
+                last = None
+        if last is None or last <= 0:
+            return 0
+
         if spec.size_type == "notional":
             return max(0, int(spec.size_value // last))
         if spec.size_type == "risk_bps":
-            notional = ctx.equity * (spec.size_value / 10000.0)
+            notional = float(ctx.equity) * (float(spec.size_value) / 10000.0)
             return max(0, int(notional // last))
         return 0
 
     # ---------------- positions helpers ----------------
 
     def _recent_last(self, symbol: str) -> Optional[float]:
-        cur = self.conn.execute(
-            "SELECT price FROM fills WHERE symbol = ? ORDER BY ts DESC LIMIT 1", (symbol,)
-        )
+        cur = self.conn.execute("SELECT price FROM fills WHERE symbol = ? ORDER BY ts DESC LIMIT 1", (symbol,))
         r = cur.fetchone()
         return float(r["price"]) if r else None
 
@@ -178,35 +212,44 @@ class SimBroker(ExecutionService):
     # ---------------- fill logic ----------------
 
     def _maybe_fill_now(self, order_row, last_price: Optional[float]) -> Optional[FillRecord]:
-        if last_price is None:
-            return None
+        # Normalize last price; treat None/zero as missing and fallback
+        lp = float(last_price) if (last_price is not None) else None
+        if lp is None or lp <= 0.0:
+            lp = self._recent_last(order_row["symbol"])
+
         side = order_row["side"]
+
         if order_row["order_type"] == OrderType.market.value:
-            qty = order_row["requested_qty"]
-            price = float(last_price)
-        else:
-            lp = order_row["limit_price"]
-            if lp is None:
+            qty = int(order_row["requested_qty"])
+            # For market orders, if we still have no price, use a synthetic nonzero
+            if lp is None or lp <= 0.0:
+                lp = float(DEFAULT_MARKET_SYNTH_PRICE)
+            price = float(lp)
+
+        else:  # LIMIT logic requires a price to compare/cross
+            if lp is None or lp <= 0.0:
+                return None
+            limit_px = order_row["limit_price"]
+            if limit_px is None:
                 return None
             if side in (OrderSide.buy.value, OrderSide.buy_to_cover.value):
-                if last_price <= lp:
-                    qty = order_row["requested_qty"]
-                    price = float(min(lp, last_price))
+                if lp <= float(limit_px):
+                    qty = int(order_row["requested_qty"])
+                    price = float(min(limit_px, lp))
                 else:
                     return None
             else:
-                if last_price >= lp:
-                    qty = order_row["requested_qty"]
-                    price = float(max(lp, last_price))
+                if lp >= float(limit_px):
+                    qty = int(order_row["requested_qty"])
+                    price = float(max(limit_px, lp))
                 else:
                     return None
 
         fill_id = uuid.uuid4().hex
         ts = _utc_ts()
-        self._insert_fill({
-            "fill_id": fill_id, "order_id": order_row["order_id"], "ts": ts,
-            "symbol": order_row["symbol"], "qty": qty, "price": price
-        })
+        self._insert_fill(
+            {"fill_id": fill_id, "order_id": order_row["order_id"], "ts": ts, "symbol": order_row["symbol"], "qty": qty, "price": price}
+        )
         self.conn.execute(
             "UPDATE orders SET status = ?, filled_qty = ?, avg_fill_price = ?, updated_at = ? WHERE order_id = ?",
             (OrderStatus.filled.value, qty, price, ts, order_row["order_id"]),
@@ -214,7 +257,9 @@ class SimBroker(ExecutionService):
         self.conn.commit()
 
         self._update_position_on_fill(order_row["symbol"], side, int(qty), float(price))
-        return FillRecord(fill_id=fill_id, order_id=order_row["order_id"], symbol=order_row["symbol"], qty=qty, price=price, ts=ts)
+        return FillRecord(
+            fill_id=fill_id, order_id=order_row["order_id"], symbol=order_row["symbol"], qty=qty, price=price, ts=ts
+        )
 
     # ---------------- ExecutionService interface ----------------
 
@@ -291,9 +336,11 @@ class SimBroker(ExecutionService):
         q = "SELECT * FROM orders"
         clauses, params = [], []
         if symbol:
-            clauses.append("symbol = ?"); params.append(symbol)
+            clauses.append("symbol = ?")
+            params.append(symbol)
         if status:
-            clauses.append("status = ?"); params.append(status)
+            clauses.append("status = ?")
+            params.append(status)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         q += " ORDER BY created_at DESC LIMIT ?"
@@ -305,24 +352,20 @@ class SimBroker(ExecutionService):
         q = "SELECT * FROM fills"
         params = []
         if symbol:
-            q += " WHERE symbol = ?"; params.append(symbol)
+            q += " WHERE symbol = ?"
+            params.append(symbol)
         q += " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
         cur = self.conn.execute(q, tuple(params))
         out = []
         for r in cur.fetchall():
-            out.append(FillRecord(
-                fill_id=r["fill_id"], order_id=r["order_id"], ts=r["ts"],
-                symbol=r["symbol"], qty=r["qty"], price=r["price"]
-            ))
+            out.append(FillRecord(fill_id=r["fill_id"], order_id=r["order_id"], ts=r["ts"], symbol=r["symbol"], qty=r["qty"], price=r["price"]))
         return out
 
-    # ---------------- NEW: positions & pnl ----------------
+    # ---------------- positions & pnl ----------------
 
     def list_positions(self) -> List[Dict[str, Any]]:
-        cur = self.conn.execute(
-            "SELECT symbol, qty, avg_cost, realized_today FROM positions ORDER BY symbol"
-        )
+        cur = self.conn.execute("SELECT symbol, qty, avg_cost, realized_today FROM positions ORDER BY symbol")
         rows = cur.fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -332,10 +375,17 @@ class SimBroker(ExecutionService):
             last = self._recent_last(sym)
             mv = (last * qty) if last is not None else None
             upl = ((last - avg) * qty) if (last is not None and qty != 0) else None
-            out.append({
-                "symbol": sym, "qty": qty, "avg_cost": avg,
-                "last": last, "mv": mv, "upl": upl, "rpl_today": float(r["realized_today"])
-            })
+            out.append(
+                {
+                    "symbol": sym,
+                    "qty": qty,
+                    "avg_cost": avg,
+                    "last": last,
+                    "mv": mv,
+                    "upl": upl,
+                    "rpl_today": float(r["realized_today"]),
+                }
+            )
         return out
 
     def pnl_today(self) -> Dict[str, Any]:

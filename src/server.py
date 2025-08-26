@@ -1,4 +1,6 @@
-# Start command: uvicorn --app-dir src server:app --reload --port 8000
+'''
+Start command: uvicorn --app-dir src server:app --reload --port 8000"
+'''
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import List, Optional 
@@ -9,16 +11,30 @@ from pathlib import Path
 
 from fastapi.middleware.cors import CORSMiddleware
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+try:
+    from execution.container import init_execution, get_execution
+except Exception:
+    init_execution = lambda *a, **k: None  # type: ignore
+    def get_execution():
+        return None
+try:
+    from routers import exec_orders as exec_orders_router
+except Exception:
+    exec_orders_router = None  # type: ignore
+
+
 # --- Internal modules ---
 from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
 from core.session import load_session, save_session, clear_session
 from risk.limits import enforce_order_limits
-
-# Execution container + /exec router
-from execution.container import init_execution, get_execution
-from routers import exec_orders as exec_orders_router
 
 # Automation (scheduler + storage + strategy step)
 try:
@@ -67,7 +83,9 @@ except Exception as _ge:
 # ---------- App + CORS ----------
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
-init_execution(app)
+init_execution(app)  # ensure SIM tables exist
+if exec_orders_router is not None:
+    app.include_router(exec_orders_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,9 +94,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize execution service (SIM broker on SQLite)
-init_execution(app)  # sets app.state.execution_service
 
 
 # ---------- Globals ----------
@@ -1113,7 +1128,7 @@ except Exception as _ae:
     _AUTOPILOT_IMPORT_ERR = _ae
 
 autopilot_router = APIRouter(prefix="/autopilot", tags=["autopilot"])
-app.include_router(exec_orders_router.router)
+
 _autopilot_mgr = None  # lazy singleton
 
 def _get_autopilot():
@@ -1127,9 +1142,6 @@ def _get_autopilot():
                 return _risk_load()
             except Exception:
                 return {}
-        # Pass an execution getter for Act()
-        def _exec_getter():
-            return getattr(app.state, "execution_service", None)
         _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=get_execution)
     return _autopilot_mgr
 
@@ -1171,10 +1183,28 @@ async def autopilot_last_output():
     mgr = _get_autopilot()
     return {"last_output": mgr.last_output or {}}
 
+
 @autopilot_router.get("/logs")
-async def autopilot_logs(limit: int = 100, offset: int = 0):
-    mgr = _get_autopilot()
-    return mgr.get_logs(limit=limit, offset=offset)
+async def autopilot_logs(limit: int = 100, offset: int = 0, since_hours: int = 72):
+    """
+    Return Autopilot logs from persistent storage when available, with an in-memory fallback.
+    We prefer rows written via core.storage.insert_action_log() by the worker, filtered to
+    sources that start with 'autopilot' or mode == 'auto'.
+    """
+    # Try DB-backed logs first (core.storage.list_action_logs)
+    try:
+        rows = list_action_logs(limit=limit * 5, symbol=None, since_hours=since_hours)  # type: ignore[name-defined]
+        def _is_auto(r: dict) -> bool:
+            src = str(r.get("source", "")).lower()
+            md = str(r.get("mode", "")).lower()
+            return src.startswith("autopilot") or md in ("auto", "autopilot")
+        out = [r for r in rows if isinstance(r, dict) and _is_auto(r)]
+        out.sort(key=lambda x: str(x.get("ts", "")), reverse=True)
+        return out[offset: offset + limit]
+    except Exception:
+        # fall back to manager in-memory logs
+        mgr = _get_autopilot()
+        return mgr.get_logs(limit=limit, offset=offset)
 
 # stop Autopilot cleanly on shutdown (in addition to scheduler)
 @app.on_event("shutdown")
@@ -1185,6 +1215,5 @@ async def _autopilot_shutdown():
     except Exception:
         pass
 
-# mount routers
+# mount the router
 app.include_router(autopilot_router)
-app.include_router(exec_orders_router.router)  # /exec endpoints

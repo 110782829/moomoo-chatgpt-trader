@@ -1,4 +1,4 @@
-# src/autopilot/worker.py
+# src/autopilot/worker.py (robust imports + guardrails + SIM Act)
 from __future__ import annotations
 
 import asyncio
@@ -12,22 +12,36 @@ try:
 except Exception:  # pragma: no cover
     yf = None  # type: ignore
 
-# Storage (optional)
+# Optional durable action log
 try:
     from core.storage import insert_action_log  # type: ignore
     _HAS_STORAGE = True
 except Exception:  # pragma: no cover
     _HAS_STORAGE = False
 
-from autopilot.planner_client import get_planner_client
-from autopilot.schemas import PlannerOutput, validate_output
-from autopilot import indicators as ind
+# Planner client (support both module layouts)
+try:
+    from planner_client import get_planner_client  # type: ignore
+except Exception:  # pragma: no cover
+    from autopilot.planner_client import get_planner_client  # type: ignore
+
+# Planner schemas (support both layouts)
+try:
+    from schemas import PlannerOutput, validate_output  # type: ignore
+except Exception:  # pragma: no cover
+    from autopilot.schemas import PlannerOutput, validate_output  # type: ignore
+
+# Indicators (support both layouts)
+try:
+    import indicators as ind  # type: ignore
+except Exception:  # pragma: no cover
+    from autopilot import indicators as ind  # type: ignore
 
 # Execution (absolute imports avoid relative-import issues)
 try:
     from execution.base import ExecutionContext  # type: ignore
     from execution.types import OrderSpec, OrderSide, OrderType, TimeInForce  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     ExecutionContext = None  # type: ignore
     OrderSpec = None  # type: ignore
     OrderSide = None  # type: ignore
@@ -37,7 +51,7 @@ except Exception:
 # Guardrails
 try:
     from risk.limits import enforce_order_limits  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     def enforce_order_limits(**kwargs):  # type: ignore
         return None
 
@@ -117,7 +131,7 @@ class AutopilotManager:
         return {
             "on": self._running and self._task is not None and not self._task.done(),
             "last_tick": self.last_tick_ts,
-            "last_decision": (self.last_output or {}).get("decisions", [])[:3],
+            "last_decision": (self.last_output or {}).get("decisions", [])[:3] if isinstance(self.last_output, dict) else None,
             "stats": dict(self.stats),
             "reject_streak": self.reject_streak,
         }
@@ -145,6 +159,7 @@ class AutopilotManager:
             try:
                 ctx = await self._sense()
                 out = self._think(ctx)
+
                 try:
                     validated: PlannerOutput = validate_output(out)
                     self.stats["accepted"] += 1
@@ -182,6 +197,7 @@ class AutopilotManager:
         c = self.get_client()
         account: Dict[str, float] = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
         positions_raw: List[Dict[str, Any]] = []
+
         # Also include SIM positions from the execution service (if available)
         try:
             exec_service = self._get_execution()
@@ -217,9 +233,10 @@ class AutopilotManager:
         risk_cfg = self.risk_loader() or {}
         risk: Dict[str, Any] = {
             "max_positions": int(risk_cfg.get("max_open_positions") or 0),
-            "max_risk_bps": 0,
-            "max_day_dd_bps": 0,
-            "per_symbol_max_bps": 0,
+            "max_risk_bps": int(risk_cfg.get("per_trade_max_bps") or 0),
+            "max_day_dd_bps": int(risk_cfg.get("max_day_drawdown_bps") or 0),
+            "per_symbol_max_bps": int(risk_cfg.get("per_symbol_max_bps") or 0),
+            "symbol_blocklist": list(risk_cfg.get("symbol_blocklist") or []),
         }
 
         # Universe with indicators
@@ -254,7 +271,7 @@ class AutopilotManager:
 
     def _think(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         out_model = self._planner.plan(ctx)
-        return out_model.dict()
+        return out_model.dict() if hasattr(out_model, "dict") else out_model  # type: ignore
 
     # ---- helpers for Act ----
     @staticmethod
@@ -270,8 +287,8 @@ class AutopilotManager:
 
     @staticmethod
     def _qty_from_size(d, last_px: float, equity: float) -> int:
-        size_type = getattr(d, "size_type", "shares")
-        size_value = float(getattr(d, "size_value", 0.0) or 0.0)
+        size_type = getattr(d, "size_type", None) or (d.get("size_type") if isinstance(d, dict) else "shares")
+        size_value = float(getattr(d, "size_value", 0.0) or (d.get("size_value") if isinstance(d, dict) else 0.0) or 0.0)
         if last_px <= 0:
             return 0
         if size_type == "shares":
@@ -302,13 +319,13 @@ class AutopilotManager:
         self._log("planner_decisions", {"n": len(decisions)})
 
         for idx, d in enumerate(decisions):
-            sym = getattr(d, "sym", None) or getattr(d, "symbol", None)
+            sym = getattr(d, "sym", None) or getattr(d, "symbol", None) or (d.get("sym") if isinstance(d, dict) else None) or (d.get("symbol") if isinstance(d, dict) else None)
             if not sym:
                 self._logs.append({"ts": _utcnow_iso(), "status": "rejected", "reason": "missing_symbol"})
                 continue
 
-            side_field = getattr(d, "side", "buy")
-            action = getattr(d, "action", "open")
+            side_field = getattr(d, "side", None) or (d.get("side") if isinstance(d, dict) else "buy") or "buy"
+            action = getattr(d, "action", None) or (d.get("action") if isinstance(d, dict) else "open") or "open"
 
             if action == "close":
                 cur_qty = float(pos.get(sym) or 0.0)
@@ -323,8 +340,8 @@ class AutopilotManager:
 
             last_px = float(last_prices.get(sym) or 0.0)
             est_qty = self._qty_from_size(d, last_px, equity)
-            order_type = "MARKET" if getattr(d, "entry", "market") == "market" else "LIMIT"
-            limit_price = getattr(d, "limit_price", None)
+            order_type = "MARKET" if (getattr(d, "entry", None) or (d.get("entry") if isinstance(d, dict) else "market")) == "market" else "LIMIT"
+            limit_price = getattr(d, "limit_price", None) or (d.get("limit_price") if isinstance(d, dict) else None)
 
             # Guardrails
             try:
@@ -340,11 +357,9 @@ class AutopilotManager:
                 self.reject_streak += 1
                 self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
                                    "symbol": sym, "side": side,
-                                   "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}",
+                                   "qty": f"{getattr(d,'size_type','shares') if not isinstance(d, dict) else d.get('size_type','shares')}:{getattr(d,'size_value',0) if not isinstance(d, dict) else d.get('size_value',0)}",
                                    "price": limit_price or "", "reason": f"guardrail:{str(e)}", "status": "rejected"})
                 if self.reject_streak >= REJECT_PAUSE_THRESHOLD:
-                    # Pause autopilot to avoid runaway attempts
-                    # Note: cannot await here; schedule a pause task and continue loop
                     asyncio.create_task(self._pause_due_to_rejects("guardrails"))
                 if _HAS_STORAGE:
                     try:
@@ -359,20 +374,20 @@ class AutopilotManager:
                 # Plan only (no execution service wired)
                 self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
                                    "symbol": sym, "side": side,
-                                   "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}",
+                                   "qty": f"{getattr(d,'size_type','shares') if not isinstance(d, dict) else d.get('size_type','shares')}:{getattr(d,'size_value',0) if not isinstance(d, dict) else d.get('size_value',0)}",
                                    "price": limit_price or "", "reason": "no_execution_service", "status": "planned"})
                 continue
 
-            tif = getattr(d, "time_in_force", "day")
+            tif_val = getattr(d, "time_in_force", None) or (d.get("time_in_force") if isinstance(d, dict) else "day") or "day"
             spec = OrderSpec(
                 symbol=sym,
                 side=OrderSide.buy if side == "buy" else OrderSide.sell,
                 order_type=OrderType.market if order_type == "MARKET" else OrderType.limit,
                 limit_price=limit_price,
-                size_type=str(getattr(d, "size_type", "shares")),
-                size_value=float(getattr(d, "size_value", 0.0) or 0.0),
-                tif=TimeInForce.day if tif == "day" else TimeInForce.gtc,
-                decision_id=idx,  # link order to the decision index for audit
+                size_type=str(getattr(d, "size_type", None) or (d.get("size_type") if isinstance(d, dict) else "shares")),
+                size_value=float(getattr(d, "size_value", 0.0) or (d.get("size_value") if isinstance(d, dict) else 0.0) or 0.0),
+                tif=TimeInForce.day if tif_val == "day" else TimeInForce.gtc,
+                decision_id=idx,
             )
 
             ctx_exec = ExecutionContext(
@@ -385,7 +400,7 @@ class AutopilotManager:
 
             self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
                                "symbol": sym, "side": side,
-                               "qty": f"{getattr(d,'size_type','shares')}:{getattr(d,'size_value',0)}",
+                               "qty": f"{spec.size_type}:{spec.size_value}",
                                "price": limit_price or "", "reason": f"order:{order.order_id}",
                                "status": str(order.status.value)})
             if _HAS_STORAGE:

@@ -207,7 +207,7 @@ def update_strategy(
     return get_strategy(strategy_id)
 
 
-# ----- NEW: settings helpers -----
+# ----- settings helpers -----
 
 def get_setting(key: str) -> Optional[str]:
     with _conn() as c:
@@ -232,7 +232,7 @@ def all_settings() -> Dict[str, Any]:
         return out
 
 
-# ----- NEW: orders/fills recording -----
+# ----- orders/fills recording -----
 
 def record_order(
     broker_order_id: Optional[str],
