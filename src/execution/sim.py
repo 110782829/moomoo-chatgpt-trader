@@ -139,10 +139,19 @@ class SimBroker(ExecutionService):
 
     # ---------------- positions helpers ----------------
 
-    def _recent_last(self, symbol: str) -> Optional[float]:
-        cur = self.conn.execute("SELECT price FROM fills WHERE symbol = ? ORDER BY ts DESC LIMIT 1", (symbol,))
-        r = cur.fetchone()
-        return float(r["price"]) if r else None
+    def _recent_last(self, symbol: Optional[str]) -> Optional[float]:
+        sym = str(symbol or "").strip()
+        if not sym:
+            return None
+        try:
+            cur = self.conn.execute(
+                "SELECT price FROM fills WHERE symbol = ? ORDER BY ts DESC LIMIT 1",
+                (sym,),
+            )
+            r = cur.fetchone()
+            return float(r["price"]) if r and r["price"] is not None else None
+        except sqlite3.Error:
+            return None
 
     def _load_pos(self, symbol: str) -> Optional[sqlite3.Row]:
         cur = self.conn.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,))
@@ -265,7 +274,7 @@ class SimBroker(ExecutionService):
 
     def place_order(self, spec: OrderSpec, ctx: ExecutionContext) -> PlacedOrder:
         ts = _utc_ts()
-        last = ctx.last_prices.get(spec.symbol)
+        last = (ctx.last_prices or {}).get(spec.symbol)
         requested_qty = self._compute_qty(spec, ctx)
 
         order_id = uuid.uuid4().hex
@@ -329,7 +338,7 @@ class SimBroker(ExecutionService):
         )
         rows = cur.fetchall()
         for r in rows:
-            last = last_prices.get(r["symbol"])
+            last = (last_prices or {}).get(r["symbol"])
             self._maybe_fill_now(r, last)
 
     def list_orders(self, *, symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200):
@@ -357,7 +366,7 @@ class SimBroker(ExecutionService):
         q += " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
         cur = self.conn.execute(q, tuple(params))
-        out = []
+        out: List[FillRecord] = []
         for r in cur.fetchall():
             out.append(FillRecord(fill_id=r["fill_id"], order_id=r["order_id"], ts=r["ts"], symbol=r["symbol"], qty=r["qty"], price=r["price"]))
         return out
@@ -369,12 +378,14 @@ class SimBroker(ExecutionService):
         rows = cur.fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
-            sym = r["symbol"]
-            qty = int(r["qty"])
-            avg = float(r["avg_cost"])
+            sym = str(r["symbol"] or "").strip()
+            qty = int(r["qty"] or 0)
+            avg = float(r["avg_cost"] or 0.0)
+            if not sym or qty == 0:  # hide flattened rows
+                continue
             last = self._recent_last(sym)
-            mv = (last * qty) if last is not None else None
-            upl = ((last - avg) * qty) if (last is not None and qty != 0) else None
+            mv = (last if last is not None else avg) * qty
+            upl = None if last is None else (last - avg) * qty
             out.append(
                 {
                     "symbol": sym,
@@ -383,7 +394,7 @@ class SimBroker(ExecutionService):
                     "last": last,
                     "mv": mv,
                     "upl": upl,
-                    "rpl_today": float(r["realized_today"]),
+                    "rpl_today": float(r["realized_today"] or 0.0),
                 }
             )
         return out

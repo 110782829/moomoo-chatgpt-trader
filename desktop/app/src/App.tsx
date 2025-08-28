@@ -26,19 +26,22 @@ body{margin:0;background:var(--bg);
 .title{display:flex;align-items:center;gap:12px}
 .badge{font-size:12px;color:var(--text-dim);background:linear-gradient(135deg, rgba(124,58,237,.25), rgba(6,182,212,.25));
   border:1px solid rgba(124,58,237,.35);padding:4px 8px;border-radius:999px}
+.badge.good{color:var(--green);border-color:rgba(16,185,129,.45);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
+.badge.bad{color:var(--red);border-color:rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06))}
 .tabs{display:flex;gap:8px;margin:8px 0 18px}
 .tab{padding:8px 12px;border-radius:8px;background:var(--panel);color:var(--text-dim);
   border:1px solid var(--border);cursor:pointer;transition:.18s ease}
 .tab:hover{background:var(--hover)}
 .tab.active{color:var(--text);background:linear-gradient(180deg, rgba(124,58,237,.25), rgba(6,182,212,.25));border-color:rgba(124,58,237,.45)}
-.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap: 8px}
 @media (max-width:900px){.grid-3{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px}
-.card h3{margin:0 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.card-lg{padding:18px}
+.card h3{margin:0 0 6px;font-size:15px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 .card .value{font-size:20px;font-weight:600}
 .row{display:flex;gap:12px;flex-wrap:wrap}
-.stack{display:grid;gap:10px}
-.panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+.stack{display:grid;gap: 8px}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border-radius:10px;border:1px solid var(--border);
   background:#0e1320;color:var(--text);cursor:pointer;transition:transform .04s ease, background .18s ease;user-select:none}
 .btn[disabled]{opacity:.55;cursor:not-allowed}
@@ -128,7 +131,7 @@ body{margin:0;background:var(--bg);
 table{width:100%;border-collapse:collapse;background:var(--panel)}
 th,td{padding:8px 10px;border-top:1px solid var(--border)} th{text-align:left;font-size:12px;color:var(--muted);background:#0f1420;position:sticky;top:0;z-index:1}
 tr:hover td{background:rgba(124,58,237,.08)}
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px} @media (max-width:900px){.kpis{grid-template-columns:1fr}}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap: 8px} @media (max-width:900px){.kpis{grid-template-columns:1fr}}
 .help{color:var(--muted);font-size:12px}
 .toast{position:fixed;right:16px;bottom:16px;padding:10px 12px;border-radius:10px;background:#0e1320;border:1px solid var(--border);color:var(--text);box-shadow:0 10px 30px rgba(0,0,0,.35);max-width:360px}
 small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background:rgba(124,58,237,.18);padding:2px 6px;border-radius:6px}
@@ -146,7 +149,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .header, .title, .header-quick{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial }
 
-.grid-2{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.grid-2{display:grid;grid-template-columns:2fr 1fr;gap: 8px}
 @media (max-width:980px){.grid-2{grid-template-columns:1fr}}
 .panel.thick{padding:22px}
 /* Autopilot switch (solid color) */
@@ -157,16 +160,102 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .help.strong{font-weight:600;color:var(--text)}
 
 /* Align with KPI 3-column track; panels span to align edges */
-.panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:12px}
+.panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap: 8px}
 .panels3 .span-2{grid-column:span 2 / span 2}
 @media (max-width:980px){.panels3{grid-template-columns:1fr}.panels3 .span-2{grid-column:auto}}
+
+.panels2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
+@media (max-width:980px){.panels2{grid-template-columns:1fr}}
 
 /* Fixed gradient overlay to avoid scroll seams */
 .bgfx{position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
     radial-gradient(1200px 600px at 20% -10%, rgba(139,92,246,.12), transparent 60%),
     radial-gradient(1000px 500px at 100% 0%, rgba(34,211,238,.10), transparent 60%);
-}`;
+
+/* --- UI tweaks (0826) --- */
+.health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
+.health .health-top { grid-area:top; display:flex; align-items:center; gap:10px; margin-top:14px; }
+.health .health-badge { font-size: 18px; padding: 9px 16px; border-radius: 999px; }
+.health .health-metrics { grid-area:metrics; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:10px 22px; align-items:start; justify-self:end; align-self:start; text-align:left; }
+.health .stat { font-size:13px; color:var(--muted); letter-spacing:.02em; }
+
+/* Split card (top/bottom halves) */
+.split-card { display: flex; flex-direction: column; }
+.split-card .section { flex: 1 1 0; display: flex; flex-direction: column; justify-content: center; }
+.split-card .section + .section { margin-top: 8px; padding-top: 8px; }
+.split-card .section.top{padding-bottom:6px padding-top:10px}
+.split-card .section.bottom{padding-top:32px}
+}
+/* --- Autopilot Health layout --- */
+.health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
+.health .health-top { grid-area:top; display:flex; align-items:center; gap:10px; margin-top:14px; }
+.health .health-metrics { grid-area:metrics; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px 16px; align-items:start; justify-self:end; align-self:start; text-align:left; }
+.health .stat { font-size:13px; color:var(--muted); letter-spacing:.02em; }
+/* --- end health --- */
+
+.split-card .section.top .row{ margin-top:6px }
+
+/* === Advanced layout & widgets (added) === */
+.panel.no-bottom-line{border-bottom:0}
+
+/* Compact variant for tighter cards */
+.panel.compact{padding:12px}
+.panel.compact h2{margin-bottom:6px}
+.panel.compact .form-row{gap:8px}
+.panel.compact .label{margin-bottom:4px}
+.panel.compact .input,.panel.compact .select,.panel.compact .custom-trigger{padding:6px 8px}
+.panel.compact .custom-trigger{min-height:30px}
+.panel.compact .row{gap:8px}
+.prefs-grid{margin-top:12px}
+
+.panels2.vsplit{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:12px}
+.panels2.vsplit > .panel{min-height:0}
+@media (max-width:980px){.panels2.vsplit{grid-template-columns:1fr;grid-template-rows:auto}}
+
+.strat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
+@media (max-width:980px){.strat-grid{grid-template-columns:1fr}}
+.strat{border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg, rgba(124,58,237,.10), rgba(6,182,212,.06));
+  padding:12px; display:flex; align-items:flex-start; gap:12px; cursor:pointer; transition:transform .06s ease, box-shadow .18s ease, border-color .18s ease; min-height:74px;}
+.strat:hover{ box-shadow:0 14px 30px rgba(0,0,0,.28); }
+.strat.on{ border-color: rgba(124,58,237,.30); box-shadow: 0 8px 18px rgba(124,58,237,.08); background:linear-gradient(180deg, rgba(124,58,237,.08), rgba(6,182,212,.05)); }
+.strat .dot{ width:10px; height:10px; margin-top:3px; }
+.strat .info{ flex:1 1 auto; }
+.strat .name{ font-weight:700; margin-bottom:2px; }
+.strat .desc{ font-size:12px; color:var(--muted); }
+.btn-ghost{ background:linear-gradient(180deg, rgba(124,58,237,.14), rgba(6,182,212,.10)); border:1px solid rgba(124,58,237,.45); padding:6px 10px; border-radius:8px; }
+
+.pref-list{display:grid;gap:8px}
+.pref-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pref-row .k{font-size:12px;color:var(--muted)}
+.delta{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320;display:inline-flex;align-items:center;gap:6px}
+.delta.up{color:var(--green);border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.10)}
+.delta.down{color:var(--red);border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.10)}
+.delta.neutral{color:var(--muted);opacity:.9}
+.pref-row .val{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
+
+/* Current Stats layout */
+.statgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (max-width:980px){.statgrid{grid-template-columns:1fr}}
+.statcard{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px;border:1px solid var(--border);border-radius:10px;background:#0e1320}
+.statcard .label{font-size:12px;color:var(--muted)}
+.statcard .value{font-weight:700;font-variant-numeric:tabular-nums}
+.statcard .meta{display:flex;align-items:center;gap:8px}
+.delta{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320;display:inline-flex;align-items:center;gap:6px}
+.delta.up{color:var(--green);border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.10)}
+.delta.down{color:var(--red);border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.10)}
+.delta.neutral{color:var(--muted);opacity:.9}
+
+
+/* === Current Stats (list view, fewer boxes) === */
+.statlist{display:block}
+.statrow{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--border)}
+.statrow:first-child{border-top:0;padding-top:0}
+.statrow .k{font-size:12px;color:var(--muted)}
+.statrow .v{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.statrow .delta{white-space:nowrap}
+`;
 
 // ---------- Types ----------
 type Mode = "automatic" | "manual";
@@ -259,7 +348,10 @@ const api = {
   autopilotStatus: () => GET("/autopilot/status"),
   autopilotEnable: (on: boolean) => SEND("/autopilot/enable", { on }),
   autopilotPreview: () => SEND("/autopilot/preview", {}),
-  autopilotLogs: (limit: number) => GET("/autopilot/logs", { limit }),
+  autopilotLogs: (limit: number) => GET<any[]>("/autopilot/logs", { limit }),
+  autopilotContext: () => GET("/autopilot/context"),
+  autopilotLastOutput: () => GET("/autopilot/last_output"),
+
   // execution (SIM)
   listExecOrders: (q: { symbol?: string; status?: string; limit?: number }) => GET<any[]>("/exec/orders", q),
   cancelExecOrder: (id: string) => SEND(`/exec/orders/${id}/cancel`, {}, "POST"),
@@ -305,6 +397,7 @@ export default function App() {
   // bot state
   const [mode, setMode] = useState<Mode>("manual");
   const [cfg, setCfg] = useState<RiskConfig | null>(null);
+  const [riskEnabled, setRiskEnabled] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
 
   // status
@@ -340,6 +433,26 @@ export default function App() {
   const [exEvery, setExEvery] = useLocalStorage("exec.ms", 5000);
   const [exAt, setExAt] = useState<string>("—");
   const [orders, setOrders] = useState<any[]>([]);
+  const [openOrderCount, setOpenOrderCount] = useState<number | null>(null);
+  const [exposureMV, setExposureMV] = useState<number | null>(null);
+
+  
+  // preference targets (read-only for Current Stats)
+  const [prefWinRate] = useLocalStorage<number>("pref.winRate", 55);
+  const [prefRR] = useLocalStorage<number>("pref.rr", 1.5);
+  const [prefStop] = useLocalStorage<number>("pref.stop", 1.0);
+  const [prefTP] = useLocalStorage<number>("pref.tp", 2.0);
+  const [prefMM] = useLocalStorage<number>("pref.mm", 1.0);
+  const [prefMaxDD] = useLocalStorage<number>("pref.maxdd", 5.0);
+// Bot Status live autopilot decisions
+  const [statusLogs, setStatusLogs] = useState<any[]>([]);
+  const [statusLogsAt, setStatusLogsAt] = useState<string>("—");
+
+  // Explain modal for a decision
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [explainRow, setExplainRow] = useState<any|null>(null);
+  const [explainData, setExplainData] = useState<any|null>(null);
+
   const [fills, setFills] = useState<any[]>([]);
   const [exLoading, setExLoading] = useState(false);
   // positions (SIM)
@@ -348,6 +461,8 @@ export default function App() {
   const [posEvery, setPosEvery] = useLocalStorage("pos.ms", 5000);
   const [posAt, setPosAt] = useState<string>("—");
   const [positions, setPositions] = useState<any[]>([]);
+  const posReqId = useRef(0);
+
   const [posLoading, setPosLoading] = useState(false);
 
 
@@ -381,7 +496,21 @@ export default function App() {
     return () => { window.clearInterval(id); window.clearInterval(idAuto); };
   }, [autoRefresh, tab, statusEvery, autoEvery]);
 
+  
   useEffect(() => {
+    if (tab !== Tab.Status) return;
+    const pull = async () => {
+      try {
+        const ls = await api.autopilotLogs(100);
+        setStatusLogs(ls || []);
+        setStatusLogsAt(nowIso());
+      } catch {}
+    };
+    pull();
+    const id = window.setInterval(pull, 2500);
+    return () => window.clearInterval(id);
+  }, [tab]);
+useEffect(() => {
     if (!logsAuto || tab !== Tab.Activity) return;
     const id = window.setInterval(() => refreshLogs(false), logsEvery);
     return () => window.clearInterval(id);
@@ -401,6 +530,104 @@ export default function App() {
 
 
   
+  async function refreshStatus(show = true) {
+    try {
+      setStatusLoading(true);
+      // 1) Realized PnL (today)
+      try {
+        const p = await api.getPnlToday();
+        setPnl(p?.realized_pnl ?? null);
+      } catch {}
+      // 2) Positions -> count + exposure MV
+      try {
+        const pos = await api.listExecPositions({});
+        const count = Array.isArray(pos) ? pos.length : 0;
+        const mv = Array.isArray(pos)
+          ? pos.reduce((acc:number, r:any) => acc + Math.abs(Number(r?.mv || 0)), 0)
+          : null;
+        setOpenPositions(count || 0);
+        setExposureMV(mv == null ? null : Number(Number(mv).toFixed(2)));
+      } catch {}
+      // 3) Orders pending
+      try {
+        const ords = await api.listExecOrders({});
+        const pending = Array.isArray(ords)
+          ? ords.filter((o:any) => {
+              const s = String(o?.status || "").toLowerCase();
+              return !["filled", "cancelled", "canceled", "rejected", "done", "completed"].includes(s);
+            }).length
+          : 0;
+        setOpenOrderCount(pending);
+      } catch {}
+      setStatusAt(nowIso());
+    } catch (e:any) {
+      show && toast.show(`Status refresh failed: ${brief(e)}`);
+    } finally {
+      setStatusLoading(false);
+    }
+  }
+
+  async function refreshLogs(show = true) {
+    try {
+      setLogsLoading(true);
+      if (logsSource === "autopilot") {
+        const ls = await api.autopilotLogs(Math.max(10, Number(logLimit) || 100));
+        setLogs(ls || []);
+      } else {
+        const q: any = { limit: Math.max(10, Number(logLimit) || 100) };
+        if (logSymbol) q.symbol = logSymbol;
+        if (logSince) q.since_hours = Number(logSince) || 24;
+        const ls = await api.getActionLogs(q);
+        setLogs(ls || []);
+      }
+      setLogsAt(nowIso());
+    } catch (e:any) {
+      show && toast.show(`Logs refresh failed: ${brief(e)}`);
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
+  async function flattenSymbol(sym: string) {
+    if (!sym) return;
+    try {
+      await api.flattenExecPositions([sym]);
+      toast.show(`Flatten sent: ${sym}`);
+      await refreshPositions(false);
+      await refreshStatus(false);
+    } catch (e:any) {
+      toast.show(`Flatten failed: ${brief(e)}`);
+    }
+  }
+
+  async function flattenVisible() {
+    try {
+      const list = positions || [];
+      const filtered = posSymbol
+        ? list.filter((r:any) => String(r?.symbol || "").toLowerCase().includes(String(posSymbol).toLowerCase()))
+        : list;
+      const symbols = Array.from(new Set(filtered.map((r:any) => r.symbol).filter(Boolean)));
+      if (!symbols.length) { toast.show("No visible positions to flatten."); return; }
+      await api.flattenExecPositions(symbols);
+      toast.show(`Flatten sent: ${symbols.join(", ")}`);
+      await refreshPositions(false);
+      await refreshStatus(false);
+    } catch (e:any) {
+      toast.show(`Flatten failed: ${brief(e)}`);
+    }
+  }
+
+  async function cancelOrder(id: string) {
+    if (!id) return;
+    try {
+      await api.cancelExecOrder(id);
+      toast.show(`Cancel sent: ${id}`);
+      await refreshExec(false);
+    } catch (e:any) {
+      toast.show(`Cancel failed: ${brief(e)}`);
+    }
+  }
+
   async function refreshExec(show = true) {
     try {
       setExLoading(true);
@@ -421,10 +648,14 @@ export default function App() {
     }
   }
   
+
 async function refreshPositions(show = true) {
+    const reqId = ++posReqId.current;
     try {
       setPosLoading(true);
       const data = await api.listExecPositions({});
+      // Drop stale responses from earlier requests to prevent flicker
+      if (reqId !== posReqId.current) return;
       let arr: any[] = data || [];
       if (posSymbol) {
         const q = String(posSymbol).toLowerCase();
@@ -433,73 +664,14 @@ async function refreshPositions(show = true) {
       setPositions(arr);
       setPosAt(nowIso());
     } catch (e:any) {
-      show && toast.show(`Positions refresh failed: ${brief(e)}`);
+      if (reqId === posReqId.current) {
+        show && toast.show(`Positions refresh failed: ${brief(e)}`);
+      }
     } finally {
-      setPosLoading(false);
-    }
-  }
-  async function flattenSymbol(sym: string) {
-    try {
-      await api.flattenExecPositions([sym]);
-      toast.show(`Flattened ${sym}`);
-      refreshPositions(false);
-      refreshExec(false);
-    } catch (e:any) {
-      toast.show(`Flatten failed: ${brief(e)}`);
-    }
-  }
-  async function flattenVisible() {
-    try {
-      const syms = (positions || []).map((p:any) => p.symbol);
-      if (!syms.length) { toast.show("No positions."); return; }
-      await api.flattenExecPositions(syms);
-      toast.show(`Flattened ${syms.length} symbol(s)`);
-      refreshPositions(false);
-      refreshExec(false);
-    } catch (e:any) {
-      toast.show(`Flatten-all failed: ${brief(e)}`);
-    }
-  }
-async function cancelOrder(id: string) {
-    try {
-      await api.cancelExecOrder(id);
-      toast.show("Cancel sent.");
-      refreshExec(false);
-    } catch (e:any) {
-      toast.show(`Cancel failed: ${brief(e)}`);
-    }
-  }
-async function refreshStatus(show = true) {
-    try {
-      setStatusLoading(true);
-      const [rs, pt] = await Promise.all([api.getRiskStatus(), api.getPnlToday()]);
-      setOpenPositions(rs.open_positions ?? null);
-      setPnl(pt.realized_pnl ?? null);
-      setStatusAt(nowIso());
-    } catch (e: any) {
-      show && toast.show(`Status refresh failed: ${brief(e)}`);
-    } finally {
-      setStatusLoading(false);
+      if (reqId === posReqId.current) setPosLoading(false);
     }
   }
 
-  async function refreshLogs(show = true) {
-  try {
-    setLogsLoading(true);
-    let ls: any[] = [];
-    if (logsSource === "autopilot") {
-      ls = await api.autopilotLogs(logLimit) as any[];
-    } else {
-      ls = await api.getActionLogs({ limit: logLimit, symbol: logSymbol || undefined, since_hours: logSince });
-    }
-    setLogs(ls || []);
-    setLogsAt(nowIso());
-  } catch (e: any) {
-    show && toast.show(`Logs refresh failed: ${brief(e)}`);
-  } finally {
-    setLogsLoading(false);
-  }
-}
 
 
 async function refreshAutoStatus() {
@@ -512,11 +684,53 @@ async function refreshAutoStatus() {
   }
 }
 
+
+// ---------- Helpers (UI) ----------
+function timeAgo(iso?: string) {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  const diff = Math.max(0, Date.now() - t);
+  const s = Math.floor(diff/1000); if (s<60) return `${s}s ago`;
+  const m = Math.floor(s/60); if (m<60) return `${m}m ago`;
+  const h = Math.floor(m/60); return `${h}h ago`;
+}
+function shortReason(r:any): string {
+  const txt = r?.reason || r?.note || `${r.action||""} ${r.side||""} ${r.symbol||""}`.trim();
+  if (!txt) return "";
+  return String(txt).length>120 ? String(txt).slice(0,120)+"…" : String(txt);
+}
+async function openExplain(r:any) {
+  setExplainRow(r);
+  setExplainOpen(true);
+  try {
+    const [ctx, last] = await Promise.all([
+      api.autopilotContext?.().catch(()=>null),
+      api.autopilotLastOutput?.().catch(()=>null),
+    ]);
+    setExplainData({ ctx, last, row: r });
+  } catch {
+    setExplainData({ row: r });
+  }
+}
 // ---------- Render ----------
   return (
     <div className="app">
       <div className="bgfx" aria-hidden="true"></div>
       <style>{css}</style>
+
+      <style>{`/* --- overrides: autopilot health metrics position tweak + horizontal spread + control nudge --- */
+/* --- overrides: compact vertical rhythm --- */
+.panels2.vsplit{gap:8px} /* tighten spacing between left/right panels */
+.panel{padding:14px}
+.stack{gap: 8px}
+.strat-grid{gap: 8px}
+.card-lg{padding:16px}
+
+.health{ align-items: center !important; }
+.health .health-metrics{ justify-self: center !important; align-self: center !important; margin-top: -16px; gap: 8px 24px; }
+.health .stat{ font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; white-space: nowrap; }
+.autopilot-controls{ margin-top: 11px; } /* bumped ~5px more down */`}</style>
+
 
       <header className="header">
         <div className="title">
@@ -542,6 +756,10 @@ async function refreshAutoStatus() {
           <span className="indicator" title="Active account">
             <span>{activeAccount?.account_id || "—"}</span>
             {activeAccount?.trd_env ? <span>• {activeAccount.trd_env}</span> : null}
+          </span>
+          <span className="indicator" title="Risk Guardrail">
+            <span className={`dot ${riskEnabled ? "green" : "red"}`} />
+            Risk: {riskEnabled==null ? "—" : (riskEnabled ? "On" : "Off")}
           </span>
           <span className="indicator" title="Bot Mode"><span>Bot mode: {mode==="automatic" ? "Automatic" : "Manual"}</span></span>
         </div>
@@ -664,91 +882,171 @@ async function refreshAutoStatus() {
       {tab===Tab.Status && (
         <section className="stack">
           {/* KPIs */}
+          
+          
+          
+          {/* KPI strip */}
           <div className="grid-3">
-            <div className="card"><h3>Connection</h3><div className="value">{connected ? "CONNECTED" : "NOT CONNECTED"}</div></div>
-            <div className="card"><h3>Open Positions</h3><div className="value">{openPositions ?? "—"}</div></div>
-            <div className="card"><h3>Realized PnL (Today)</h3>
+            <div className="card card-lg" style={{gridColumn:"span 2"}}>
+  <h3>Autopilot Health</h3>
+  <div className="health">
+    <div className="health-top">
+      <span className={`badge ${autoStatus?.on ? "good" : "bad"} health-badge`}>
+        {autoStatus?.on ? "ON" : "OFF"}
+      </span>
+      <span className="badge good health-badge" title="Planner model">
+        {"GPT: " + (autoStatus?.model || autoStatus?.stats?.model || "gpt 4o-mini")}
+      </span>
+    </div>
+    <div className="health-metrics">
+      <span className="stat">Last tick: {autoStatus?.last_tick ? timeAgo(autoStatus.last_tick) : "-"}</span>
+      <span className="stat">Reject streak: {autoStatus?.reject_streak ?? "-"}</span>
+      <span className="stat">Decisions: {autoStatus?.stats?.decisions_today ?? autoStatus?.stats?.decisions ?? "-"}</span>
+      <span className="stat">Uptime: {autoStatus?.stats?.uptime ?? "-"}</span>
+      <span className="stat">Avg think: {autoStatus?.stats?.avg_think_ms ? `${autoStatus.stats.avg_think_ms} ms` : "-"}</span>
+      <span className="stat">Guardrails: {riskEnabled==null ? "-" : (riskEnabled ? "On" : "Off")}</span>
+    </div>
+  </div>
+</div>
+            <div className="card split-card" style={{ gridRow: "span 2" }}>
+  <div className="section top">
+    <h3>Autopilot</h3>
+    <div className="row autopilot-controls" style={{alignItems:"center", justifyContent:"space-between"}}>
+      <div className="row" style={{gap:12}}>
+        <button
+          className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
+          role="switch"
+          aria-checked={mode==="automatic"}
+          onClick={async()=> {
+            const turnOn = !(mode==="automatic");
+            try { await api.autopilotEnable(turnOn); }
+            catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`); }
+            setMode(turnOn ? "automatic" : "manual");
+          }}
+          title="Toggle Autopilot On/Off"
+        >
+          <span className="thumb" />
+        </button>
+        <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
+      </div>
+      <button className="btn brand" style={{marginRight:16}} onClick={doPreview}>Preview Plan</button>
+    </div>
+  </div>
+  <div className="section bottom" style={{marginTop:34}}>
+    <h3>Positions & Orders</h3>
+    <div className="row" style={{alignItems:"baseline",gap:16}}>
+      <div><div className="help">Open positions</div><div className="value">{openPositions ?? "—"}</div></div>
+      <div><div className="help">Orders pending</div><div className="value">{openOrderCount ?? "—"}</div></div>
+    </div>
+  </div>
+</div>
+<div className="card"><h3>Realized PnL (Today)</h3>
               <div className="value" style={{color: pnl==null ? "inherit" : pnl>=0 ? "var(--green)" : "var(--red)"}}>
                 {pnl ?? "—"}
               </div>
             </div>
-          </div>
-
-          {/* Controls + Autopilot */}
-          <div className="grid-3 panels3">
-            <div className="panel thick span-2">
-              <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
-                <h2 style={{margin:0}}>Controls</h2>
-                <div className="note">Last updated: {statusAt}</div>
-              </div>
-              <div className="row" style={{marginTop:14}}>
-                <button className="btn red" onClick={killSwitch}>Kill Switch (Stop Strategies)</button>
-                <button className="btn amber" onClick={doFlattenAll} disabled={!connected}>Flatten All Now</button>
-                <button className="btn" onClick={()=>refreshStatus(true)}>{statusLoading?"Refreshing…":"Refresh"}</button>
-                <label style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
-                  <input type="checkbox" checked={autoRefresh} onChange={e=>setAutoRefresh(e.target.checked)} /> Auto-refresh
-                </label>
-                <NiceSelect
-                  value={String(statusEvery)}
-                  onChange={(v)=>setStatusEvery(Number(v))}
-                  options={[
-                    { value: "3000", label: "3s" },
-                    { value: "5000", label: "5s" },
-                    { value: "10000", label: "10s" },
-                    { value: "30000", label: "30s" },
-                  ]}
-                  width={120}
-                />
-              </div>
-            </div>
-
-            <div className="panel">
-              <h2 style={{marginTop:0,marginBottom:10}}>Autopilot</h2>
-              <div className="row" style={{alignItems:"center", gap:12, marginTop:14}}>
-                <button
-                  className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
-                  role="switch"
-                  aria-checked={mode==="automatic"}
-                  onClick={async()=> {
-                    const turnOn = !(mode==="automatic");
-                    try { await api.autopilotEnable(turnOn); }
-                    catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`); }
-                    setBotMode(turnOn ? "automatic" : "manual");
-                  }}
-                  title="Toggle Autopilot On/Off"
-                >
-                  <span className="thumb" />
-                </button>
-                <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
-                <button
-                  className="btn brand"
-                  style={{marginLeft:"auto"}}
-                  onClick={doPreview}
-                  disabled={previewLoading}
-                  title="Run a dry-run tick (no orders)"
-                >
-                  {previewLoading ? "Running Preview…" : "Preview Decisions"}
-                </button>
-              </div>
-              <div className="help" aria-live="polite" style={{marginTop:6}}>
-                {mode==="automatic" ? "Autopilot is running" : "Autopilot is off"}
-                {autoStatus ? ` • Last tick: ${autoStatus.last_tick || "—"} • Reject streak: ${autoStatus.reject_streak || 0}` : ""}
-              </div>
+            <div className="card">
+              <h3>Exposure (MV)</h3>
+              <div className="value">{exposureMV==null ? "—" : (exposureMV?.toFixed ? exposureMV.toFixed(2) : exposureMV)}</div>
             </div>
           </div>
+{/* Controls + Autopilot */}
+          
+          {/* Autopilot & Active Strategies */}
+          
+          {/* Strategy & Preferences row */}
+          <div className="panels2 vsplit">
+            <div className="panel no-bottom-line" style={{ gridRow: "span 2" }}>
+              <h2 style={{marginTop:0}}>Active Strategies</h2>
+              <StrategyPicker />
+            </div>
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Trading Preferences</h2>
+              <TradingPreferences />
+            </div>
+  <div className="panel compact">
+    <h2 style={{marginTop:0}}>Current Stats</h2>
+    <div className="statlist">
+      {/* Win rate vs target */}
+      <div className="statrow">
+        <div className="k">Win rate</div>
+        <div className="v">{autoStatus?.stats?.win_rate ?? autoStatus?.win_rate ?? "—"}{(autoStatus?.stats?.win_rate ?? autoStatus?.win_rate) != null ? "%" : ""}</div>
+        <span className={`delta ${(() => {
+          const v = (autoStatus?.stats?.win_rate ?? autoStatus?.win_rate);
+          const t = prefWinRate;
+          if (v==null || t==null) return "neutral";
+          return v >= t ? "up" : "down";
+        })()}`}>{(() => {
+          const v = (autoStatus?.stats?.win_rate ?? autoStatus?.win_rate);
+          const t = prefWinRate;
+          if (v==null || t==null) return `target ${t ?? "—"}%`;
+          const d = (v - t).toFixed(0);
+          return `${v >= t ? "↑" : "↓"} ${d}% vs ${t}%`;
+        })()}</span>
+      </div>
 
-          {/* Active strategies */}
-          <div className="panel">
-            <h2 style={{marginTop:0,marginBottom:10}}>Active Strategies</h2>
-            <ActiveStrategies
-              refreshKey={stratRefreshTick}
-              onStopped={() => setStratRefreshTick(t => t + 1)}
-            />
+      {/* Avg R multiple vs target RR */}
+      <div className="statrow">
+        <div className="k">Avg R multiple</div>
+        <div className="v">{autoStatus?.stats?.avg_rr ?? autoStatus?.avg_rr ?? "—"}{(autoStatus?.stats?.avg_rr ?? autoStatus?.avg_rr) != null ? "R" : ""}</div>
+        <span className={`delta ${(() => {
+          const v = (autoStatus?.stats?.avg_rr ?? autoStatus?.avg_rr);
+          const t = prefRR;
+          if (v==null || t==null) return "neutral";
+          return v >= t ? "up" : "down";
+        })()}`}>{(() => {
+          const v = (autoStatus?.stats?.avg_rr ?? autoStatus?.avg_rr);
+          const t = prefRR;
+          if (v==null || t==null) return `target ${t ?? "—"}R`;
+          const d = (v - t).toFixed(2);
+          return `${v >= t ? "↑" : "↓"} ${d}R vs ${t}R`;
+        })()}</span>
+      </div>
+
+      {/* Avg realized move vs TP threshold */}
+      <div className="statrow">
+        <div className="k">Avg realized move</div>
+        <div className="v">{autoStatus?.stats?.avg_realized_move_pct ?? autoStatus?.avg_realized_move_pct ?? "—"}{(autoStatus?.stats?.avg_realized_move_pct ?? autoStatus?.avg_realized_move_pct) != null ? "%" : ""}</div>
+        <span className={`delta ${(() => {
+          const v = (autoStatus?.stats?.avg_realized_move_pct ?? autoStatus?.avg_realized_move_pct);
+          const t = prefTP;
+          if (v==null || t==null) return "neutral";
+          return v >= t ? "up" : "down";
+        })()}`}>{(() => {
+          const v = (autoStatus?.stats?.avg_realized_move_pct ?? autoStatus?.avg_realized_move_pct);
+          const t = prefTP;
+          if (v==null || t==null) return `target ${t ?? "—"}%`;
+          const d = (v - t).toFixed(1);
+          return `${v >= t ? "↑" : "↓"} ${d}% vs ${t}%`;
+        })()}</span>
+      </div>
+
+      {/* Drawdown vs Max drawdown (lower is better) */}
+      <div className="statrow">
+        <div className="k">Drawdown</div>
+        <div className="v">{autoStatus?.stats?.drawdown_pct ?? autoStatus?.drawdown_pct ?? "—"}{(autoStatus?.stats?.drawdown_pct ?? autoStatus?.drawdown_pct) != null ? "%" : ""}</div>
+        <span className={`delta ${(() => {
+          const v = (autoStatus?.stats?.drawdown_pct ?? autoStatus?.drawdown_pct);
+          const t = prefMaxDD;
+          if (v==null || t==null) return "neutral";
+          return v <= t ? "up" : "down";
+        })()}`}>{(() => {
+          const v = (autoStatus?.stats?.drawdown_pct ?? autoStatus?.drawdown_pct);
+          const t = prefMaxDD;
+          if (v==null || t==null) return `max ${t ?? "—"}%`;
+          const d = (t - v).toFixed(1);
+          return `${v <= t ? "↑" : "↓"} ${d}% headroom`;
+        })()}</span>
+      </div>
+    </div>
+  
+  </div>
+
+
           </div>
-
-          {/* Positions (SIM) – its own panel */}
+{/* Positions (SIM) – its own panel */}
           <div className="panel">
-            <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+            <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
               <h2 style={{margin:0}}>Positions (SIM)</h2>
               <div className="note">Last updated: {posAt}</div>
             </div>
@@ -780,8 +1078,8 @@ async function refreshAutoStatus() {
                   <tr>{"symbol qty avg last mv upl rpl_today actions".split(" ").map(h=>(<th key={h}>{h}</th>))}</tr>
                 </thead>
                 <tbody>
-                  {(positions||[]).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).length ?
-                    (positions||[]).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).map((p:any)=>(
+                  {(positions||[]).filter(p=>(p?.qty ?? 0)!==0).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).length ?
+                    (positions||[]).filter(p=>(p?.qty ?? 0)!==0).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).map((p:any)=>( 
                       <tr key={p.symbol}>
                         <td>{p.symbol}</td>
                         <td>{p.qty}</td>
@@ -806,7 +1104,7 @@ async function refreshAutoStatus() {
 
           {/* Orders & Fills (SIM) – separate panel */}
           <div className="panel">
-            <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+            <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
               <h2 style={{margin:0}}>Orders & Fills (SIM)</h2>
               <div className="note">Last updated: {exAt}</div>
             </div>
@@ -987,12 +1285,21 @@ function cfgGet<K extends keyof RiskConfig, T = any>(key: K, def: T): any {
   return v;
 }
 
+
 async function saveRisk() {
   if (!cfg) return;
   try {
     setSaving(true);
     const r = await api.putRiskConfig(cfg);
     setCfg(r);
+    // Instantly reflect header pill without waiting for poll / reload
+    const en = (typeof (r as any)?.enabled === "boolean")
+      ? !!(r as any).enabled
+      : (typeof cfg?.enabled === "boolean" ? !!cfg.enabled : null);
+    setRiskEnabled(en);
+    // Pull fresh status and autopilot snapshot
+    await refreshStatus(false);
+    await refreshAutoStatus();
     toast.show("Risk config saved.");
   } catch (e:any) {
     toast.show(`Save failed: ${brief(e)}`);
@@ -1000,6 +1307,7 @@ async function saveRisk() {
     setSaving(false);
   }
 }
+
 
 async function killSwitch() {
   const ok = await askConfirm("Stop all running automations NOW?");
@@ -1024,7 +1332,7 @@ async function doFlattenAll() {
   }
 }
 
-async function setBotMode(next: Mode) {
+async function applyMode(next: Mode) {
   try {
     const r = await api.setBotMode(next);
     setMode(r.mode as Mode);
@@ -1290,7 +1598,7 @@ function ActiveStrategies({ onStopped, refreshKey }: { onStopped?: () => void; r
     try {
       setLoading(true);
       const ls = await GET<any[]>("/automation/strategies");
-      setItems(ls || []);
+      setItems((ls || []).filter((s:any)=>s.active));
     } finally {
       setLoading(false);
     }
@@ -1495,6 +1803,10 @@ function StrategyCatalog({ connected }: { connected: boolean }) {
 function PresetPicker({ presets, onLoad, onDelete }:{ presets: Record<string, any>, onLoad:(n:string)=>void, onDelete:(n:string)=>void }) {
   const names = Object.keys(presets);
   const [sel, setSel] = useState(names[0] || "");
+  // local explain modal state (was referenced but not defined)
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [explainRow, setExplainRow] = useState<any|null>(null);
+  const [explainData, setExplainData] = useState<any|null>(null);
   useEffect(()=>{ if (!names.includes(sel)) setSel(names[0] || ""); }, [JSON.stringify(names)]);
   if (!names.length) return <span className="help">No presets yet.</span>;
   return (
@@ -1511,7 +1823,26 @@ function PresetPicker({ presets, onLoad, onDelete }:{ presets: Record<string, an
       </div>
       <button className="btn" onClick={()=>onLoad(sel)} disabled={!sel}>Load</button>
       <button className="btn red" onClick={()=>onDelete(sel)} disabled={!sel}>Delete</button>
-    </div>
+    
+      {explainOpen && createPortal(
+        <div id="explain-modal" style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
+        }} onClick={()=>setExplainOpen(false)}>
+          <div className="panel" style={{width: "min(860px, 94vw)", maxHeight: "80vh", overflow: "auto"}} onClick={e=>e.stopPropagation()}>
+            <h2 style={{marginTop:0}}>Decision Details</h2>
+            <div className="help" style={{marginBottom:8}}>What the bot was thinking and why it acted</div>
+            <pre style={{whiteSpace:"pre-wrap", background:"#0b1320", padding:"12px", borderRadius:"8px", border:"1px solid var(--border)"}}>
+{JSON.stringify(explainData || explainRow, null, 2)}
+            </pre>
+            <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
+              <button className="btn" onClick={()=>setExplainOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+</div>
   );
 }
 
@@ -1555,7 +1886,7 @@ function BacktestPanel() {
   return (
     <section className="stack">
       <div className="panel">
-        <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+        <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
           <h2 style={{margin:0}}>MA Crossover Backtest</h2>
           <div className="note">{res ? "Results below" : "Configure and run"}</div>
         </div>
@@ -1641,3 +1972,134 @@ function BacktestPanel() {
     }
   }
 }
+
+
+function StrategyPicker() {
+  const CATALOG: { key: string; name: string; desc?: string }[] = [
+    { key: "ma-crossover", name: "MA Crossover", desc: "Fast/slow cross with RSI gate" },
+    { key: "rsi-gate", name: "RSI Gate", desc: "Enter on RSI cross; avoid extremes" },
+    { key: "breakout-retest", name: "Breakout Retest", desc: "Range breakout then retest confirm" },
+    { key: "mean-reversion", name: "Mean Reversion", desc: "Fade stretches (z-score/RSI)" },
+    { key: "atr-trailer", name: "ATR Trailing Stop", desc: "Trend-follow exits with ATR" },
+    { key: "news-momo", name: "News Momentum", desc: "Spike-follow with risk caps" },
+  ];
+  const [selected, setSelected] = useLocalStorage<string[]>("pref.strategies", ["ma-crossover"]);
+  function toggle(k: string) {
+    setSelected(sel => sel.includes(k) ? sel.filter(x=>x!==k) : sel.concat(k));
+  }
+  return (
+    <div className="stack">
+      <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
+        <div className="help" style={{fontWeight:700}}>Selected: <b>{selected.length}</b> / {CATALOG.length}</div>
+        <div className="row" style={{gap:8}}>
+          <button className="btn" onClick={()=>setSelected(CATALOG.map(s=>s.key))}>All</button>
+          <button className="btn red" onClick={()=>setSelected([])}>Clear</button>
+        </div>
+      </div>
+      <div className="strat-grid">
+        {CATALOG.map(s => {
+          const on = selected.includes(s.key);
+          return (
+            <div key={s.key} className={`strat ${on ? "on" : ""}`} onClick={()=>toggle(s.key)} role="button" aria-pressed={on}>
+              <span className={`dot ${on ? "green" : "red"}`} />
+              <div className="info">
+                <div className="name">{s.name}</div>
+                <div className="desc">{s.desc || ""}</div>
+              </div>
+              <span className={`badge-mini ${on ? "good" : ""}`}>{on ? "On" : "Off"}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="help" style={{marginTop:6}}></div>
+    </div>
+  );
+}
+
+function TradingPreferences() {
+  const [winRate, setWinRate] = useLocalStorage<number>("pref.winRate", 55);
+  const [rr, setRR] = useLocalStorage<number>("pref.rr", 1.5);
+  const [stopLoss, setStopLoss] = useLocalStorage<number>("pref.stop", 1.0);
+  const [takeProfit, setTakeProfit] = useLocalStorage<number>("pref.tp", 2.0);
+  const [measuredMove, setMeasuredMove] = useLocalStorage<number>("pref.mm", 1.0);
+  const [maxDD, setMaxDD] = useLocalStorage<number>("pref.maxdd", 5.0);
+  return (
+    <div className="stack">
+      <div className="form-row prefs-grid">
+        <div><div className="label">Target win rate (%)</div><input className="input" type="number" value={winRate} onChange={e=>setWinRate(Number(e.target.value)||0)} /></div>
+        <div><div className="label">Reward ratio (R)</div><input className="input" type="number" value={rr} onChange={e=>setRR(Number(e.target.value)||0)} /></div>
+        <div><div className="label">Stop loss (% move)</div><input className="input" type="number" value={stopLoss} onChange={e=>setStopLoss(Number(e.target.value)||0)} /></div>
+      </div>
+      <div className="form-row">
+        <div><div className="label">Take profit (% move)</div><input className="input" type="number" value={takeProfit} onChange={e=>setTakeProfit(Number(e.target.value)||0)} /></div>
+        <div><div className="label">Measured move (ATR x)</div><input className="input" type="number" value={measuredMove} onChange={e=>setMeasuredMove(Number(e.target.value)||0)} /></div>
+        <div><div className="label">Max drawdown (%)</div><input className="input" type="number" value={maxDD} onChange={e=>setMaxDD(Number(e.target.value)||0)} /></div>
+      </div>
+</div>
+  );
+}
+
+
+
+
+
+
+
+
+function PreferenceIndicators({ autoStatus }: { autoStatus: any }) {
+  // pull targets saved by Trading Preferences
+  const getNum = (k: string, def: number) => {
+    try { const raw = localStorage.getItem(k); if (!raw) return def; const v = JSON.parse(raw); return (typeof v === "number" ? v : Number(v) || def); }
+    catch { const raw = localStorage.getItem(k); const n = Number(raw); return isFinite(n) ? n : def; }
+  };
+  const T = {
+    win: getNum("pref.winRate", 55),
+    r:   getNum("pref.rr", 1.5),
+    dd:  getNum("pref.maxdd", 5),
+  };
+
+  const S = (autoStatus?.stats || {}) as any;
+  const V = {
+    win: Number.isFinite(S.win_rate_pct) ? Number(S.win_rate_pct) : NaN,
+    r:   Number.isFinite(S.avg_r)        ? Number(S.avg_r)        : NaN,
+    dd:  Number.isFinite(S.max_dd)       ? Number(S.max_dd)       : NaN,
+  };
+
+  type Row = { k: string; unit: string; target: number; value: number; higher: boolean };
+  const rows: Row[] = [
+    { k: "Win rate",     unit: "%", target: T.win, value: V.win, higher: true  },
+    { k: "Reward ratio", unit: "R", target: T.r,   value: V.r,   higher: true  },
+    { k: "Drawdown",     unit: "%", target: T.dd,  value: V.dd,  higher: false },
+  ];
+
+  const fmt = (v:number, unit:string, decimals=unit==="R"?2:0) =>
+    (isFinite(v) ? `${Number(v.toFixed(decimals))}${unit}` : `—${unit}`);
+
+  const Chip = ({ row }: { row: Row }) => {
+    const hasLive = isFinite(row.value);
+    if (!isFinite(row.target) || row.target === 0) {
+      return <span className="delta neutral">target —</span>;
+    }
+    if (!hasLive) {
+      return <span className="delta neutral">target {fmt(row.target, row.unit)}</span>;
+    }
+    const better = row.higher ? (row.value >= row.target) : (row.value <= row.target);
+    const cls = better ? "delta up" : "delta down";
+    const arrow = better ? "↑" : "↓";
+    return <span className={cls}>{arrow} {fmt(row.value, row.unit)} <span style={{opacity:.8}}>vs {fmt(row.target, row.unit)}</span></span>;
+  };
+
+  return (
+    <div className="pref-list">
+      {rows.map((r,i)=> (
+        <div className="pref-row" key={i}>
+          <div className="k">{r.k}</div>
+          <Chip row={r} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+
