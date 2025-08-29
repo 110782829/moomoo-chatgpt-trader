@@ -3,7 +3,7 @@
 // and Backtest with friendly 400 errors (missing bars file hint).
 // API base comes from VITE_API_BASE (defaults to http://127.0.0.1:8000)
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from "react-dom";
 
 // ---------- Config ----------
@@ -21,7 +21,7 @@ const css = `
 body{margin:0;background:var(--bg);
  color:var(--text); font:14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
-.app{max-width:1180px;margin:0 auto;padding:18px 20px 28px}
+.app{max-width:1180px;margin:0 auto;padding:28px 20px 28px}
 .header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
 .title{display:flex;align-items:center;gap:12px}
 .badge{font-size:12px;color:var(--text-dim);background:linear-gradient(135deg, rgba(124,58,237,.25), rgba(6,182,212,.25));
@@ -51,6 +51,15 @@ body{margin:0;background:var(--bg);
 .btn.amber{background:linear-gradient(180deg, rgba(245,158,11,.25), rgba(245,158,11,.15));border-color:rgba(245,158,11,.4)}
 .input,.select{width:100%;padding:8px 10px;border-radius:8px;background:#0c111b;color:var(--text);border:1px solid var(--border);outline:none;transition:border-color .18s}
 .input:focus,.select:focus{border-color:rgba(124,58,237,.6)}
+/* Symbol search: consistent across tables/logs */
+.input.search{
+  padding-left: 28px;                   /* room for icon */
+  background-image: url('data:image/svg+xml;utf8,<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="7" stroke="%23cbd5e1" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="%23cbd5e1" stroke-width="2" stroke-linecap="round"/></svg>');
+  background-repeat:no-repeat;
+  background-position: 8px 50%;
+  background-size: 16px 16px;
+}
+.input.search:focus{ border-color: var(--border); box-shadow:none; }
 
 .select {
   -webkit-appearance: none;
@@ -127,7 +136,7 @@ body{margin:0;background:var(--bg);
 
 .label{font-size:12px;color:var(--muted);margin-bottom:6px}
 .form-row{display:grid;gap:12px;grid-template-columns:repeat(3,1fr)} @media (max-width:900px){.form-row{grid-template-columns:1fr}}
-.table-wrap{overflow:auto;border-radius:10px;border:1px solid var(--border); position: relative;}
+.table-wrap{overflow:auto;border-radius:10px}
 table{width:100%;border-collapse:collapse;background:var(--panel)}
 th,td{padding:8px 10px;border-top:1px solid var(--border)} th{text-align:left;font-size:12px;color:var(--muted);background:#0f1420;position:sticky;top:0;z-index:1}
 tr:hover td{background:rgba(124,58,237,.08)}
@@ -142,12 +151,15 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .header-quick{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;min-width:320px}
 
 .sticky-controls{position: sticky; top: 0; background: #0f1420; padding: 6px 0; z-index: 2; border-bottom: 1px solid var(--border);}
+.activity .sticky-controls{ background: transparent; border-bottom: 0; }
 .note{font-size:12px;color:var(--muted)}
 
 /* indicator font tweak */
 .indicator{font-size:12px;font-weight:600}
 
 .header, .title, .header-quick{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial }
+.panel h2{ margin:0 0 6px; font-size:15px; color:var(--text); text-transform:uppercase; letter-spacing:.06em }
+.title-lg{ font-size:20px; }
 
 .grid-2{display:grid;grid-template-columns:2fr 1fr;gap: 8px}
 @media (max-width:980px){.grid-2{grid-template-columns:1fr}}
@@ -215,10 +227,62 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .strat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
 @media (max-width:980px){.strat-grid{grid-template-columns:1fr}}
-.strat{border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg, rgba(124,58,237,.10), rgba(6,182,212,.06));
-  padding:12px; display:flex; align-items:flex-start; gap:12px; cursor:pointer; transition:transform .06s ease, box-shadow .18s ease, border-color .18s ease; min-height:74px;}
-.strat:hover{ box-shadow:0 14px 30px rgba(0,0,0,.28); }
-.strat.on{ border-color: rgba(124,58,237,.30); box-shadow: 0 8px 18px rgba(124,58,237,.08); background:linear-gradient(180deg, rgba(124,58,237,.08), rgba(6,182,212,.05)); }
+.strat{border:1px solid var(--border);border-radius:12px;background:#151d26;
+  padding:12px; display:flex; align-items:flex-start; gap:12px; cursor:pointer; transition:transform .06s ease, border-color .18s ease; min-height:74px;}
+.strat:hover{ box-shadow:none; }
+
+/* === Modern tables & utilities === */
+.table-modern{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  font:14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+}
+.table-modern thead th{
+  position:sticky; top:0; z-index:1;
+  background:#0f1420;                  /* solid (no gradient) */
+  color:var(--muted);                   /* same tone as KPI titles */
+  font-weight:700; font-size:12px; letter-spacing:.05em;
+  text-transform:uppercase;
+  border-bottom:1px solid var(--border);
+}
+
+.table-modern thead th.num{ text-align:right; }
+
+.table-modern th, .table-modern td{
+  padding:10px 12px;
+  vertical-align:middle;
+  border-bottom:1px solid var(--border);
+}
+
+.table-modern thead th.num{ text-align:right; }
+
+.table-modern tbody tr:hover{ background:var(--hover); }
+.table-modern .small{ font-size:12px; opacity:.9; }
+.mono{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
+.num { text-align:right; font-variant-numeric:tabular-nums; }
+
+/* table containers share the same, subtle scrollbar as page */
+.table-wrap{ overflow:auto; border-radius:0; }
+.table-wrap::-webkit-scrollbar{ height:10px; width:10px; }
+.table-wrap::-webkit-scrollbar-track{ background:#0c111b; border-radius:8px; }
+.table-wrap::-webkit-scrollbar-thumb{ background:#1f2937; border-radius:8px; }
+.table-wrap::-webkit-scrollbar-thumb:hover{ background:#2a3446; }
+
+/* Text-only status (no dot/pill) */
+.status{
+  display:inline-flex; flex-direction:column; align-items:flex-start;
+  font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+  color:var(--muted);
+}
+.status::after{ content:""; height:2px; width:100%; border-radius:2px; margin-top:2px; background:currentColor; opacity:.24; }
+.status.good{ color:var(--green); }
+.status.bad { color:var(--red);   }
+.status.warn{ color:var(--amber); }
+
+/* truncation helper for long ids */
+.truncate{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.strat.on{ border-color: rgba(16,185,129,.45); box-shadow:none; background: rgba(16,185,129,.05); }
 .strat .dot{ width:10px; height:10px; margin-top:3px; }
 .strat .info{ flex:1 1 auto; }
 .strat .name{ font-weight:700; margin-bottom:2px; }
@@ -255,6 +319,21 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .statrow .k{font-size:12px;color:var(--muted)}
 .statrow .v{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 .statrow .delta{white-space:nowrap}
+/* === Numeric steppers (custom) === */
+/* Hide native spinners */
+.input[type=number]::-webkit-outer-spin-button,
+.input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.input[type=number]{ -moz-appearance: textfield; }
+/* Wrapper that provides compact up/down arrows with no background */
+.num{ position: relative; }
+.num > .input{ padding-right: 28px; text-align:left; } /* room for arrows */
+.num .spin{ position:absolute; right:4px; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:0; align-items:center; }
+.num .spin button{ width:16px; height:14px; display:flex; align-items:center; justify-content:center; border:0; background:transparent; padding:0; cursor:pointer; color:var(--muted); line-height:1; }
+.num .spin button:hover{ filter: brightness(1.08); }
+.num .spin button:active{ transform: translateY(1px); }
+.num .spin button + button{ margin-top:-10px; }
+.num .spin svg{ width:12px; height:12px; display:block; }
+
 `;
 
 // ---------- Types ----------
@@ -278,9 +357,39 @@ function useLocalStorage<T>(key: string, initial: T) {
       return raw ? (JSON.parse(raw) as T) : initial;
     } catch { return initial; }
   });
+
+  // Broadcast local changes and persist
   useEffect(() => {
     try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
+    // Notify other hook instances in this document
+    try { window.dispatchEvent(new CustomEvent(`ls:${key}`, { detail: v as any })); } catch {}
   }, [key, v]);
+
+  // Listen for updates from other instances (same tab) and from other tabs
+  useEffect(() => {
+    const onCustom = (e: Event) => {
+      const ce = e as CustomEvent;
+      const next = ce?.detail as T;
+      // Avoid redundant state updates
+      if (JSON.stringify(next) !== JSON.stringify(v)) {
+        setV(next);
+      }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== key) return;
+      try {
+        const next = e.newValue ? (JSON.parse(e.newValue) as T) : initial;
+        if (JSON.stringify(next) !== JSON.stringify(v)) setV(next);
+      } catch {}
+    };
+    try { window.addEventListener(`ls:${key}` as any, onCustom as any); } catch {}
+    try { window.addEventListener('storage', onStorage); } catch {}
+    return () => {
+      try { window.removeEventListener(`ls:${key}` as any, onCustom as any); } catch {}
+      try { window.removeEventListener('storage', onStorage); } catch {}
+    };
+  }, [key, v, initial]);
+
   return [v, setV] as const;
 }
 
@@ -311,6 +420,20 @@ async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" | "PATCH
 }
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 const nowIso = () => new Date().toLocaleTimeString();
+const shortId = (s?: string) => {
+  const id = String(s || '');
+  return id.length > 14 ? `${id.slice(0,8)}…${id.slice(-4)}` : id;
+};
+
+// Text-only status label used in tables
+function statusTag(status?: string) {
+  const s = String(status ?? '').toLowerCase();
+  let cls = "status";
+  if (["filled","done","completed","executed"].includes(s)) cls += " good";
+  else if (["canceled","cancelled","rejected","expired","failed","error"].includes(s)) cls += " bad";
+  else if (["open","pending","working","new","partially_filled","partial","accepted"].includes(s)) cls += " warn";
+  return <span className={cls}>{status ?? ""}</span>;
+}
 
 // ---------- API bindings ----------
 const api = {
@@ -427,7 +550,6 @@ export default function App() {
   const [logsAt, setLogsAt] = useState<string>("—");
 
   // execution (orders/fills)
-  const [exTab, setExTab] = useLocalStorage<"orders"|"fills">("exec.tab", "orders");
   const [exSymbol, setExSymbol] = useLocalStorage("exec.symbol", "");
   const [exAuto, setExAuto] = useLocalStorage("exec.auto", true);
   const [exEvery, setExEvery] = useLocalStorage("exec.ms", 5000);
@@ -453,7 +575,6 @@ export default function App() {
   const [explainRow, setExplainRow] = useState<any|null>(null);
   const [explainData, setExplainData] = useState<any|null>(null);
 
-  const [fills, setFills] = useState<any[]>([]);
   const [exLoading, setExLoading] = useState(false);
   // positions (SIM)
   const [posSymbol, setPosSymbol] = useLocalStorage("pos.symbol", "");
@@ -511,21 +632,21 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [tab]);
 useEffect(() => {
-    if (!logsAuto || tab !== Tab.Activity) return;
+    if (tab !== Tab.Activity) return;
     const id = window.setInterval(() => refreshLogs(false), logsEvery);
     return () => window.clearInterval(id);
-  }, [logsAuto, tab, logsEvery, logSymbol, logSince, logLimit]);
+  }, [tab, logsEvery, logSymbol, logSince, logLimit]);
 
   useEffect(() => {
-    if (!exAuto || tab !== Tab.Status) return;
+    if (tab !== Tab.Status) return;
     const id = window.setInterval(() => refreshExec(false), exEvery);
     return () => window.clearInterval(id);
-  }, [exAuto, tab, exEvery, exSymbol, exTab]);
+  }, [tab, exEvery, exSymbol]);
   useEffect(() => {
-    if (!posAuto || tab !== Tab.Status) return;
+    if (tab !== Tab.Status) return;
     const id = window.setInterval(() => refreshPositions(false), posEvery);
     return () => window.clearInterval(id);
-  }, [posAuto, tab, posEvery, posSymbol]);
+  }, [tab, posEvery, posSymbol]);
 
 
 
@@ -631,15 +752,9 @@ useEffect(() => {
   async function refreshExec(show = true) {
     try {
       setExLoading(true);
-      if (exTab === "orders") {
-        const q: any = {};
-        if (exSymbol) q.symbol = exSymbol;
-        setOrders(await api.listExecOrders(q));
-      } else {
-        const q: any = {};
-        if (exSymbol) q.symbol = exSymbol;
-        setFills(await api.listExecFills(q));
-      }
+      const q: any = {};
+      if (exSymbol) q.symbol = exSymbol;
+      setOrders(await api.listExecOrders(q));
       setExAt(nowIso());
     } catch (e:any) {
       show && toast.show(`Exec refresh failed: ${brief(e)}`);
@@ -734,16 +849,8 @@ async function openExplain(r:any) {
 
       <header className="header">
         <div className="title">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M3 12c0-4.97 4.03-9 9-9 1.88 0 3.63.57 5.08 1.55L12 12l-7.55 5.08A8.96 8.96 0 0 1 3 12Z" fill="url(#g1)"/>
-            <path d="M21 12a9 9 0 0 1-14.63 7.08L12 12l7.08-5.63C20.42 7.37 21 9.12 21 12Z" fill="url(#g2)"/>
-            <defs>
-              <linearGradient id="g1" x1="3" y1="3" x2="21" y2="21"><stop stopColor="#7c3aed"/><stop offset="1" stopColor="#06b6d4"/></linearGradient>
-              <linearGradient id="g2" x1="3" y1="3" x2="21" y2="21"><stop stopColor="#06b6d4"/><stop offset="1" stopColor="#7c3aed"/></linearGradient>
-            </defs>
-          </svg>
           <div>
-            <div style={{fontSize:24,fontWeight:800}}>Moomoo ChatGPT Trading Bot</div>
+            <div style={{fontSize:28,fontWeight:800}}>Moomoo ChatGPT Trading Bot</div>
             <div className="help">API: <small className="code">{API_BASE}</small></div>
           </div>
         </div>
@@ -1047,172 +1154,120 @@ async function openExplain(r:any) {
 {/* Positions (SIM) – its own panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
-              <h2 style={{margin:0}}>Positions (SIM)</h2>
-              <div className="note">Last updated: {posAt}</div>
+              <h2 className="title-lg" style={{margin:0}}>Positions (SIM)</h2>
             </div>
-            <div className="row" style={{alignItems:"end", gap:12, marginTop:8}}>
-              <div style={{minWidth:180}}>
-                <div className="label">Filter symbol</div>
-                <input className="input" value={posSymbol} onChange={e=>setPosSymbol(e.target.value)} placeholder="US.AAPL (optional)" />
+            <div className="row" style={{alignItems:"end", gap:12, marginTop:12}}>
+              <div style={{minWidth:220}}>
+                <input className="input search" value={posSymbol}
+                       onChange={e=>setPosSymbol(e.target.value)}
+                       placeholder="US.AAPL" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
               </div>
-              <button className="btn" onClick={()=>refreshPositions(true)}>{posLoading ? "Refreshing…" : "Refresh"}</button>
-              <label style={{display:"flex",alignItems:"center",gap:8, marginLeft:"auto"}}>
-                <input type="checkbox" checked={posAuto} onChange={e=>setPosAuto(e.target.checked)} /> Auto
-              </label>
-              <NiceSelect
-                value={String(posEvery)}
-                onChange={(v)=>setPosEvery(Number(v))}
-                options={[
-                  { value: "3000", label: "3s" },
-                  { value: "5000", label: "5s" },
-                  { value: "10000", label: "10s" },
-                  { value: "30000", label: "30s" },
-                ]}
-                width={120}
-              />
-              <button className="btn amber" onClick={()=>flattenVisible()} title="Flatten all visible positions">Flatten Visible</button>
+              <button className="btn amber" onClick={flattenVisible}>Flatten Visible</button>
+              <div className="row" style={{marginLeft:"auto", gap:10}}><span className="help">Last updated: {posAt}</span></div>
             </div>
             <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
-              <table>
+              <table className="table-modern">
                 <thead>
-                  <tr>{"symbol qty avg last mv upl rpl_today actions".split(" ").map(h=>(<th key={h}>{h}</th>))}</tr>
+                  <tr>
+                    <th>Symbol</th><th>Qty</th><th>Avg</th><th>Last</th>
+                    <th>MV</th><th>UPL</th><th>RPL Today</th><th>Actions</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {(positions||[]).filter(p=>(p?.qty ?? 0)!==0).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).length ?
-                    (positions||[]).filter(p=>(p?.qty ?? 0)!==0).filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase())).map((p:any)=>( 
+                  {(positions||[]).filter(p=>(p?.qty ?? 0)!==0)
+                    .filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase()))
+                    .length ? (positions||[])
+                    .filter(p=>(p?.qty ?? 0)!==0)
+                    .filter(p=>!posSymbol || String(p.symbol||"").toLowerCase().includes(String(posSymbol).toLowerCase()))
+                    .map((p:any)=>( 
                       <tr key={p.symbol}>
                         <td>{p.symbol}</td>
-                        <td>{p.qty}</td>
-                        <td>{p.avg_cost?.toFixed ? p.avg_cost.toFixed(2) : p.avg_cost}</td>
-                        <td>{p.last==null ? "" : (p.last?.toFixed ? p.last.toFixed(2) : p.last)}</td>
-                        <td>{p.mv==null ? "" : (p.mv?.toFixed ? p.mv.toFixed(2) : p.mv)}</td>
-                        <td style={{color: p.upl==null ? "inherit" : (p.upl>=0 ? "var(--green)" : "var(--red)")}}>
+                        <td className="num">{p.qty}</td>
+                        <td className="num">{p.avg_cost?.toFixed ? p.avg_cost.toFixed(2) : p.avg_cost}</td>
+                        <td className="num">{p.last==null ? "" : (p.last?.toFixed ? p.last.toFixed(2) : p.last)}</td>
+                        <td className="num">{p.mv==null ? "" : (p.mv?.toFixed ? p.mv.toFixed(2) : p.mv)}</td>
+                        <td className="num" style={{color: p.upl==null ? "inherit" : (p.upl>=0 ? "var(--green)" : "var(--red)")}}>
                           {p.upl==null ? "" : (p.upl?.toFixed ? p.upl.toFixed(2) : p.upl)}
                         </td>
-                        <td style={{color: p.rpl_today==null ? "inherit" : (p.rpl_today>=0 ? "var(--green)" : "var(--red)")}}>
+                        <td className="num" style={{color: p.rpl_today==null ? "inherit" : (p.rpl_today>=0 ? "var(--green)" : "var(--red)")}}>
                           {p.rpl_today==null ? "" : (p.rpl_today?.toFixed ? p.rpl_today.toFixed(2) : p.rpl_today)}
                         </td>
                         <td><button className="btn red" onClick={()=>flattenSymbol(p.symbol)}>Flatten</button></td>
                       </tr>
                     ))
-                  : <tr><td>No positions.</td></tr>}
+                  : <tr><td colSpan={8}>No positions.</td></tr>}
                 </tbody>
               </table>
             </div>
-            <div className="help" style={{marginTop:8}}>SIM pricing uses most recent fill as last; flatten sends MARKET orders opposite to current qty.</div>
+            
           </div>
 
           {/* Orders & Fills (SIM) – separate panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
-              <h2 style={{margin:0}}>Orders & Fills (SIM)</h2>
-              <div className="note">Last updated: {exAt}</div>
+              <h2 className="title-lg" style={{margin:0}}>Orders (SIM)</h2>
+              
             </div>
-            <div className="row" style={{alignItems:"end", gap:12, marginTop:8}}>
-              <div className="row" style={{gap:8}}>
-                <button className="btn" onClick={()=>setExTab("orders")} disabled={exTab==="orders"}>Orders</button>
-                <button className="btn" onClick={()=>setExTab("fills")} disabled={exTab==="fills"}>Fills</button>
+            <div className="row" style={{alignItems:"end", gap:12, marginTop:12}}>
+              <div style={{minWidth:220}}>
+                <input className="input search" value={exSymbol}
+                       onChange={e=>setExSymbol(e.target.value)}
+                       placeholder="US.AAPL" />
               </div>
-              <div style={{minWidth:180}}>
-                <div className="label">Symbol (optional)</div>
-                <input className="input" value={exSymbol} onChange={e=>setExSymbol(e.target.value)} placeholder="US.AAPL" />
+              <div className="row" style={{marginLeft:"auto", gap:10}}>
+                <span className="help">Last updated: {exAt}</span>
               </div>
-              <button className="btn" onClick={()=>refreshExec(true)}>{exLoading?"Refreshing…":"Refresh"}</button>
-              <label style={{display:"flex",alignItems:"center",gap:8, marginLeft:"auto"}}>
-                <input type="checkbox" checked={exAuto} onChange={e=>setExAuto(e.target.checked)} /> Auto
-              </label>
-              <NiceSelect
-                value={String(exEvery)}
-                onChange={(v)=>setExEvery(Number(v))}
-                options={[
-                  { value: "3000", label: "3s" },
-                  { value: "5000", label: "5s" },
-                  { value: "10000", label: "10s" },
-                  { value: "30000", label: "30s" },
-                ]}
-                width={120}
-              />
             </div>
 
-            {exTab === "orders" ? (
-              <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
-                <table>
-                  <thead>
-                    <tr>
-                      {["created_at","order_id","symbol","side","type","tif","status","req_qty","filled","avg","limit","actions"].map(h=>(
-                        <th key={h}>{h}</th>
-                      ))}
+            <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
+              <table className="table-modern">
+                <thead>
+                  <tr>
+                    <th>Created</th><th>Order ID</th><th>Symbol</th><th>Side</th>
+                    <th>Type</th><th>TIF</th><th>Status</th><th className="num">Req Qty</th>
+                    <th className="num">Filled</th><th className="num">Avg</th><th className="num">Limit</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orders?.length ? orders
+                    .filter((o:any)=>!exSymbol || String(o.symbol||"").toLowerCase().includes(String(exSymbol).toLowerCase()))
+                    .map((o:any)=>(
+                    <tr key={o.order_id}>
+                      <td className="small mono">{o.created_at}</td>
+                      <td className="small mono truncate" title={o.order_id}>{shortId(o.order_id)}</td>
+                      <td>{o.symbol}</td>
+                      <td>{o.side}</td>
+                      <td>{o.order_type}</td>
+                      <td>{o.tif}</td>
+                      <td>{statusTag(o.status)}</td>
+                      <td className="num">{o.requested_qty}</td>
+                      <td className="num">{o.filled_qty}</td>
+                      <td className="num">{o.avg_fill_price==null ? "" : o.avg_fill_price}</td>
+                      <td className="num">{o.limit_price==null ? "" : o.limit_price}</td>
+                      <td>
+                        <button className="btn red" disabled={o.status!=="open" && o.status!=="pending"} onClick={()=>cancelOrder(o.order_id)}>Cancel</button>
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {orders?.length ? orders
-                      .filter((o:any)=>!exSymbol || String(o.symbol||"").toLowerCase().includes(String(exSymbol).toLowerCase()))
-                      .map((o:any)=>(
-                      <tr key={o.order_id}>
-                        <td className="small">{o.created_at}</td>
-                        <td className="small">{o.order_id}</td>
-                        <td>{o.symbol}</td>
-                        <td>{o.side}</td>
-                        <td>{o.order_type}</td>
-                        <td>{o.tif}</td>
-                        <td>{o.status}</td>
-                        <td>{o.requested_qty}</td>
-                        <td>{o.filled_qty}</td>
-                        <td>{o.avg_fill_price==null ? "" : o.avg_fill_price}</td>
-                        <td>{o.limit_price==null ? "" : o.limit_price}</td>
-                        <td>
-                          <button className="btn red" disabled={o.status!=="open" && o.status!=="pending"} onClick={()=>cancelOrder(o.order_id)}>Cancel</button>
-                        </td>
-                      </tr>
-                    )) : <tr><td>No orders yet.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="table-wrap" style={{maxHeight: 360, marginTop: 10}}>
-                <table>
-                  <thead>
-                    <tr>
-                      {["ts","fill_id","order_id","symbol","qty","price"].map(h=>(
-                        <th key={h}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {fills?.length ? fills
-                      .filter((f:any)=>!exSymbol || String(f.symbol||"").toLowerCase().includes(String(exSymbol).toLowerCase()))
-                      .map((f:any)=>(
-                      <tr key={f.fill_id}>
-                        <td className="small">{f.ts}</td>
-                        <td className="small">{f.fill_id}</td>
-                        <td className="small">{f.order_id}</td>
-                        <td>{f.symbol}</td>
-                        <td>{f.qty}</td>
-                        <td>{f.price}</td>
-                      </tr>
-                    )) : <tr><td>No fills yet.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  )) : <tr><td colSpan={12}>No orders yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
       )}
 
       {/* ===== Activity Log ===== */}
-      {tab===Tab.Activity && (<>
-  <div className="row" style={{marginBottom:8, gap:8}}>
-    <span className="label">Source</span>
-    <button className="btn" onClick={()=>setLogsSource("system")} disabled={logsSource==="system"}>System</button>
-    <button className="btn" onClick={()=>setLogsSource("autopilot")} disabled={logsSource==="autopilot"}>Autopilot</button>
-  </div>
-  <ActivityLog logs={logs} logsAt={logsAt} logsEvery={logsEvery} setLogsEvery={setLogsEvery}
-               logsAuto={logsAuto} setLogsAuto={setLogsAuto}
-               logSymbol={logSymbol} setLogSymbol={setLogSymbol}
-               logSince={logSince} setLogSince={setLogSince}
-               logLimit={logLimit} setLogLimit={setLogLimit}
-               refreshLogs={()=>refreshLogs(true)} logsLoading={logsLoading} />
-</>)}
+      {tab===Tab.Activity && (
+        <ActivityLog
+          logs={logs} logsAt={logsAt}
+          logsEvery={logsEvery} setLogsEvery={setLogsEvery}
+          logsAuto={logsAuto} setLogsAuto={setLogsAuto}
+          logSymbol={logSymbol} setLogSymbol={setLogSymbol}
+          logSince={logSince} setLogSince={setLogSince}
+          logLimit={logLimit} setLogLimit={setLogLimit}
+          refreshLogs={()=>refreshLogs(true)} logsLoading={logsLoading}
+        />
+      )}
 
       {/* ===== Backtest ===== */}
       {tab===Tab.Backtest && <BacktestPanel />}
@@ -1526,46 +1581,44 @@ function ActivityLog(props: {
           refreshLogs, logsLoading } = props;
 
   return (
-    <section className="stack">
+    <section className="stack activity">
       <div className="panel">
-        <div className="sticky-controls">
-          <div className="row" style={{alignItems:"end",marginBottom:4}}>
-            <div><div className="label">Symbol (optional)</div><input className="input" value={logSymbol} onChange={e=>setLogSymbol(e.target.value)} placeholder="US.AAPL" /></div>
-            <div><div className="label">Since (hours)</div><input className="input" type="number" value={logSince} onChange={e=>setLogSince(Number(e.target.value)||24)} /></div>
-            <div><div className="label">Limit</div><input className="input" type="number" value={logLimit} onChange={e=>setLogLimit(Number(e.target.value)||200)} /></div>
-            <div className="row">
-              <button className="btn" onClick={refreshLogs}>{logsLoading?"Refreshing…":"Refresh Logs"}</button>
-              <label style={{display:"flex",alignItems:"center",gap:8}}>
-                <input type="checkbox" checked={logsAuto} onChange={e=>setLogsAuto(e.target.checked)} /> Auto
-              </label>
-              <NiceSelect
-                value={String(logsEvery)}
-                onChange={(v)=>setLogsEvery(Number(v))}
-                options={[
-                  { value: "4000", label: "4s" },
-                  { value: "6000", label: "6s" },
-                  { value: "10000", label: "10s" },
-                  { value: "30000", label: "30s" },
-                ]}
-                width={120}
-              />
-              <button className="btn" onClick={()=>exportCsv(logs)}>Export CSV</button>
-            </div>
-            <div className="note" style={{marginLeft:"auto"}}>Last updated: {logsAt}</div>
+        <h2 className="title-lg" style={{marginTop:0}}>Activity Log</h2>
+        <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
+          <div style={{minWidth:220}}><div className="label">Symbol (optional)</div>
+            <input className="input search" value={logSymbol}
+                   onChange={e=>setLogSymbol(e.target.value)}
+                   placeholder="US.AAPL" />
+          </div>
+          <div style={{width:140}}><div className="label">Since (hours)</div>
+            <input className="input" type="number" value={logSince}
+                   onChange={e=>setLogSince(parseInt(e.target.value)||0)} />
+          </div>
+          <div style={{width:140}}><div className="label">Limit</div>
+            <input className="input" type="number" value={logLimit}
+                   onChange={e=>setLogLimit(parseInt(e.target.value)||0)} />
+          </div>
+          <div className="row" style={{marginLeft:"auto", gap:10}}><button className="btn" onClick={()=>exportCsv(logs)}>Export CSV</button>
+            <span className="help">Last updated: {logsAt}</span>
           </div>
         </div>
 
         <div className="table-wrap" style={{maxHeight: 460}}>
-          <table>
-            <thead><tr>{["ts","mode","action","symbol","side","qty","price","reason","status"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+          <table className="table-modern">
+            <thead>
+              <tr>
+                <th>Time</th><th>Mode</th><th>Action</th><th>Symbol</th>
+                <th>Side</th><th>Qty</th><th>Price</th><th>Reason</th><th>Status</th>
+              </tr>
+            </thead>
             <tbody>
               {logs.length ? logs.map((r:any)=>(
                 <tr key={r.id ?? `${r.ts}-${Math.random()}`}>
-                  <td>{r.ts ?? ""}</td><td>{r.mode ?? ""}</td><td>{r.action ?? ""}</td>
-                  <td>{r.symbol ?? ""}</td><td>{r.side ?? ""}</td><td>{r.qty ?? ""}</td>
-                  <td>{r.price ?? ""}</td><td>{r.reason ?? ""}</td><td>{r.status ?? ""}</td>
+                  <td className="small mono">{r.ts ?? ""}</td><td>{r.mode ?? ""}</td><td>{r.action ?? ""}</td>
+                  <td>{r.symbol ?? ""}</td><td>{r.side ?? ""}</td><td className="num">{r.qty ?? ""}</td>
+                  <td className="num">{r.price ?? ""}</td><td>{r.reason ?? ""}</td><td>{statusTag(r.status)}</td>
                 </tr>
-              )) : <tr><td>No log entries yet.</td></tr>}
+              )) : <tr><td colSpan={9}>No log entries yet.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2016,6 +2069,105 @@ function StrategyPicker() {
   );
 }
 
+/** Compact number input with custom, backgroundless arrows.
+ *  Arrows use the same color as labels (var(--muted)).
+ */
+/** Compact number input with custom, backgroundless arrows.
+ *  Arrows use the same color as labels (var(--muted)).
+ *  Allows clearing the field while editing; value is validated on blur/Enter.
+ */
+
+function Num({
+  value,
+  setValue,
+  step = 1,
+  min,
+  max,
+  inputProps = {},
+}: {
+  value: number;
+  setValue: (n: number) => void;
+  step?: number;
+  min?: number;
+  max?: number;
+  inputProps?: React.InputHTMLAttributes<HTMLInputElement>;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const [text, setText] = useState<string>(
+    Number.isFinite(value) ? String(value) : ""
+  );
+
+  useEffect(() => {
+    // Sync from external value when not actively editing
+    if (document.activeElement !== ref.current) {
+      setText(Number.isFinite(value) ? String(value) : "");
+    }
+  }, [value]);
+
+  const valid = (s: string) => /^-?\d*\.?\d*$/.test(s);
+
+  function clamp(n: number) {
+    if (min != null && n < min) n = min as number;
+    if (max != null && n > max) n = max as number;
+    return n;
+  }
+
+  function commit() {
+    // If empty or partial number, settle to a safe value
+    if (text === "" || text === "-" || text === "." || text === "-.") {
+      const fallback = min != null ? Math.max(0, min) : 0;
+      setValue(fallback);
+      setText(String(fallback));
+      return;
+    }
+    const n = clamp(Number(text));
+    setValue(n);
+    setText(String(n));
+  }
+
+  function bump(dir: 1 | -1) {
+    const cur =
+      text === "" || text === "-" || text === "." || text === "-."
+        ? (Number.isFinite(value) ? value : 0)
+        : Number(text);
+    const s = Number(step) || 1;
+    const next = clamp(Number((cur + dir * s).toFixed(6)));
+    setValue(next);
+    setText(String(next));
+  }
+
+  return (
+    <div className="num">
+      <input
+        ref={ref}
+        className="input"
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onChange={(e) => {
+          const s = e.target.value;
+          if (valid(s)) setText(s);
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); commit(); (e.currentTarget as HTMLInputElement).blur(); } }}
+        {...inputProps}
+      />
+      <span className="spin" aria-hidden="true">
+        <button type="button" onClick={() => bump(1)} title="Increase">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 6l6 6H6z" />
+          </svg>
+        </button>
+        <button type="button" onClick={() => bump(-1)} title="Decrease">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 18l-6-6h12z" />
+          </svg>
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function TradingPreferences() {
   const [winRate, setWinRate] = useLocalStorage<number>("pref.winRate", 55);
   const [rr, setRR] = useLocalStorage<number>("pref.rr", 1.5);
@@ -2026,16 +2178,34 @@ function TradingPreferences() {
   return (
     <div className="stack">
       <div className="form-row prefs-grid">
-        <div><div className="label">Target win rate (%)</div><input className="input" type="number" value={winRate} onChange={e=>setWinRate(Number(e.target.value)||0)} /></div>
-        <div><div className="label">Reward ratio (R)</div><input className="input" type="number" value={rr} onChange={e=>setRR(Number(e.target.value)||0)} /></div>
-        <div><div className="label">Stop loss (% move)</div><input className="input" type="number" value={stopLoss} onChange={e=>setStopLoss(Number(e.target.value)||0)} /></div>
+        <div>
+          <div className="label">Target win rate (%)</div>
+          <Num value={winRate} setValue={setWinRate} step={1} min={0} max={100} />
+        </div>
+        <div>
+          <div className="label">Reward ratio (R)</div>
+          <Num value={rr} setValue={setRR} step={0.1} min={0} />
+        </div>
+        <div>
+          <div className="label">Stop loss (% move)</div>
+          <Num value={stopLoss} setValue={setStopLoss} step={0.1} min={0} />
+        </div>
       </div>
       <div className="form-row">
-        <div><div className="label">Take profit (% move)</div><input className="input" type="number" value={takeProfit} onChange={e=>setTakeProfit(Number(e.target.value)||0)} /></div>
-        <div><div className="label">Measured move (ATR x)</div><input className="input" type="number" value={measuredMove} onChange={e=>setMeasuredMove(Number(e.target.value)||0)} /></div>
-        <div><div className="label">Max drawdown (%)</div><input className="input" type="number" value={maxDD} onChange={e=>setMaxDD(Number(e.target.value)||0)} /></div>
+        <div>
+          <div className="label">Take profit (% move)</div>
+          <Num value={takeProfit} setValue={setTakeProfit} step={0.1} min={0} />
+        </div>
+        <div>
+          <div className="label">Measured move (ATR x)</div>
+          <Num value={measuredMove} setValue={setMeasuredMove} step={0.1} min={0} />
+        </div>
+        <div>
+          <div className="label">Max drawdown (%)</div>
+          <Num value={maxDD} setValue={setMaxDD} step={0.1} min={0} max={100} />
+        </div>
       </div>
-</div>
+    </div>
   );
 }
 
@@ -2100,6 +2270,3 @@ function PreferenceIndicators({ autoStatus }: { autoStatus: any }) {
     </div>
   );
 }
-
-
-
