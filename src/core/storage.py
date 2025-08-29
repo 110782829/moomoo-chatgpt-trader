@@ -377,3 +377,120 @@ def pnl_today() -> Dict[str, Any]:
             today = float(row["realized_pnl"])
             break
     return {"date": today_str, "realized_pnl": today}
+
+
+# ----- Performance stats (wins, losses, drawdown) -----
+
+def performance_stats(days: int = 365) -> Dict[str, Any]:
+    """
+    Approximate performance metrics computed from fills history.
+    - Counts a 'trade' when a SELL occurs (realizing PnL against current avg cost).
+    - Computes win rate over all such realized events.
+    - Tracks cumulative realized PnL to derive simple drawdown metrics.
+
+    Returns keys:
+      - trades, wins, losses
+      - win_rate (0..1), win_rate_pct (0..100)
+      - realized_pnl (sum over all fills)
+      - drawdown_pct (current from peak), max_dd (maximum drawdown pct)
+    """
+    from collections import defaultdict
+
+    pos = defaultdict(float)
+    avg = defaultdict(float)
+
+    wins = 0
+    losses = 0
+    trades = 0
+    realized_total = 0.0
+
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+
+    for r in _iter_fills_ordered():
+        sym = r["symbol"]
+        side = str(r["side"]).upper()
+        q = float(r["qty"])
+        px = float(r["price"])
+
+        if side == "BUY":
+            new_pos = pos[sym] + q
+            new_avg = ((avg[sym] * pos[sym]) + (px * q)) / new_pos if new_pos > 0 else 0.0
+            pos[sym] = new_pos
+            avg[sym] = new_avg
+        else:  # SELL
+            # realized vs current avg
+            realized = (px - avg[sym]) * q
+            realized_total += realized
+            equity += realized  # track cumulative realized equity
+            peak = max(peak, equity)
+            cur_dd = 0.0 if peak <= 0 else (peak - equity) / peak * 100.0
+            max_dd = max(max_dd, cur_dd)
+
+            trades += 1
+            if realized > 1e-9:
+                wins += 1
+            elif realized < -1e-9:
+                losses += 1
+
+            pos[sym] = max(0.0, pos[sym] - q)
+            if pos[sym] <= 0:
+                pos[sym] = 0.0
+                avg[sym] = 0.0
+
+    win_rate = (wins / trades) if trades > 0 else 0.0
+    out = {
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate * 100.0, 2),  # keep backcompat with UI expecting % sometimes
+        "win_rate_pct": round(win_rate * 100.0, 2),
+        "realized_pnl": float(realized_total),
+        "drawdown_pct": round((0.0 if peak <= 0 else (peak - equity) / peak * 100.0), 2),
+        "max_dd": round(max_dd, 2),
+    }
+    return out
+
+
+def exits_coverage(since_hours: int = 24) -> Dict[str, Any]:
+    """
+    Estimate coverage of protective exits on entries based on action_log.
+    Considers action='autopilot_act' and reason in ('order','order_augmented') within since_hours.
+    Counts an entry as covered if either a stop or a take-profit was present or augmented.
+    Returns: { total_entries, with_stop, with_take, exits_coverage_pct, stops_coverage_pct, tp_coverage_pct }
+    """
+    q = (
+        "SELECT reason, extra_json FROM action_log "
+        "WHERE action = 'autopilot_act' AND (reason='order' OR reason='order_augmented') "
+        "AND ts >= datetime('now', ?)"
+    )
+    params = (f"-{int(max(1, since_hours))} hours",)
+    total = 0
+    with_stop = 0
+    with_take = 0
+    with_either = 0
+    with _conn() as c:
+        for r in c.execute(q, params).fetchall():
+            total += 1
+            try:
+                extra = json.loads(r["extra_json"]) if r["extra_json"] else {}
+            except Exception:
+                extra = {}
+            has_stop = bool(extra.get("has_stop")) or bool(extra.get("aug_stop"))
+            has_take = bool(extra.get("has_take")) or bool(extra.get("aug_take"))
+            if has_stop:
+                with_stop += 1
+            if has_take:
+                with_take += 1
+            if has_stop or has_take:
+                with_either += 1
+    pct = lambda a, b: (round((a / b) * 100.0, 2) if b > 0 else 0.0)
+    return {
+        "total_entries": total,
+        "with_stop": with_stop,
+        "with_take": with_take,
+        "exits_coverage_pct": pct(with_either, total),
+        "stops_coverage_pct": pct(with_stop, total),
+        "tp_coverage_pct": pct(with_take, total),
+    }

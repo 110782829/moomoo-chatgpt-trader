@@ -218,6 +218,18 @@ class SimBroker(ExecutionService):
 
         self._save_pos(symbol, int(new_qty), float(new_avg), realized_today_add=realized_add)
 
+        # If the symbol is fully flattened, cancel any resting orders (exits)
+        if int(new_qty) == 0:
+            try:
+                ts = _utc_ts()
+                self.conn.execute(
+                    "UPDATE orders SET status = ?, updated_at = ? WHERE symbol = ? AND status IN (?, ?)",
+                    (OrderStatus.canceled.value, ts, symbol, OrderStatus.open.value, OrderStatus.pending.value),
+                )
+                self.conn.commit()
+            except Exception:
+                pass
+
     # ---------------- fill logic ----------------
 
     def _maybe_fill_now(self, order_row, last_price: Optional[float]) -> Optional[FillRecord]:
@@ -235,7 +247,7 @@ class SimBroker(ExecutionService):
                 lp = float(DEFAULT_MARKET_SYNTH_PRICE)
             price = float(lp)
 
-        else:  # LIMIT logic requires a price to compare/cross
+        elif order_row["order_type"] == OrderType.limit.value:  # LIMIT logic requires a price to compare/cross
             if lp is None or lp <= 0.0:
                 return None
             limit_px = order_row["limit_price"]
@@ -253,6 +265,29 @@ class SimBroker(ExecutionService):
                     price = float(max(limit_px, lp))
                 else:
                     return None
+        elif order_row["order_type"] == OrderType.stop.value:
+            # Stop triggers when price crosses threshold in the adverse direction
+            if lp is None or lp <= 0.0:
+                return None
+            trig = order_row["limit_price"]  # reuse column to store trigger
+            if trig is None:
+                return None
+            # For buys (closing shorts), trigger when lp >= trig
+            # For sells (closing longs), trigger when lp <= trig
+            if side in (OrderSide.buy.value, OrderSide.buy_to_cover.value):
+                if lp >= float(trig):
+                    qty = int(order_row["requested_qty"])
+                    price = float(lp)
+                else:
+                    return None
+            else:
+                if lp <= float(trig):
+                    qty = int(order_row["requested_qty"])
+                    price = float(lp)
+                else:
+                    return None
+        else:
+            return None
 
         fill_id = uuid.uuid4().hex
         ts = _utc_ts()
@@ -266,6 +301,20 @@ class SimBroker(ExecutionService):
         self.conn.commit()
 
         self._update_position_on_fill(order_row["symbol"], side, int(qty), float(price))
+
+        # OCO cancellation: if this was a protective exit (limit/stop) with a decision_id,
+        # cancel sibling orders for the same symbol and decision_id.
+        try:
+            if order_row.get("decision_id") is not None and order_row["order_type"] in (OrderType.limit.value, OrderType.stop.value):
+                ts2 = _utc_ts()
+                self.conn.execute(
+                    "UPDATE orders SET status = ?, updated_at = ? WHERE symbol = ? AND decision_id = ? AND order_id <> ? AND status IN (?, ?)",
+                    (OrderStatus.canceled.value, ts2, order_row["symbol"], order_row["decision_id"], order_row["order_id"], OrderStatus.open.value, OrderStatus.pending.value),
+                )
+                self.conn.commit()
+        except Exception:
+            pass
+
         return FillRecord(
             fill_id=fill_id, order_id=order_row["order_id"], symbol=order_row["symbol"], qty=qty, price=price, ts=ts
         )
@@ -333,8 +382,8 @@ class SimBroker(ExecutionService):
 
     def try_fill_resting(self, last_prices: Dict[str, float]) -> None:
         cur = self.conn.execute(
-            "SELECT * FROM orders WHERE status IN (?, ?) AND order_type = ?",
-            (OrderStatus.open.value, OrderStatus.pending.value, OrderType.limit.value),
+            "SELECT * FROM orders WHERE status IN (?, ?) AND order_type IN (?, ?)",
+            (OrderStatus.open.value, OrderStatus.pending.value, OrderType.limit.value, OrderType.stop.value),
         )
         rows = cur.fetchall()
         for r in rows:

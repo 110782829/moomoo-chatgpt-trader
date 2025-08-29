@@ -13,6 +13,7 @@ class OrderSide(str, Enum):
 class OrderType(str, Enum):
     market = "market"
     limit = "limit"
+    stop = "stop"  # trigger-only; fills when price crosses threshold
 
 
 class TimeInForce(str, Enum):

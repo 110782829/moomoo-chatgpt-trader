@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 # Choose a stable DB path aligned with your repo layout.
 # You can override with ENV EXEC_DB_PATH if you prefer a different file.
@@ -12,12 +12,15 @@ _DB_PATH = Path(os.getenv("EXEC_DB_PATH") or "db/trader.db")
 _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _conn: Optional[sqlite3.Connection] = None
+_client_accessor: Optional[Callable[[], object]] = None  # returns MoomooClient
+_mode: str = os.getenv("EXECUTION_MODE", "sim").strip().lower()  # 'sim' | 'moomoo'
 
 # --- Desired schemas (canonical) ---
 
 ORDERS_TABLE = "orders"
 ORDERS_COLS: Dict[str, str] = {
     "order_id": "TEXT",                    # preferred PK (may not be PK if table pre-existed)
+    "broker_order_id": "TEXT",
     "created_at": "TEXT NOT NULL",
     "updated_at": "TEXT NOT NULL",
     "status": "TEXT NOT NULL",
@@ -145,7 +148,25 @@ def init_execution(app=None) -> None:
     """Initialize SIM execution storage (idempotent). Call once at app startup."""
     _ensure_tables()
 
+def set_client_accessor(fn: Callable[[], object]) -> None:
+    global _client_accessor
+    _client_accessor = fn
+
+def set_mode(mode: str) -> None:
+    global _mode
+    _mode = (mode or "sim").strip().lower()
+
+def get_mode() -> str:
+    return _mode
+
 def get_execution():
-    """Return the execution service (SimBroker)."""
+    """Return the execution service based on current mode."""
+    if _mode == "moomoo" and _client_accessor is not None:
+        try:
+            from .moomoo_exec import MoomooExecutionService  # type: ignore
+            return MoomooExecutionService(_get_conn(), _client_accessor)
+        except Exception:
+            pass
+    # default: SIM
     from .sim import SimBroker
     return SimBroker(_get_conn())

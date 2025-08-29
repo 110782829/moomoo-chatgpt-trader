@@ -1,31 +1,23 @@
 # moomoo-chatgpt-trader
 
-This project aims to build a ChatGPT-powered automated stock trading bot for U.S. stocks using the moomoo (Futu) OpenAPI. The bot will:
+ChatGPT‑powered automated US‑stock trading using the moomoo (Futu) OpenAPI. It includes a FastAPI backend, a SIM execution engine, and a Tauri + React desktop UI for status, preferences, and logs.
 
-- Connect to the moomoo API via a local OpenD gateway.
-- Execute a configurable trading strategy (starting with simple moving-average crossovers).
-- Expose a web-based UI for adjusting strategy parameters (e.g., moving-average windows, position sizing, stop-loss).
-- Provide natural-language commands to adjust settings (e.g., "only trade between 9:30 and noon", "tighten stop to 2%").
-- Later, allow the bot to learn and mimic a user's trading style from past trade history (stored locally).
+Core capabilities:
 
-This repository will evolve over time. For the initial version, we plan to:
-
-- Set up the project skeleton with `src/` modules for core functionality, strategies, natural-language parser, UI, and backtesting.
-- Implement a basic client for the moomoo OpenAPI that can authenticate, subscribe to market data, and place paper trades.
-- Add a `.env.example` file describing environment variables (OpenD host/port, etc.).
-- Provide a Streamlit-based UI skeleton for controlling strategy parameters and viewing open positions and logs.
-- Add instructions on installing dependencies and running the application in paper-trading mode.
+- Connect to moomoo via local OpenD gateway
+- Run strategies (e.g., MA crossover) and Autopilot GPT planner
+- Desktop UI for controls, preferences, Autopilot, and activity logs
+- Local SQLite persistence for orders, fills, and bot action logs
 
 ## Prerequisites
 
-- Python 3.9+.
-- A moomoo (Futu) account with OpenAPI enabled and the **OpenD** gateway running locally.
-- Git for version control.
-- A virtual environment (recommended) for Python dependencies.
+- Python 3.9+
+- A moomoo (Futu) account with OpenAPI enabled and the OpenD gateway running locally
+- Node.js 18+ (for the desktop app)
 
 ## Setup
 
-1. Clone this repository and install dependencies:
+1) Clone and install Python deps
 
    ```bash
    git clone --branch main --single-branch https://github.com/110782829/moomoo-chatgpt-trader.git
@@ -43,42 +35,37 @@ This repository will evolve over time. For the initial version, we plan to:
    pip install -r requirements.txt
    ```
 
-2. Copy `.env.example` to `.env` and fill in your OpenD connection details:
+2) Copy `.env.example` to `.env` and fill in OpenD details:
 
    ```
    MOOMOO_HOST=127.0.0.1
    MOOMOO_PORT=11111
    MOOMOO_CLIENT_ID=1
-
-   # Optional (used by the Streamlit diagnostics UI)
-   API_BASE_URL=http://127.0.0.1:8000
-
-   # Optional feature flags for Streamlit diagnostics
-   UI_SHOW_DIAGNOSTICS=true
-   UI_ALLOW_MANUAL_ORDERS=false
-   UI_SHOW_CHARTS=false
+   # Optional for GPT planner
+   OPENAI_API_KEY=sk-...
    ```
 
-3. Start the OpenD gateway provided by moomoo.
-   Launch the moomoo OpenD process on your machine and ensure it’s reachable at the host/port you configured.
+3) Start OpenD (moomoo) and ensure it’s reachable at the host/port you configured.
 
-4. Run the development server:
+4) Run the backend server
 
    ```bash
    uvicorn --app-dir src server:app --reload --port 8000
    ```
 
-5. Open the Streamlit UI in your browser (the server will output a local URL).
+5) Run the desktop UI (Tauri + React)
 
-'''bash
-(Optional) Launch the Streamlit diagnostics UI
+   In a separate terminal:
 
-Helpful during development for inspecting positions/orders, tweaking risk, and checking PnL.
+   ```bash
+   cd desktop/app
+   npm install
+   npm run dev
+   ```
 
-streamlit run src/ui/app_streamlit.py
-'''
+   The UI uses `VITE_API_BASE` (defaults to `http://127.0.0.1:8000`).
 ## Notes
 
-The Streamlit app is intended as a developer diagnostics console. The long-term plan is a desktop app (e.g., Tauri + React) focused on bot configuration, autonomy, and action logs.
-
-Paper trading is strongly recommended while testing. Real trading requires careful configuration of risk limits and explicit enablement.
+- Paper trading is strongly recommended while testing. Real trading requires careful risk limits and explicit enablement.
+- SIM execution uses `db/trader.db` by default (auto-created). Strategy/automation storage uses `data/trader.db`.
+- To enable GPT Autopilot set `PLANNER_PROVIDER=gpt` and `OPENAI_API_KEY`.

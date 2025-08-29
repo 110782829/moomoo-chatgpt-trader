@@ -1,6 +1,6 @@
 // desktop/app/src/App.tsx
 // Desktop UI (Tauri + React) with Connection panel, Strategies Catalog (presets + start), richer Status/Logs,
-// and Backtest with friendly 400 errors (missing bars file hint).
+// and friendly UI for Settings, Bot Status, and Activity Log.
 // API base comes from VITE_API_BASE (defaults to http://127.0.0.1:8000)
 
 import { useEffect, useRef, useState } from 'react';
@@ -475,6 +475,24 @@ const api = {
   autopilotContext: () => GET("/autopilot/context"),
   autopilotLastOutput: () => GET("/autopilot/last_output"),
 
+  // autopilot prefs/style/watchlist
+  getAutoPrefs: () => GET<any>("/autopilot/prefs"),
+  putAutoPrefs: (prefs: any) => SEND("/autopilot/prefs", prefs, "PUT"),
+  getAutoStyle: () => GET<{ raw: string; summary: string }>("/autopilot/style"),
+  postAutoStyle: (text: string) => SEND<{ raw: string; summary: string }>("/autopilot/style", { text }),
+  // watchlist endpoints intentionally not used in UI for now
+  getDiscovery: () => GET<{ enabled: boolean; only: boolean; seed: string[]; preview: string[] }>("/autopilot/discovery"),
+  putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
+  getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number }>("/autopilot/news"),
+  putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number }) => SEND("/autopilot/news", payload, "PUT"),
+  getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number }>("/autopilot/data"),
+  putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number }) => SEND("/autopilot/data", payload, "PUT"),
+  getExecMode: () => GET<{ mode: "sim"|"moomoo" }>("/execution/mode"),
+  putExecMode: (mode: "sim"|"moomoo") => SEND("/execution/mode", { mode }, "PUT"),
+  syncDealsNow: () => SEND("/sync/deals", {}),
+  getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
+  putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
+
   // execution (SIM)
   listExecOrders: (q: { symbol?: string; status?: string; limit?: number }) => GET<any[]>("/exec/orders", q),
   cancelExecOrder: (id: string) => SEND(`/exec/orders/${id}/cancel`, {}, "POST"),
@@ -499,7 +517,7 @@ function useToast() {
 }
 
 // ---------- App ----------
-enum Tab { Settings=0, Status=1, Activity=2, Backtest=3 }
+enum Tab { Settings=0, Status=1, Activity=2 }
 
 export default function App() {
   const toast = useToast();
@@ -873,7 +891,7 @@ async function openExplain(r:any) {
       </header>
 
       <nav className="tabs">
-        {["Settings","Bot Status","Activity Log","Backtest"].map((t,i)=>(
+        {["Settings","Bot Status","Activity Log"].map((t,i)=>(
           <button key={t} className={`tab ${tab===i?'active':''}`} onClick={()=>setTab(i as Tab)}>{t}</button>
         ))}
       </nav>
@@ -926,7 +944,7 @@ async function openExplain(r:any) {
               <button className="btn" onClick={()=>api.sessionSave(host as string, Number(port), String(accountId), String(trdEnv)).then(()=>toast.show("Session saved.")).catch(e=>toast.show(brief(e)))}>Save Session</button>
               <button className="btn" onClick={()=>api.sessionClear().then(()=>toast.show("Saved session cleared.")).catch(e=>toast.show(brief(e)))}>Clear Saved</button>
             </div>
-          </div>
+      </div>
 
           {/* Risk */}
           <div className="panel">
@@ -978,9 +996,18 @@ async function openExplain(r:any) {
             )}
             <div className="help" style={{marginTop:8}}>Risk checks are enforced server-side before any order is sent.</div>
           </div>
+          {/* Data & Discovery */}
+          <div className="panel compact">
+            <h2 style={{marginTop:0}}>Data & Discovery</h2>
+            <DiscoverySettings />
+          </div>
+          {/* Trading Behavior (Style) */}
+          <div className="panel compact">
+            <h2 style={{marginTop:0}}>Trading Behavior</h2>
+            <StyleAndWatchlist />
+          </div>
 
-          {/* Strategies Catalog */}
-          <StrategyCatalog connected={connected} />
+          {/* Strategies Catalog removed per new design */}
         </section>
       )}
 
@@ -1057,7 +1084,7 @@ async function openExplain(r:any) {
               <div className="value">{exposureMV==null ? "—" : (exposureMV?.toFixed ? exposureMV.toFixed(2) : exposureMV)}</div>
             </div>
           </div>
-{/* Controls + Autopilot */}
+          {/* Controls + Autopilot */}
           
           {/* Autopilot & Active Strategies */}
           
@@ -1071,9 +1098,9 @@ async function openExplain(r:any) {
               <h2 style={{marginTop:0}}>Trading Preferences</h2>
               <TradingPreferences />
             </div>
-  <div className="panel compact">
-    <h2 style={{marginTop:0}}>Current Stats</h2>
-    <div className="statlist">
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Current Stats</h2>
+            <div className="statlist">
       {/* Win rate vs target */}
       <div className="statrow">
         <div className="k">Win rate</div>
@@ -1146,11 +1173,10 @@ async function openExplain(r:any) {
         })()}</span>
       </div>
     </div>
-  
   </div>
 
 
-          </div>
+            </div>
 {/* Positions (SIM) – its own panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
@@ -1265,12 +1291,13 @@ async function openExplain(r:any) {
           logSymbol={logSymbol} setLogSymbol={setLogSymbol}
           logSince={logSince} setLogSince={setLogSince}
           logLimit={logLimit} setLogLimit={setLogLimit}
+          logsSource={logsSource} setLogsSource={setLogsSource}
+          onExplain={openExplain}
           refreshLogs={()=>refreshLogs(true)} logsLoading={logsLoading}
         />
       )}
 
-      {/* ===== Backtest ===== */}
-      {tab===Tab.Backtest && <BacktestPanel />}
+      {/* Backtest tab removed */}
 
       {previewOpen && createPortal(
         <div id="preview-modal" style={{
@@ -1370,7 +1397,7 @@ async function killSwitch() {
   try {
     await SEND("/automation/stop_all", {});
     toast.show("Kill switch sent.");
-    setStratRefreshTick(t=>t+1);
+    setStratRefreshTick((t: number)=>t+1);
   } catch (e:any) {
     toast.show(`Kill switch failed: ${brief(e)}`);
   }
@@ -1574,17 +1601,41 @@ function ActivityLog(props: {
   logSymbol: string; setLogSymbol: (s:string)=>void;
   logSince: number; setLogSince: (n:number)=>void;
   logLimit: number; setLogLimit: (n:number)=>void;
+  logsSource: "system" | "autopilot"; setLogsSource: (v: "system" | "autopilot") => void;
+  onExplain: (row:any)=>void;
   refreshLogs: () => void; logsLoading: boolean;
 }) {
   const { logs, logsAt, logsEvery, setLogsEvery, logsAuto, setLogsAuto,
           logSymbol, setLogSymbol, logSince, setLogSince, logLimit, setLogLimit,
+          logsSource, setLogsSource, onExplain,
           refreshLogs, logsLoading } = props;
+
+  const [coverage, setCoverage] = useState<{ exits?: number; stops?: number; tp?: number } | null>(null);
+  const [covAt, setCovAt] = useState<string>("—");
+
+  useEffect(() => { (async ()=>{
+    try {
+      const st:any = await api.autopilotStatus();
+      const s = st?.stats || {};
+      setCoverage({ exits: Number(s?.exits_coverage_pct ?? NaN), stops: Number(s?.stops_coverage_pct ?? NaN), tp: Number(s?.tp_coverage_pct ?? NaN) });
+      setCovAt(new Date().toLocaleTimeString());
+    } catch {}
+  })(); }, [logsAt, logsSource, logSince]);
 
   return (
     <section className="stack activity">
       <div className="panel">
         <h2 className="title-lg" style={{marginTop:0}}>Activity Log</h2>
         <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
+          <div>
+            <div className="label">Source</div>
+            <NiceSelect
+              value={logsSource}
+              onChange={(v)=>{ setLogsSource((v as any) as ("system"|"autopilot")); setTimeout(()=>refreshLogs(), 0); }}
+              options={[{value:"system",label:"System"},{value:"autopilot",label:"Autopilot"}]}
+              width={160}
+            />
+          </div>
           <div style={{minWidth:220}}><div className="label">Symbol (optional)</div>
             <input className="input search" value={logSymbol}
                    onChange={e=>setLogSymbol(e.target.value)}
@@ -1594,21 +1645,34 @@ function ActivityLog(props: {
             <input className="input" type="number" value={logSince}
                    onChange={e=>setLogSince(parseInt(e.target.value)||0)} />
           </div>
-          <div style={{width:140}}><div className="label">Limit</div>
-            <input className="input" type="number" value={logLimit}
-                   onChange={e=>setLogLimit(parseInt(e.target.value)||0)} />
+          <div>
+            <div className="label">Limit</div>
+            <div className="row" style={{gap:6, alignItems:"center"}}>
+              <input className="input" type="number" value={logLimit}
+                     onChange={e=>setLogLimit(parseInt(e.target.value)||0)}
+                     style={{width:110}} />
+              <button className="btn" onClick={()=>exportCsv(logs)} style={{padding:"6px 10px"}}>Export CSV</button>
+            </div>
           </div>
-          <div className="row" style={{marginLeft:"auto", gap:10}}><button className="btn" onClick={()=>exportCsv(logs)}>Export CSV</button>
+          <div className="row" style={{marginLeft:"auto", gap:10}}>
             <span className="help">Last updated: {logsAt}</span>
           </div>
         </div>
+
+        {coverage && isFinite(coverage.exits||NaN) && (
+          <div className="row" style={{gap:12, margin:"8px 0"}}>
+            <span className="delta" title={`Updated ${covAt}`}>Exits coverage: {coverage.exits?.toFixed(1)}%</span>
+            <span className="delta" title={`Updated ${covAt}`}>Stops: {coverage.stops?.toFixed(1)}%</span>
+            <span className="delta" title={`Updated ${covAt}`}>Take‑profit: {coverage.tp?.toFixed(1)}%</span>
+          </div>
+        )}
 
         <div className="table-wrap" style={{maxHeight: 460}}>
           <table className="table-modern">
             <thead>
               <tr>
                 <th>Time</th><th>Mode</th><th>Action</th><th>Symbol</th>
-                <th>Side</th><th>Qty</th><th>Price</th><th>Reason</th><th>Status</th>
+                <th>Side</th><th>Qty</th><th>Price</th><th>Reason</th><th>Status</th><th>Details</th>
               </tr>
             </thead>
             <tbody>
@@ -1617,6 +1681,7 @@ function ActivityLog(props: {
                   <td className="small mono">{r.ts ?? ""}</td><td>{r.mode ?? ""}</td><td>{r.action ?? ""}</td>
                   <td>{r.symbol ?? ""}</td><td>{r.side ?? ""}</td><td className="num">{r.qty ?? ""}</td>
                   <td className="num">{r.price ?? ""}</td><td>{r.reason ?? ""}</td><td>{statusTag(r.status)}</td>
+                  <td><button className="btn" onClick={()=>onExplain(r)}>Explain</button></td>
                 </tr>
               )) : <tr><td colSpan={9}>No log entries yet.</td></tr>}
             </tbody>
@@ -1899,132 +1964,7 @@ function PresetPicker({ presets, onLoad, onDelete }:{ presets: Record<string, an
   );
 }
 
-function BacktestPanel() {
-  const [symbol, setSymbol] = useState("US.AAPL");
-  const [fast, setFast] = useState(20);
-  const [slow, setSlow] = useState(50);
-  const [ktype, setKType] = useState("K_1M");
-  const [qty, setQty] = useState(1);
-  const [sizeMode, setSizeMode] = useState<"shares"|"usd">("shares");
-  const [dollarSize, setDollarSize] = useState(0);
-  const [sl, setSL] = useState(0);
-  const [tp, setTP] = useState(0);
-  const [comm, setComm] = useState(0);
-  const [slip, setSlip] = useState(0);
-  const [res, setRes] = useState<any>(null);
-  const [running, setRunning] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  // derive the expected bars filename the server uses (ticker sans prefix + ktype)
-  const ticker = symbol.includes(".") ? symbol.split(".").pop()!.toUpperCase() : symbol.toUpperCase();
-  const expectedFile = `data/bars/${ticker}_${ktype}.csv`;
-
-  async function run() {
-    setErr(null);
-    setRes(null);
-    try {
-      setRunning(true);
-      const payload = {
-        symbol, fast, slow, ktype, qty, size_mode: sizeMode, dollar_size: dollarSize,
-        stop_loss_pct: sl, take_profit_pct: tp, commission_per_share: comm, slippage_bps: slip
-      };
-      const r = await SEND("/backtest/ma-crossover", payload);
-      setRes(r);
-    } catch (e:any) {
-      const msg = tryParseError(e);
-      setErr(msg);
-    } finally { setRunning(false); }
-  }
-
-  return (
-    <section className="stack">
-      <div className="panel">
-        <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
-          <h2 style={{margin:0}}>MA Crossover Backtest</h2>
-          <div className="note">{res ? "Results below" : "Configure and run"}</div>
-        </div>
-
-        <div className="form-row">
-          <div><div className="label">Symbol</div><input className="input" value={symbol} onChange={e=>setSymbol(e.target.value)} /></div>
-          <div><div className="label">Fast MA</div><input className="input" type="number" value={fast} onChange={e=>setFast(parseInt(e.target.value)||1)} /></div>
-          <div><div className="label">Slow MA</div><input className="input" type="number" value={slow} onChange={e=>setSlow(parseInt(e.target.value)||2)} /></div>
-        </div>
-        <div className="form-row">
-          <div><div className="label">KType</div>
-            <NiceCombobox
-              value={ktype}
-              onChange={setKType}
-              options={["K_1M","K_5M","K_15M","K_30M","K_60M","K_1D"].map(k=>({value:k,label:k}))}
-              width={180}
-              placeholder="Search ktype…"
-            />
-          </div>
-          <div><div className="label">Qty (shares)</div><input className="input" type="number" value={qty} onChange={e=>setQty(parseFloat(e.target.value)||0)} /></div>
-          <div>
-            <div className="label">Size Mode</div>
-            <NiceSelect
-              value={sizeMode}
-              onChange={(v)=>setSizeMode(v as any)}
-              options={[{value:"shares",label:"shares"},{value:"usd",label:"usd"}]}
-              width={140}
-            />
-          </div>
-        </div>
-        <div className="form-row">
-          <div><div className="label">Dollar Size</div><input className="input" type="number" value={dollarSize} onChange={e=>setDollarSize(parseFloat(e.target.value)||0)} /></div>
-          <div><div className="label">Stop Loss %</div><input className="input" type="number" step="0.0001" value={sl} onChange={e=>setSL(parseFloat(e.target.value)||0)} /></div>
-          <div><div className="label">Take Profit %</div><input className="input" type="number" step="0.0001" value={tp} onChange={e=>setTP(parseFloat(e.target.value)||0)} /></div>
-        </div>
-        <div className="form-row">
-          <div><div className="label">Commission / share</div><input className="input" type="number" step="0.0001" value={comm} onChange={e=>setComm(parseFloat(e.target.value)||0)} /></div>
-          <div><div className="label">Slippage (bps)</div><input className="input" type="number" value={slip} onChange={e=>setSlip(parseFloat(e.target.value)||0)} /></div>
-        </div>
-        <div className="row" style={{marginTop:10}}>
-          <button className="btn brand" onClick={run} disabled={running}>{running?"Running…":"Run Backtest"}</button>
-        </div>
-
-        {err && (
-          <div className="panel" style={{marginTop:12, borderColor:"rgba(239,68,68,.45)", background:"linear-gradient(90deg, rgba(239,68,68,.08), transparent)"}}>
-            <div style={{fontWeight:600, marginBottom:6}}>Backtest failed</div>
-            <div style={{whiteSpace:"pre-wrap"}}>{err}</div>
-            <div className="help" style={{marginTop:6}}>
-              If this mentions a missing bars file, create it at <code>{expectedFile}</code>.
-              (Ticker uses the part after the dot, e.g., <code>US.AAPL → AAPL</code>.)
-            </div>
-          </div>
-        )}
-
-        {!!res && (
-          <div className="stack" style={{marginTop:12}}>
-            <div className="card"><h3>Metrics</h3><pre style={{margin:0,whiteSpace:"pre-wrap"}}>{JSON.stringify(res.metrics ?? res, null, 2)}</pre></div>
-            {res.trades_sample && (
-              <div className="table-wrap">
-                <table>
-                  <thead><tr>{["entry_ts","exit_ts","side","entry_px","exit_px","qty","pnl"].map(h=><th key={h}>{h}</th>)}</tr></thead>
-                  <tbody>
-                    {res.trades_sample.map((t:any,i:number)=>(
-                      <tr key={i}><td>{t.entry_ts}</td><td>{t.exit_ts}</td><td>{t.side}</td>
-                      <td>{t.entry_px}</td><td>{t.exit_px}</td><td>{t.qty}</td><td>{t.pnl}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-
-  function tryParseError(e:any) {
-    try {
-      const j = JSON.parse(String(e?.message || e));
-      return j?.detail || j?.message || String(e);
-    } catch {
-      return e?.message || String(e);
-    }
-  }
-}
+// Backtest panel removed per new design
 
 
 function StrategyPicker() {
@@ -2175,6 +2115,47 @@ function TradingPreferences() {
   const [takeProfit, setTakeProfit] = useLocalStorage<number>("pref.tp", 2.0);
   const [measuredMove, setMeasuredMove] = useLocalStorage<number>("pref.mm", 1.0);
   const [maxDD, setMaxDD] = useLocalStorage<number>("pref.maxdd", 5.0);
+  const [loaded, setLoaded] = useState(false);
+  const [saveTick, setSaveTick] = useState(0);
+
+  // Load from server once
+  useEffect(() => {
+    (async () => {
+      try {
+        const p = await api.getAutoPrefs();
+        if (p && typeof p === 'object') {
+          if (p.target_winrate_pct != null) setWinRate(Number(p.target_winrate_pct));
+          if (p.target_rr != null) setRR(Number(p.target_rr));
+          if (p.stop_loss_pct != null) setStopLoss(Number(p.stop_loss_pct));
+          if (p.take_profit_pct != null) setTakeProfit(Number(p.take_profit_pct));
+          if (p.measured_move_atr_mult != null) setMeasuredMove(Number(p.measured_move_atr_mult));
+          if (p.max_dd_pct != null) setMaxDD(Number(p.max_dd_pct));
+        }
+      } catch {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  // Auto-save when values change (debounced)
+  useEffect(() => {
+    if (!loaded) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await api.putAutoPrefs({
+          target_winrate_pct: winRate,
+          target_rr: rr,
+          stop_loss_pct: stopLoss,
+          take_profit_pct: takeProfit,
+          measured_move_atr_mult: measuredMove,
+          max_dd_pct: maxDD,
+        });
+        setSaveTick((t: number) => t + 1);
+      } catch {
+        // silent in UI; backend logs
+      }
+    }, 500);
+    return () => window.clearTimeout(id);
+  }, [loaded, winRate, rr, stopLoss, takeProfit, measuredMove, maxDD]);
   return (
     <div className="stack">
       <div className="form-row prefs-grid">
@@ -2267,6 +2248,238 @@ function PreferenceIndicators({ autoStatus }: { autoStatus: any }) {
           <Chip row={r} />
         </div>
       ))}
+    </div>
+  );
+}
+
+function StyleAndWatchlist() {
+  const [styleRaw, setStyleRaw] = useState("");
+  const [styleSummary, setStyleSummary] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await api.getAutoStyle();
+        setStyleRaw(s?.raw || "");
+        setStyleSummary(s?.summary || "");
+      } catch {}
+    })();
+  }, []);
+
+  async function saveStyle() {
+    if (!styleRaw.trim()) return;
+    try {
+      setBusy(true);
+      const r = await api.postAutoStyle(styleRaw);
+      setStyleSummary(r?.summary || "");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <div className="form-row">
+        <div style={{flex:1}}>
+          <div className="label">Style (natural language)</div>
+          <textarea className="input" rows={4} value={styleRaw} onChange={e=>setStyleRaw(e.target.value)} placeholder="Describe your trading preferences, constraints, and style…" />
+          <div className="row" style={{justifyContent:"flex-end", marginTop:6}}>
+            <button className="btn brand" onClick={saveStyle} disabled={busy || !styleRaw.trim()}>Summarize & Save</button>
+          </div>
+        </div>
+      </div>
+      {styleSummary ? (
+        <div className="panel compact" style={{background:"#0e1320"}}>
+          <div className="label">Saved Style Summary</div>
+          <div className="help" style={{whiteSpace:"pre-wrap"}}>{styleSummary}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DiscoverySettings() {
+  const [discEnabled, setDiscEnabled] = useState<boolean>(true);
+  const [discOnly, setDiscOnly] = useState<boolean>(false);
+  const [seed, setSeed] = useState<string>("");
+  const [preview, setPreview] = useState<string[]>([]);
+  const [newsEnabled, setNewsEnabled] = useState<boolean>(true);
+  const [newsTtl, setNewsTtl] = useState<number>(1800);
+  const [ktype, setKtype] = useState<string>("K_DAY");
+  const [barsTtl, setBarsTtl] = useState<number>(60);
+  const [execMode, setExecMode] = useState<"sim"|"moomoo">("sim");
+  const [dealsSync, setDealsSync] = useState<number>(180);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { (async () => {
+    try {
+      const d = await api.getDiscovery();
+      setDiscEnabled(!!d?.enabled);
+      setDiscOnly(!!d?.only);
+      setSeed(Array.isArray(d?.seed) ? (d?.seed as string[]).join("\n") : "");
+      setPreview(Array.isArray(d?.preview) ? d.preview : []);
+    } catch {}
+    try {
+      const n = await api.getNewsSettings();
+      setNewsEnabled(!!n?.enabled);
+      setNewsTtl(Number(n?.ttl_sec || 1800));
+    } catch {}
+    try {
+      const dset = await api.getDataSettings();
+      setKtype(String(dset?.ktype || "K_DAY"));
+      setBarsTtl(Number(dset?.bars_ttl_sec || 60));
+      if (dset?.deals_sync_sec != null) setDealsSync(Number(dset.deals_sync_sec));
+    } catch {}
+    try {
+      const em = await api.getExecMode(); setExecMode((em?.mode as any) || "sim");
+    } catch {}
+  })(); }, []);
+
+  async function saveDiscovery() {
+    setSaving(true);
+    try {
+      const parsed = seed.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+      await api.putDiscovery({ enabled: discEnabled, only: discOnly, seed: parsed });
+      const d = await api.getDiscovery();
+      setPreview(Array.isArray(d?.preview) ? d.preview : []);
+    } finally { setSaving(false); }
+  }
+  async function saveNews() {
+    setSaving(true);
+    try {
+      await api.putNewsSettings({ enabled: newsEnabled, ttl_sec: Number(newsTtl)||1800 });
+      await api.putDataSettings({ ktype, bars_ttl_sec: Number(barsTtl)||60, deals_sync_sec: Number(dealsSync)||180 });
+      await api.putExecMode(execMode);
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="stack">
+      <div className="form-row">
+        <div>
+          <div className="label">Discovery Enabled</div>
+          <NiceSelect
+            value={String(discEnabled)}
+            onChange={(v)=>setDiscEnabled(v==="true")}
+            options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
+            width={140}
+          />
+        </div>
+        <div>
+          <div className="label">Dynamic Only (no watchlist)</div>
+          <NiceSelect
+            value={String(discOnly)}
+            onChange={(v)=>setDiscOnly(v==="true")}
+            options={[{value:"false",label:"False"},{value:"true",label:"True"}]}
+            width={160}
+          />
+        </div>
+        <div>
+          <div className="label">Use News</div>
+          <NiceSelect
+            value={String(newsEnabled)}
+            onChange={(v)=>setNewsEnabled(v==="true")}
+            options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
+            width={140}
+          />
+        </div>
+        <div>
+          <div className="label">News TTL (sec)</div>
+          <input className="input" type="number" value={newsTtl} onChange={(e)=>setNewsTtl(parseInt(e.target.value)||1800)} />
+        </div>
+        <div>
+          <div className="label">Timeframe (KType)</div>
+          <NiceSelect
+            value={ktype}
+            onChange={(v)=>setKtype(v as string)}
+            options={["K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY"].map(k=>({value:k,label:k}))}
+            width={140}
+          />
+        </div>
+        <div>
+          <div className="label">Bars cache TTL (sec)</div>
+          <input className="input" type="number" value={barsTtl} onChange={(e)=>setBarsTtl(parseInt(e.target.value)||60)} />
+        </div>
+        <div>
+          <div className="label">Execution Backend</div>
+          <NiceSelect
+            value={execMode}
+            onChange={(v)=>setExecMode((v as any) as ("sim"|"moomoo"))}
+            options={[{value:"sim",label:"SIM"},{value:"moomoo",label:"Moomoo"}]}
+            width={140}
+          />
+        </div>
+        <div>
+          <div className="label">Deals sync (sec)</div>
+          <input className="input" type="number" value={dealsSync} onChange={(e)=>setDealsSync(parseInt(e.target.value)||180)} />
+        </div>
+      </div>
+      <div className="form-row">
+        <div style={{flex:1}}>
+          <div className="label">Discovery Seed (US.TICKER per line)</div>
+          <textarea className="input" rows={4} value={seed} onChange={(e)=>setSeed(e.target.value)} placeholder={"US.AAPL\nUS.MSFT\nUS.TSLA"} />
+        </div>
+      </div>
+      <div className="row" style={{gap:8, justifyContent:"flex-end"}}>
+        <button className="btn" onClick={saveNews} disabled={saving}>Save News</button>
+        <button className="btn brand" onClick={saveDiscovery} disabled={saving}>{saving?"Saving…":"Save Discovery"}</button>
+      </div>
+  <div className="panel compact" style={{background:"#0e1320"}}>
+    <div className="label">Preview (Top Candidates)</div>
+    <div className="help" style={{whiteSpace:"pre-wrap"}}>{preview?.length ? preview.join(", ") : "—"}</div>
+  </div>
+  <PlannerSettings />
+    </div>
+  );
+}
+
+function PlannerSettings() {
+  const [minConf, setMinConf] = useState<number>(0.6);
+  const [topN, setTopN] = useState<number>(8);
+  const [strict, setStrict] = useState<boolean>(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { (async () => {
+    try {
+      const p = await api.getPlannerSettings();
+      setMinConf(Number(p?.min_confidence ?? 0.6));
+      setTopN(Number(p?.top_n ?? 8));
+      setStrict(!!p?.strict_prefs);
+    } catch {}
+  })(); }, []);
+
+  async function save() {
+    setSaving(true);
+    try { await api.putPlannerSettings({ min_confidence: minConf, top_n: topN, strict_prefs: strict }); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div className="panel compact" style={{marginTop:12}}>
+      <h2 style={{marginTop:0}}>Planner</h2>
+      <div className="form-row">
+        <div>
+          <div className="label">Min confidence (0–1)</div>
+          <input className="input" type="number" step={0.01} min={0} max={1} value={minConf} onChange={(e)=>setMinConf(parseFloat(e.target.value)||0)} />
+        </div>
+        <div>
+          <div className="label">Top‑N Universe</div>
+          <input className="input" type="number" min={1} value={topN} onChange={(e)=>setTopN(parseInt(e.target.value)||8)} />
+        </div>
+        <div>
+          <div className="label">Strict Prefs (require stop/TP)</div>
+          <NiceSelect
+            value={String(strict)}
+            onChange={(v)=>setStrict(v==="true")}
+            options={[{value:"false",label:"False"},{value:"true",label:"True"}]}
+            width={140}
+          />
+        </div>
+        <div className="row" style={{alignItems:"flex-end", marginLeft:"auto"}}>
+          <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save Planner"}</button>
+        </div>
+      </div>
     </div>
   );
 }

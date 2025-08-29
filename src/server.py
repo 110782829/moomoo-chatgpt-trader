@@ -274,6 +274,13 @@ def get_client() -> Optional[MoomooClient]:
     """Return the singleton broker client."""
     return client
 
+# Wire execution container with client accessor and mode on import
+try:
+    from execution import container as exec_container  # type: ignore
+    exec_container.set_client_accessor(get_client)  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 
 # ---------- App lifecycle (automation) ----------
 
@@ -583,6 +590,35 @@ def quotes_latest(symbol: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get quote: {e}")
+
+
+# ---- Execution mode (SIM | Moomoo) ----
+class ExecMode(BaseModel):
+    mode: str  # 'sim' | 'moomoo'
+
+
+@app.get("/execution/mode")
+def exec_mode_get():
+    try:
+        from execution.container import get_mode  # type: ignore
+        mode = get_mode()
+    except Exception:
+        mode = "sim"
+    return {"mode": mode}
+
+
+@app.put("/execution/mode")
+def exec_mode_put(body: ExecMode):
+    mode = (body.mode or "sim").strip().lower()
+    if mode not in {"sim","moomoo"}:
+        raise HTTPException(status_code=400, detail="mode must be 'sim' or 'moomoo'")
+    try:
+        from execution.container import set_mode  # type: ignore
+        set_mode(mode)
+        insert_action_log("execution_mode", mode=_two_mode(), reason="user_update", status="ok", extra={"mode": mode})
+    except Exception:
+        pass
+    return {"mode": mode}
 
 
 # --- Sync deals + PnL ---
@@ -1163,7 +1199,21 @@ async def autopilot_enable(body: dict):
 @autopilot_router.get("/status")
 async def autopilot_status():
     mgr = _get_autopilot()
-    return mgr.status()
+    st = mgr.status()
+    # Enrich with performance stats and model info (best-effort)
+    try:
+        from core.storage import performance_stats, exits_coverage  # type: ignore
+        perf = performance_stats(days=365)
+        coverage = exits_coverage(since_hours=24)
+        stats = dict(st.get("stats") or {})
+        stats.update(perf)
+        stats.update(coverage)
+        # Surface model name for UI badge
+        stats["model"] = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        st["stats"] = stats
+    except Exception:
+        pass
+    return st
 
 @autopilot_router.post("/preview")
 async def autopilot_preview():
@@ -1217,3 +1267,387 @@ async def _autopilot_shutdown():
 
 # mount the router
 app.include_router(autopilot_router)
+ 
+# ---------------- Autopilot: Preferences, Style, Watchlist ---------------- #
+
+class AutopilotPrefs(BaseModel):
+    target_winrate_pct: Optional[float] = None
+    target_rr: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    measured_move_atr_mult: Optional[float] = None
+    max_dd_pct: Optional[float] = None
+    per_trade_max_bps: Optional[int] = None
+
+
+class StyleUpdate(BaseModel):
+    text: str
+
+
+def _get_json_setting(key: str, default):
+    try:
+        raw = get_setting(key)  # type: ignore[name-defined]
+        if raw is None:
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    except Exception:
+        return default
+
+
+def _set_json_setting(key: str, value) -> None:
+    try:
+        set_setting(key, value)  # type: ignore[name-defined]
+    except Exception:
+        pass
+
+
+def _openai_chat(system: str, user: str) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests  # lazy import
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+        }
+        try:
+            if os.getenv("OPENAI_JSON_MODE", "0") not in ("0", "false", "no"):
+                payload["response_format"] = {"type": "json_object"}
+        except Exception:
+            pass
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+
+def _summarize_style(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    system = (
+        "You are a trading-style summarizer. Write a concise, actionable style note "
+        "(<= 6 bullet lines or 400 chars) for a trading assistant. "
+        "Prefer rules and thresholds (e.g., win rate target, RR, stop %, time windows)."
+    )
+    user = f"User preferences/notes to summarize:\n{text}"
+    out = _openai_chat(system, user)
+    if out and isinstance(out, str):
+        return out.strip()[:600]
+    return text[:600]
+
+def _extract_symbols(text: str) -> list[str]:
+    try:
+        import re
+    except Exception:
+        return []
+    if not text:
+        return []
+    txt = str(text).upper()
+    out: list[str] = []
+    # Explicit US.TICKER tokens
+    out += re.findall(r"\bUS\.[A-Z0-9]{1,6}\b", txt)
+    # Bare tickers (2–5 letters) excluding common words
+    COMMON = {"THE","AND","FOR","WITH","THIS","THAT","ONLY","WHEN","STOP","TAKE","LOSS","SELL","BUY","LONG","SHORT","NEWS","RSI","ATR","MA","UP","DOWN","HOLD","OPEN","CLOSE","DAY","WEEK","MONTH","YEARS"}
+    for token in re.findall(r"\b[A-Z]{2,5}\b", txt):
+        if token in COMMON:
+            continue
+        out.append(f"US.{token}")
+    # Dedup preserve order, cap length
+    seen = set()
+    uniq: list[str] = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq[:50]
+
+
+@autopilot_router.get("/prefs")
+def autopilot_prefs_get():
+    return _get_json_setting("autopilot.prefs", {})
+
+
+@autopilot_router.put("/prefs")
+def autopilot_prefs_put(prefs: AutopilotPrefs):
+    cur = _get_json_setting("autopilot.prefs", {})
+    upd = cur if isinstance(cur, dict) else {}
+    for k, v in prefs.dict().items():
+        if v is not None:
+            upd[k] = v
+    _set_json_setting("autopilot.prefs", upd)
+    insert_action_log("prefs_update", mode=_two_mode(), reason="user_update", status="ok", extra=upd)  # type: ignore[name-defined]
+    return upd
+
+
+@autopilot_router.get("/style")
+def autopilot_style_get():
+    return {
+        "raw": _get_json_setting("autopilot.style_raw", "") or "",
+        "summary": _get_json_setting("autopilot.style_summary", "") or "",
+    }
+
+
+@autopilot_router.post("/style")
+def autopilot_style_post(body: StyleUpdate):
+    raw = (body.text or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="text is required")
+    summary = _summarize_style(raw)
+    _set_json_setting("autopilot.style_raw", raw)
+    _set_json_setting("autopilot.style_summary", summary)
+    # Extract and store candidate symbols
+    syms = list(dict.fromkeys(_extract_symbols(raw) + _extract_symbols(summary)))
+    if syms:
+        _set_json_setting("autopilot.style_symbols", syms)
+    insert_action_log("style_update", mode=_two_mode(), reason="user_update", status="ok", extra={"len": len(raw), "symbols": len(syms)})  # type: ignore[name-defined]
+    return {"raw": raw, "summary": summary, "symbols": syms}
+
+
+class StyleSymbolsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    symbols: Optional[List[str]] = None
+
+
+@autopilot_router.get("/style_symbols")
+def autopilot_style_symbols_get():
+    enabled = bool(_get_json_setting("autopilot.style_symbols_enabled", False))
+    syms = _get_json_setting("autopilot.style_symbols", [])
+    if not isinstance(syms, list):
+        syms = []
+    return {"enabled": enabled, "symbols": syms}
+
+
+@autopilot_router.put("/style_symbols")
+def autopilot_style_symbols_put(body: StyleSymbolsUpdate):
+    if isinstance(body.symbols, list):
+        def _norm(x: str) -> str:
+            x = (x or "").strip().upper()
+            return x if "." in x else (f"US.{x}" if x else x)
+        symbols = list({ _norm(s) for s in body.symbols if isinstance(s, str) and s.strip() })
+        _set_json_setting("autopilot.style_symbols", symbols)
+        insert_action_log("style_symbols", mode=_two_mode(), reason="update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+    if body.enabled is not None:
+        _set_json_setting("autopilot.style_symbols_enabled", bool(body.enabled))
+        insert_action_log("style_symbols", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    return autopilot_style_symbols_get()
+
+
+class WatchlistUpdate(BaseModel):
+    symbols: List[str]
+
+
+def _normalize_symbol(s: str) -> str:
+    s = (s or "").strip().upper()
+    if not s:
+        return s
+    return s if "." in s else f"US.{s}"
+
+
+@autopilot_router.get("/watchlist")
+def autopilot_watchlist_get():
+    wl = _get_json_setting("autopilot.watchlist", None)
+    if isinstance(wl, list) and wl:
+        return {"symbols": wl}
+    env = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA")
+    syms = [_normalize_symbol(x) for x in env.split(",") if x.strip()]
+    return {"symbols": syms}
+
+
+@autopilot_router.put("/watchlist")
+def autopilot_watchlist_put(body: WatchlistUpdate):
+    symbols = list({_normalize_symbol(x) for x in (body.symbols or []) if str(x).strip()})
+    _set_json_setting("autopilot.watchlist", symbols)
+    insert_action_log("watchlist_update", mode=_two_mode(), reason="user_update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+    return {"symbols": symbols}
+
+
+# ---- Discovery config and preview ----
+class DiscoveryUpdate(BaseModel):
+    enabled: bool | None = None
+    only: bool | None = None
+    seed: List[str] | None = None
+
+
+@autopilot_router.get("/discovery")
+def autopilot_discovery_get():
+    enabled = True
+    try:
+        raw = _get_json_setting("autopilot.discovery_enabled", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    only = False
+    try:
+        raw = _get_json_setting("autopilot.discovery_only", None)
+        if raw is not None:
+            only = bool(raw)
+    except Exception:
+        pass
+    seed = _get_json_setting("autopilot.discovery_seed", None)
+    if not isinstance(seed, list):
+        seed = []
+    # Optional live preview (best-effort)
+    preview: List[str] = []
+    try:
+        from autopilot.discovery import discover_symbols  # type: ignore
+        preview = discover_symbols(get_client(), limit=10, ktype="K_DAY")  # type: ignore[arg-type]
+    except Exception:
+        preview = []
+    return {"enabled": enabled, "only": only, "seed": seed, "preview": preview}
+
+
+@autopilot_router.put("/discovery")
+def autopilot_discovery_put(body: DiscoveryUpdate):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.discovery_enabled", bool(body.enabled))
+        insert_action_log("discovery_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if body.only is not None:
+        _set_json_setting("autopilot.discovery_only", bool(body.only))
+        insert_action_log("discovery_update", mode=_two_mode(), reason="only_toggle", status="ok", extra={"only": bool(body.only)})  # type: ignore[name-defined]
+    if isinstance(body.seed, list):
+        # normalize seed to US.TICKER
+        symbols = list({_normalize_symbol(x) for x in body.seed if str(x).strip()})
+        _set_json_setting("autopilot.discovery_seed", symbols)
+        insert_action_log("discovery_update", mode=_two_mode(), reason="seed_update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+    return autopilot_discovery_get()
+
+
+# ---- Planner settings (min confidence, top_n) ----
+class PlannerUpdate(BaseModel):
+    min_confidence: float | None = None
+    top_n: int | None = None
+    strict_prefs: bool | None = None
+
+
+@autopilot_router.get("/planner")
+def autopilot_planner_get():
+    try:
+        mc_raw = _get_json_setting("autopilot.min_confidence", None)
+        min_conf = float(mc_raw) if mc_raw is not None else 0.6
+    except Exception:
+        min_conf = 0.6
+    try:
+        tn_raw = _get_json_setting("autopilot.top_n", None)
+        top_n = int(tn_raw) if tn_raw is not None else int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+    except Exception:
+        top_n = int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+    try:
+        sp_raw = _get_json_setting("autopilot.strict_prefs", None)
+        strict_prefs = bool(sp_raw) if sp_raw is not None else False
+    except Exception:
+        strict_prefs = False
+    return {"min_confidence": min_conf, "top_n": top_n, "strict_prefs": strict_prefs}
+
+
+@autopilot_router.put("/planner")
+def autopilot_planner_put(body: PlannerUpdate):
+    if body.min_confidence is not None:
+        _set_json_setting("autopilot.min_confidence", float(body.min_confidence))
+        insert_action_log("planner_update", mode=_two_mode(), reason="min_conf", status="ok", extra={"min_conf": float(body.min_confidence)})  # type: ignore[name-defined]
+    if isinstance(body.top_n, int) and body.top_n > 0:
+        _set_json_setting("autopilot.top_n", int(body.top_n))
+        insert_action_log("planner_update", mode=_two_mode(), reason="top_n", status="ok", extra={"top_n": int(body.top_n)})  # type: ignore[name-defined]
+    if body.strict_prefs is not None:
+        _set_json_setting("autopilot.strict_prefs", bool(body.strict_prefs))
+        insert_action_log("planner_update", mode=_two_mode(), reason="strict_prefs", status="ok", extra={"strict_prefs": bool(body.strict_prefs)})  # type: ignore[name-defined]
+    return autopilot_planner_get()
+
+
+# ---- News settings (toggle + ttl) ----
+class NewsUpdate(BaseModel):
+    enabled: bool | None = None
+    ttl_sec: int | None = None
+
+
+@autopilot_router.get("/news")
+def autopilot_news_get():
+    enabled = True
+    try:
+        raw = _get_json_setting("autopilot.use_news", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    try:
+        ttl = int(_get_json_setting("autopilot.news_ttl_sec", None) or 0)
+    except Exception:
+        ttl = 0
+    if ttl <= 0:
+        ttl = int(os.getenv("AUTOPILOT_NEWS_TTL_SEC", "1800") or "1800")
+    return {"enabled": enabled, "ttl_sec": ttl}
+
+
+@autopilot_router.put("/news")
+def autopilot_news_put(body: NewsUpdate):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.use_news", bool(body.enabled))
+        insert_action_log("news_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if isinstance(body.ttl_sec, int) and body.ttl_sec > 0:
+        _set_json_setting("autopilot.news_ttl_sec", int(body.ttl_sec))
+        insert_action_log("news_update", mode=_two_mode(), reason="ttl_update", status="ok", extra={"ttl_sec": int(body.ttl_sec)})  # type: ignore[name-defined]
+    return autopilot_news_get()
+
+
+# ---- Data settings (ktype, bars ttl) ----
+class DataUpdate(BaseModel):
+    ktype: str | None = None
+    bars_ttl_sec: int | None = None
+    deals_sync_sec: int | None = None
+
+
+_KTYPES = {"K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY","K_1D"}
+
+
+@autopilot_router.get("/data")
+def autopilot_data_get():
+    ktype = str(_get_json_setting("autopilot.ktype", None) or os.getenv("AUTOPILOT_KTYPE", "K_DAY"))
+    bars_ttl = 0
+    try:
+        bars_ttl = int(_get_json_setting("autopilot.bars_ttl_sec", None) or 0)
+    except Exception:
+        bars_ttl = 0
+    if bars_ttl <= 0:
+        bars_ttl = int(os.getenv("AUTOPILOT_BARS_TTL_SEC", "60") or "60")
+    try:
+        deals_sync = int(_get_json_setting("autopilot.deals_sync_sec", None) or 0)
+    except Exception:
+        deals_sync = 0
+    if deals_sync <= 0:
+        deals_sync = int(os.getenv("AUTOPILOT_DEALS_SYNC_SEC", "180") or "180")
+    return {"ktype": ktype, "bars_ttl_sec": bars_ttl, "deals_sync_sec": deals_sync}
+
+
+@autopilot_router.put("/data")
+def autopilot_data_put(body: DataUpdate):
+    if body.ktype is not None:
+        kt = str(body.ktype).upper().strip()
+        if kt not in _KTYPES:
+            raise HTTPException(status_code=400, detail=f"ktype must be one of: {sorted(_KTYPES)}")
+        _set_json_setting("autopilot.ktype", kt)
+        insert_action_log("data_update", mode=_two_mode(), reason="ktype", status="ok", extra={"ktype": kt})  # type: ignore[name-defined]
+    if isinstance(body.bars_ttl_sec, int) and body.bars_ttl_sec > 0:
+        _set_json_setting("autopilot.bars_ttl_sec", int(body.bars_ttl_sec))
+        insert_action_log("data_update", mode=_two_mode(), reason="bars_ttl", status="ok", extra={"bars_ttl_sec": int(body.bars_ttl_sec)})  # type: ignore[name-defined]
+    if isinstance(body.deals_sync_sec, int) and body.deals_sync_sec > 0:
+        _set_json_setting("autopilot.deals_sync_sec", int(body.deals_sync_sec))
+        insert_action_log("data_update", mode=_two_mode(), reason="deals_sync", status="ok", extra={"deals_sync_sec": int(body.deals_sync_sec)})  # type: ignore[name-defined]
+    return autopilot_data_get()

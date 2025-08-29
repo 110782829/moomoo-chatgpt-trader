@@ -12,9 +12,9 @@ try:
 except Exception:  # pragma: no cover
     yf = None  # type: ignore
 
-# Optional durable action log
+# Optional durable action log + settings + fills
 try:
-    from core.storage import insert_action_log  # type: ignore
+    from core.storage import insert_action_log, get_setting, record_fill  # type: ignore
     _HAS_STORAGE = True
 except Exception:  # pragma: no cover
     _HAS_STORAGE = False
@@ -105,6 +105,10 @@ class AutopilotManager:
         self._planner = get_planner_client()
         self._logs: List[Dict[str, Any]] = []
 
+        # Periodic broker deal sync (to keep local mirror authoritative)
+        self.deal_sync_sec: int = int(os.getenv("AUTOPILOT_DEALS_SYNC_SEC", "180") or "180")
+        self._last_deal_sync_ts: float = 0.0
+
     async def start(self) -> None:
         async with self._lock:
             if self._running and self._task and not self._task.done():
@@ -179,6 +183,12 @@ class AutopilotManager:
                 except Exception as e:  # pragma: no cover
                     self._log("act_exception", {"error": str(e)})
 
+                # Opportunistic broker deal sync (paper/live): keep local storage updated
+                try:
+                    await self._maybe_sync_deals()
+                except Exception:
+                    pass
+
                 self.last_input = ctx
                 self.last_output = out
                 self.last_tick_ts = _utcnow_iso()
@@ -239,23 +249,349 @@ class AutopilotManager:
             "symbol_blocklist": list(risk_cfg.get("symbol_blocklist") or []),
         }
 
-        # Universe with indicators
-        watchlist = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA").split(",")
+        # Data settings
+        try:
+            ktype_val = str(get_setting("autopilot.ktype") or "") if _HAS_STORAGE else ""
+        except Exception:
+            ktype_val = ""
+        if not ktype_val:
+            ktype_val = os.getenv("AUTOPILOT_KTYPE", "K_DAY")
+        try:
+            bars_ttl = int(get_setting("autopilot.bars_ttl_sec") or 0) if _HAS_STORAGE else 0
+        except Exception:
+            bars_ttl = 0
+        if bars_ttl <= 0:
+            bars_ttl = int(os.getenv("AUTOPILOT_BARS_TTL_SEC", "60") or "60")
+
+        # Universe selection: discovery (preferred) or watchlist fallback
+        # Discovery can be toggled via settings 'autopilot.discovery_enabled' or env AUTOPILOT_DISCOVERY=1
+        discovery_enabled = False
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.discovery_enabled")  # type: ignore[name-defined]
+                if raw:
+                    discovery_enabled = str(raw).strip().lower() not in ("0","false","no")
+            except Exception:
+                pass
+        if not discovery_enabled:
+            discovery_enabled = os.getenv("AUTOPILOT_DISCOVERY", "1").strip() not in ("0","false","no")
+
+        watchlist: List[str] = []
+        discovery_only = False
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.discovery_only")  # type: ignore[name-defined]
+                if raw is not None:
+                    discovery_only = str(raw).strip().lower() not in ("0","false","no")
+            except Exception:
+                pass
+        if os.getenv("AUTOPILOT_DISCOVERY_ONLY", None) is not None:
+            discovery_only = os.getenv("AUTOPILOT_DISCOVERY_ONLY", "0").strip().lower() not in ("0","false","no")
+        if discovery_enabled:
+            try:
+                from autopilot.discovery import discover_symbols  # type: ignore
+                discovered = discover_symbols(c, limit=int(os.getenv("AUTOPILOT_TOP_N", "8") or "8"), ktype=ktype_val) if c else []
+                if discovered:
+                    watchlist = discovered
+            except Exception:
+                watchlist = []
+
+        # Style allowlist (Natural Language) filter
+        allowlist: List[str] = []
+        allow_enabled = False
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.style_symbols_enabled")  # type: ignore[name-defined]
+                if raw is not None:
+                    allow_enabled = str(raw).strip().lower() not in ("0","false","no")
+            except Exception:
+                allow_enabled = False
+            try:
+                if allow_enabled:
+                    import json as _json
+                    raw = get_setting("autopilot.style_symbols")  # type: ignore[name-defined]
+                    if raw:
+                        v = _json.loads(raw)
+                        if isinstance(v, list):
+                            allowlist = [str(s).strip() for s in v if s]
+            except Exception:
+                allowlist = []
+        if allow_enabled and allowlist:
+            wl0 = list(watchlist)
+            watchlist = [s for s in watchlist if s in set(allowlist)]
+            if wl0 and not watchlist:
+                self._log("style_allowlist_filtered_all", {"allow": allowlist[:10]})
+
+        if not watchlist and not discovery_only:
+            # Fallback to settings/env watchlist
+            watchlist_setting: List[str] = []
+            if _HAS_STORAGE:
+                try:
+                    raw = get_setting("autopilot.watchlist")  # type: ignore[name-defined]
+                    if raw:
+                        import json as _json
+                        v = _json.loads(raw)
+                        if isinstance(v, list):
+                            watchlist_setting = [str(s) for s in v]
+                except Exception:
+                    pass
+            watchlist_env = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA").split(",")
+            watchlist = watchlist_setting or watchlist_env
+        # final guard
+        if not watchlist and discovery_only:
+            # If completely empty in discovery-only mode, log and continue safely (no universe)
+            self._log("discovery_empty", {"mode": "discovery_only"})
+
+        # Universe with indicators (prefer unified market data when available)
         universe: List[Dict[str, Any]] = []
+        # feature cache per symbol to avoid thrashing bars fetches
+        import time as _time
+        now_ts = float(_time.time())
+        if not hasattr(self, "_feat_cache"):
+            self._feat_cache = {}
+            self._feat_cache_ts = {}
+        # Build indicators per symbol
         for sym in [s.strip() for s in watchlist if s.strip()]:
-            highs, lows, closes = _fetch_bars(sym, period="6mo", interval="1d")
+            highs: List[float] = []
+            lows: List[float] = []
+            closes: List[float] = []
+            used_fallback = False
+            # cache by sym and ttl
+            if sym in getattr(self, "_feat_cache_ts", {}) and (now_ts - self._feat_cache_ts.get(sym, 0.0) < bars_ttl):
+                feat = self._feat_cache.get(sym, {})
+                if feat:
+                    universe.append(dict(feat))
+                    continue
+            try:
+                from core.market_data import get_bars_safely  # type: ignore
+                bars, _source = get_bars_safely(c, sym, ktype_val, 220)
+                for b in bars:
+                    h = b.get("high", b.get("High", 0.0))
+                    l = b.get("low", b.get("Low", 0.0))
+                    cl = b.get("close", b.get("Close", 0.0))
+                    try:
+                        highs.append(float(h or 0.0))
+                        lows.append(float(l or 0.0))
+                        closes.append(float(cl or 0.0))
+                    except Exception:
+                        continue
+            except Exception:
+                used_fallback = True
+                h2, l2, c2 = _fetch_bars(sym, period="6mo", interval="1d")
+                highs, lows, closes = h2 or [], l2 or [], c2 or []
+
             if not closes:
-                universe.append(
-                    {"sym": sym, "px": 0.0, "atr": 0.0, "rsi": 50, "ma50": 0.0, "ma200": 0.0, "trend": "flat"}
-                )
+                universe.append({
+                    "sym": sym, "px": 0.0, "atr": 0.0, "rsi": 50, "ma50": 0.0, "ma200": 0.0, "trend": "flat",
+                })
                 continue
+
             px = float(closes[-1])
             ma50 = ind.sma(closes, 50)
             ma200 = ind.sma(closes, 200)
             rsi_val = int(round(ind.rsi(closes, 14)))
             atr_val = ind.atr(highs, lows, closes, 14)
             trend = ind.trend_from_mas(ma50, ma200)
-            universe.append({"sym": sym, "px": px, "atr": atr_val, "rsi": rsi_val, "ma50": ma50, "ma200": ma200, "trend": trend})
+            # extra features for ranking
+            prev_close = float(closes[-2]) if len(closes) >= 2 else px
+            change_1d_pct = ((px - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
+            atr_pct = (atr_val / px * 100.0) if px > 0 else 0.0
+            dist_ma50_pct = ((px - ma50) / ma50 * 100.0) if ma50 > 0 else 0.0
+            dist_ma200_pct = ((px - ma200) / ma200 * 100.0) if ma200 > 0 else 0.0
+            # simple percentile over available window
+            hi = max(closes) if closes else px
+            lo = min(closes) if closes else px
+            pct_rank_52w = ((px - lo) / (hi - lo) * 100.0) if hi > lo else 50.0
+            feat = {
+                "sym": sym, "px": px, "atr": atr_val, "rsi": rsi_val,
+                "ma50": ma50, "ma200": ma200, "trend": trend,
+                "atr_pct": atr_pct, "dist_ma50_pct": dist_ma50_pct, "dist_ma200_pct": dist_ma200_pct,
+                "change_1d_pct": change_1d_pct, "pct_rank_52w": pct_rank_52w,
+            }
+            universe.append(feat)
+            # update cache
+            try:
+                self._feat_cache[sym] = feat
+                self._feat_cache_ts[sym] = now_ts
+            except Exception:
+                pass
+
+        # Build simple strategy signals (compact, short TTL)
+        signals: List[Dict[str, Any]] = []
+        for u in universe:
+            s = u["sym"]
+            ma50 = float(u.get("ma50") or 0.0)
+            ma200 = float(u.get("ma200") or 0.0)
+            rsi_val = int(u.get("rsi") or 50)
+            if ma50 > 0 and ma200 > 0:
+                skew = (ma50 / ma200) - 1.0
+                if skew > 0.002:
+                    signals.append({
+                        "strategy": "ma_trend",
+                        "sym": s,
+                        "signal": "long",
+                        "strength": min(1.0, max(0.1, abs(skew) * 50)),
+                        "ttl_sec": 180,
+                        "metadata": {"ma_skew": skew},
+                    })
+                elif skew < -0.002:
+                    signals.append({
+                        "strategy": "ma_trend",
+                        "sym": s,
+                        "signal": "short",
+                        "strength": min(1.0, max(0.1, abs(skew) * 50)),
+                        "ttl_sec": 180,
+                        "metadata": {"ma_skew": skew},
+                    })
+            # RSI extremes
+            if rsi_val <= 30:
+                signals.append({
+                    "strategy": "rsi_extreme",
+                    "sym": s,
+                    "signal": "long",
+                    "strength": min(1.0, max(0.2, (30 - rsi_val) / 20.0)),
+                    "ttl_sec": 180,
+                    "metadata": {"rsi": rsi_val},
+                })
+            elif rsi_val >= 70:
+                signals.append({
+                    "strategy": "rsi_extreme",
+                    "sym": s,
+                    "signal": "short",
+                    "strength": min(1.0, max(0.2, (rsi_val - 70) / 20.0)),
+                    "ttl_sec": 180,
+                    "metadata": {"rsi": rsi_val},
+                })
+
+        # News (cached via settings); can be disabled via settings/env
+        news_enabled = True
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.use_news")  # type: ignore[name-defined]
+                if raw is not None:
+                    news_enabled = str(raw).strip().lower() not in ("0","false","no")
+            except Exception:
+                pass
+        if os.getenv("AUTOPILOT_USE_NEWS", None) is not None:
+            news_enabled = os.getenv("AUTOPILOT_USE_NEWS", "1").strip().lower() not in ("0","false","no")
+
+        news_items: List[Dict[str, Any]] = []
+        if news_enabled:
+            try:
+                from autopilot.news import get_news_bulk  # type: ignore
+                ttl_sec = int(os.getenv("AUTOPILOT_NEWS_TTL_SEC", "1800") or "1800")
+                news_items = get_news_bulk([u["sym"] for u in universe], ttl_sec=ttl_sec, max_items=2, cap=6)
+            except Exception:
+                news_items = []
+
+        # Load style summary and preferences from settings (optional)
+        style_summary: str = ""
+        prefs: Dict[str, Any] = {}
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.style_summary")  # type: ignore[name-defined]
+                if raw:
+                    style_summary = str(raw)
+            except Exception:
+                pass
+            try:
+                raw = get_setting("autopilot.prefs")  # type: ignore[name-defined]
+                if raw:
+                    import json as _json
+                    v = _json.loads(raw)
+                    if isinstance(v, dict):
+                        prefs = v
+            except Exception:
+                pass
+
+        # Rank symbols to trim universe for GPT (token budget)
+        # Build per-symbol signal strength and news tone maps
+        sig_strength: Dict[str, float] = {}
+        for s in signals:
+            sym = str(s.get("sym") or "")
+            if not sym:
+                continue
+            try:
+                sig_strength[sym] = sig_strength.get(sym, 0.0) + float(s.get("strength") or 0.0)
+            except Exception:
+                pass
+
+        news_tone: Dict[str, str] = {str(n.get("sym")): str(n.get("tone")) for n in news_items if n.get("sym")}
+
+        def _score(u: Dict[str, Any]) -> float:
+            s = 0.0
+            try:
+                s += min(10.0, abs(float(u.get("dist_ma50_pct") or 0.0))) * 0.6
+                s += min(10.0, abs(float(u.get("dist_ma200_pct") or 0.0))) * 0.4
+                s += min(8.0, abs(float(u.get("atr_pct") or 0.0))) * 0.4
+                s += min(10.0, abs((float(u.get("rsi") or 50) - 50.0) / 5.0)) * 0.5
+                s += min(10.0, abs(float(u.get("change_1d_pct") or 0.0))) * 0.2
+            except Exception:
+                pass
+            sym = str(u.get("sym") or "")
+            if sym:
+                s += (sig_strength.get(sym, 0.0) or 0.0) * 5.0
+                tn = news_tone.get(sym, "neutral")
+                if tn == "bullish" and u.get("trend") == "up":
+                    s += 2.0
+                if tn == "bearish" and u.get("trend") == "down":
+                    s += 2.0
+            return s
+
+        for u in universe:
+            try:
+                u["interest"] = round(_score(u), 3)
+            except Exception:
+                u["interest"] = 0.0
+
+        # Planner configuration (min_confidence, top_n) from settings/env
+        min_conf: float = 0.6
+        try:
+            if _HAS_STORAGE:
+                raw = get_setting("autopilot.min_confidence")  # type: ignore[name-defined]
+                if raw is not None:
+                    min_conf = float(raw)
+        except Exception:
+            pass
+        strict_prefs = False
+        try:
+            if _HAS_STORAGE:
+                raw = get_setting("autopilot.strict_prefs")  # type: ignore[name-defined]
+                if raw is not None:
+                    strict_prefs = str(raw).strip().lower() not in ("0","false","no")
+        except Exception:
+            strict_prefs = False
+        try:
+            top_n_setting = None
+            if _HAS_STORAGE:
+                top_n_setting = get_setting("autopilot.top_n")  # type: ignore[name-defined]
+            top_n = int(top_n_setting) if top_n_setting is not None else int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+        except Exception:
+            top_n = int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+        universe_sorted = sorted(universe, key=lambda x: float(x.get("interest") or 0.0), reverse=True)
+        for idx, u in enumerate(universe_sorted):
+            u["rank"] = idx + 1
+            # Suggested stop/take based on prefs (if set)
+            try:
+                sug: Dict[str, Any] = {}
+                if isinstance(prefs, dict):
+                    if float(prefs.get("stop_loss_pct") or 0) > 0:
+                        sug["stop_pct"] = float(prefs.get("stop_loss_pct")) * 100.0
+                    if float(prefs.get("take_profit_pct") or 0) > 0:
+                        sug["take_pct"] = float(prefs.get("take_profit_pct")) * 100.0
+                    mm = float(prefs.get("measured_move_atr_mult") or 0)
+                    if mm > 0:
+                        sug["take_atr_mult"] = mm
+                if u.get("atr") and u.get("px"):
+                    if "take_atr_mult" in sug:
+                        pass
+                    elif float(prefs.get("measured_move_atr_mult") or 0) > 0:
+                        sug["take_atr_mult"] = float(prefs.get("measured_move_atr_mult"))
+                u["suggested"] = sug
+            except Exception:
+                u["suggested"] = {}
+
+        universe_trimmed = universe_sorted[:top_n]
 
         ctx: Dict[str, Any] = {
             "timestamp": _utcnow_iso(),
@@ -263,9 +599,13 @@ class AutopilotManager:
             "account": account,
             "risk": risk,
             "positions": pos_norm,
-            "universe": universe,
-            "style_summary": "",
-            "strategy_signals": [],
+            "universe": universe_trimmed,
+            "universe_total": len(universe),
+            "style_summary": style_summary,
+            "prefs": prefs,
+            "planner": {"min_confidence": min_conf, "top_n": top_n, "strict_prefs": strict_prefs},
+            "strategy_signals": signals[:24],  # cap list length
+            "news": news_items,
         }
         return ctx
 
@@ -318,6 +658,12 @@ class AutopilotManager:
 
         self._log("planner_decisions", {"n": len(decisions)})
 
+        # Read min_confidence from ctx.planner (or settings fallback)
+        try:
+            min_conf = float(((ctx.get("planner") or {}).get("min_confidence")) or 0.6)
+        except Exception:
+            min_conf = 0.6
+
         for idx, d in enumerate(decisions):
             sym = getattr(d, "sym", None) or getattr(d, "symbol", None) or (d.get("sym") if isinstance(d, dict) else None) or (d.get("symbol") if isinstance(d, dict) else None)
             if not sym:
@@ -337,6 +683,89 @@ class AutopilotManager:
                 side = "sell" if cur_qty > 0 else "buy"
             else:
                 side = side_field
+
+            # Confidence gating
+            try:
+                conf = float(getattr(d, "confidence", None) or (d.get("confidence") if isinstance(d, dict) else 0.0) or 0.0)
+            except Exception:
+                conf = 0.0
+            if conf < float(min_conf):
+                self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
+                                   "symbol": sym, "side": side,
+                                   "qty": f"{getattr(d,'size_type','shares') if not isinstance(d, dict) else d.get('size_type','shares')}:{getattr(d,'size_value',0) if not isinstance(d, dict) else d.get('size_value',0)}",
+                                   "price": getattr(d, "limit_price", None) or (d.get("limit_price") if isinstance(d, dict) else None) or "",
+                                   "reason": f"low_confidence:{conf:.2f}<{min_conf:.2f}", "status": "planned"})
+                if _HAS_STORAGE:
+                    try:
+                        insert_action_log("autopilot_act", mode="auto",
+                                          symbol=sym, side=side.upper(), qty=0, price=None,
+                                          reason="low_confidence", status="planned",
+                                          extra={"conf": conf, "min_conf": min_conf})
+                    except Exception:
+                        pass
+                continue
+
+            # Strict prefs enforcement: require stop/take when prefs specify
+            try:
+                planner_cfg = ctx.get("planner") or {}
+                strict_flag = bool(planner_cfg.get("strict_prefs") or False)
+            except Exception:
+                strict_flag = False
+            if strict_flag and action == "open":
+                want_stop = bool(((ctx.get("prefs") or {}).get("stop_loss_pct") or 0) > 0)
+                want_take = bool(((ctx.get("prefs") or {}).get("take_profit_pct") or 0) > 0 or ((ctx.get("prefs") or {}).get("measured_move_atr_mult") or 0) > 0)
+                has_stop = bool(getattr(d, "stop", None) or (d.get("stop") if isinstance(d, dict) else None))
+                has_take = bool(getattr(d, "take_profit", None) or (d.get("take_profit") if isinstance(d, dict) else None))
+                missing = (want_stop and not has_stop) or (want_take and not has_take)
+                if missing:
+                    self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
+                                       "symbol": sym, "side": side,
+                                       "qty": f"{getattr(d,'size_type','shares') if not isinstance(d, dict) else d.get('size_type','shares')}:{getattr(d,'size_value',0) if not isinstance(d, dict) else d.get('size_value',0)}",
+                                       "price": getattr(d, "limit_price", None) or (d.get("limit_price") if isinstance(d, dict) else None) or "",
+                                       "reason": "strict_prefs_missing_stop_or_take", "status": "planned"})
+                    if _HAS_STORAGE:
+                        try:
+                            insert_action_log("autopilot_act", mode="auto",
+                                              symbol=sym, side=side.upper(), qty=0, price=None,
+                                              reason="strict_prefs", status="planned",
+                                              extra={"want_stop": want_stop, "has_stop": has_stop, "want_take": want_take, "has_take": has_take})
+                        except Exception:
+                            pass
+                    continue
+
+            # Optional auto-augmentation: if strict_prefs is OFF but prefs specify
+            # stop or take and the decision lacks them, annotate the action log to
+            # reflect what would be applied. (Execution service doesn't yet place
+            # OCOs; this is planning-time guidance + accountability.)
+            try:
+                planner_cfg = ctx.get("planner") or {}
+                strict_flag = bool(planner_cfg.get("strict_prefs") or False)
+            except Exception:
+                strict_flag = False
+
+            auto_augmented = False
+            aug_stop = None
+            aug_take = None
+            if not strict_flag and action == "open":
+                pr = (ctx.get("prefs") or {})
+                try:
+                    want_stop_val = float(pr.get("stop_loss_pct") or 0.0)
+                    want_take_pct = float(pr.get("take_profit_pct") or 0.0)
+                    want_take_atr = float(pr.get("measured_move_atr_mult") or 0.0)
+                except Exception:
+                    want_stop_val = 0.0; want_take_pct = 0.0; want_take_atr = 0.0
+
+                has_stop = bool(getattr(d, "stop", None) or (d.get("stop") if isinstance(d, dict) else None))
+                has_take = bool(getattr(d, "take_profit", None) or (d.get("take_profit") if isinstance(d, dict) else None))
+                if want_stop_val > 0 and not has_stop:
+                    aug_stop = {"type": "percent", "value": want_stop_val}
+                    auto_augmented = True
+                if (want_take_pct > 0 or want_take_atr > 0) and not has_take:
+                    if want_take_pct > 0:
+                        aug_take = {"type": "percent", "value": want_take_pct}
+                    else:
+                        aug_take = {"type": "atr", "mult": want_take_atr}
+                    auto_augmented = True
 
             last_px = float(last_prices.get(sym) or 0.0)
             est_qty = self._qty_from_size(d, last_px, equity)
@@ -407,8 +836,94 @@ class AutopilotManager:
                 try:
                     insert_action_log("autopilot_act", mode="auto",
                                       symbol=sym, side=side.upper(), qty=est_qty, price=limit_price,
-                                      reason="order", status=str(order.status.value),
-                                      extra={"order_id": order.order_id})
+                                      reason=("order_augmented" if auto_augmented else "order"), status=str(order.status.value),
+                                      extra={"order_id": order.order_id, "aug_stop": aug_stop, "aug_take": aug_take,
+                                             "has_stop": bool(getattr(d, "stop", None) or (d.get("stop") if isinstance(d, dict) else None)),
+                                             "has_take": bool(getattr(d, "take_profit", None) or (d.get("take_profit") if isinstance(d, dict) else None))})
+                except Exception:
+                    pass
+
+            # If entry filled immediately and we have augmented/declared stops/takes,
+            # place resting protective orders in SIM using stop/limit types.
+            try:
+                entry_filled = str(order.status.value) == "filled"
+            except Exception:
+                entry_filled = False
+            if entry_filled and (aug_stop or aug_take or getattr(d, "stop", None) or (d.get("stop") if isinstance(d, dict) else None) or getattr(d, "take_profit", None) or (d.get("take_profit") if isinstance(d, dict) else None)):
+                entry_px = order.avg_fill_price or last_px
+                stop_obj = getattr(d, "stop", None) or (d.get("stop") if isinstance(d, dict) else None) or aug_stop
+                take_obj = getattr(d, "take_profit", None) or (d.get("take_profit") if isinstance(d, dict) else None) or aug_take
+
+                def _tp_from(obj):
+                    if not obj:
+                        return None
+                    t = (obj.get("type") if isinstance(obj, dict) else getattr(obj, "type", None))
+                    if t == "percent":
+                        val = float((obj.get("value") if isinstance(obj, dict) else getattr(obj, "value", 0.0)) or 0.0)
+                        return entry_px * (1.0 + (val/100.0) if side=="buy" else 1.0 - (val/100.0))
+                    if t == "atr":
+                        atr = 0.0
+                        for u in ctx.get("universe", []):
+                            if u.get("sym") == sym:
+                                atr = float(u.get("atr") or 0.0)
+                                break
+                        mult = float((obj.get("mult") if isinstance(obj, dict) else getattr(obj, "mult", 0.0)) or 0.0)
+                        return entry_px + (atr*mult if side=="buy" else -atr*mult)
+                    if t == "price":
+                        return float((obj.get("value") if isinstance(obj, dict) else getattr(obj, "value", 0.0)) or 0.0)
+                    return None
+
+                def _sp_from(obj):
+                    if not obj:
+                        return None
+                    t = (obj.get("type") if isinstance(obj, dict) else getattr(obj, "type", None))
+                    if t == "percent":
+                        val = float((obj.get("value") if isinstance(obj, dict) else getattr(obj, "value", 0.0)) or 0.0)
+                        return entry_px * (1.0 - (val/100.0) if side=="buy" else 1.0 + (val/100.0))
+                    if t == "atr":
+                        atr = 0.0
+                        for u in ctx.get("universe", []):
+                            if u.get("sym") == sym:
+                                atr = float(u.get("atr") or 0.0)
+                                break
+                        mult = float((obj.get("mult") if isinstance(obj, dict) else getattr(obj, "mult", 0.0)) or 0.0)
+                        return entry_px - (atr*mult if side=="buy" else -atr*mult)
+                    if t == "price":
+                        return float((obj.get("value") if isinstance(obj, dict) else getattr(obj, "value", 0.0)) or 0.0)
+                    return None
+
+                tp_px = _tp_from(take_obj)
+                sp_px = _sp_from(stop_obj)
+
+                # Place take-profit as LIMIT and stop as STOP
+                try:
+                    if tp_px:
+                        tp_spec = OrderSpec(
+                            symbol=sym,
+                            side=OrderSide.sell if side=="buy" else OrderSide.buy,
+                            order_type=OrderType.limit,
+                            limit_price=float(tp_px),
+                            size_type="shares",
+                            size_value=float(est_qty),
+                            tif=TimeInForce.day,
+                            decision_id=idx,
+                        )
+                        exec_service.place_order(tp_spec, ctx_exec)
+                except Exception:
+                    pass
+                try:
+                    if sp_px:
+                        sp_spec = OrderSpec(
+                            symbol=sym,
+                            side=OrderSide.sell if side=="buy" else OrderSide.buy,
+                            order_type=OrderType.stop,
+                            limit_price=float(sp_px),
+                            size_type="shares",
+                            size_value=float(est_qty),
+                            tif=TimeInForce.day,
+                            decision_id=idx,
+                        )
+                        exec_service.place_order(sp_spec, ctx_exec)
                 except Exception:
                     pass
 
@@ -427,3 +942,52 @@ class AutopilotManager:
                 insert_action_log("autopilot", mode="auto", reason=reason, status="ok", extra=extra or {})
             except Exception:
                 pass
+
+    async def _maybe_sync_deals(self) -> None:
+        # refresh interval from settings (optional)
+        try:
+            if _HAS_STORAGE:
+                raw = get_setting("autopilot.deals_sync_sec")  # type: ignore[name-defined]
+                if raw is not None:
+                    self.deal_sync_sec = int(raw)
+        except Exception:
+            pass
+        # throttle
+        try:
+            import time as _time
+            now = float(_time.time())
+            if self.deal_sync_sec <= 0:
+                return
+            if (now - self._last_deal_sync_ts) < self.deal_sync_sec:
+                return
+            self._last_deal_sync_ts = now
+        except Exception:
+            return
+
+        c = self.get_client()
+        if c is None or not getattr(c, "connected", False):
+            return
+        # Try real fills first
+        inserted = 0
+        try:
+            recs = c.get_deals()
+            for r in recs or []:
+                oid = r.get("order_id") or r.get("orderId") or ""
+                code = r.get("code") or r.get("stock_code") or ""
+                side = str(r.get("trd_side") or r.get("side") or "").upper()
+                qty = float(r.get("deal_qty") or r.get("qty") or r.get("fill_qty") or 0)
+                price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
+                ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
+                if not code or not side or qty <= 0 or price <= 0 or not ts:
+                    continue
+                try:
+                    if _HAS_STORAGE:
+                        record_fill(str(oid), str(code), "BUY" if "BUY" in side else "SELL", qty, price, ts)  # type: ignore[name-defined]
+                        inserted += 1
+                except Exception:
+                    continue
+        except Exception:
+            inserted = 0
+
+        if inserted > 0:
+            self._log("deals_sync", {"inserted": inserted})
