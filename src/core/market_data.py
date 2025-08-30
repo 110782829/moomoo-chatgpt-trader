@@ -8,6 +8,8 @@ Moomoo; this only affects how the strategy reads price history.
 
 from __future__ import annotations
 from typing import Dict, Any, List, Tuple
+import contextlib
+import io
 import re
 
 # local client utils
@@ -69,7 +71,8 @@ def _bars_from_yf(symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
     # 1m data: 7 days available via period="7d". For others use wider period.
     period = "7d" if interval.endswith("m") else "60d"
 
-    df = yf.download(
+    # Suppress yfinance noisy stderr (e.g., delisted symbols). Try raise_errors flag if available.
+    dl_kwargs = dict(
         tickers=_symbol_for_yf(symbol),
         period=period,
         interval=interval,
@@ -77,6 +80,13 @@ def _bars_from_yf(symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
         progress=False,
         threads=False,
     )
+    df = None
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            df = yf.download(**dl_kwargs, raise_errors=False)  # type: ignore[call-arg]
+        except TypeError:
+            # Older yfinance without raise_errors
+            df = yf.download(**dl_kwargs)
     if df is None or df.empty:
         return []
 

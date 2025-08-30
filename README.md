@@ -8,6 +8,7 @@ Core capabilities:
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
 - Local SQLite persistence for orders, fills, and bot action logs
+- Sync recent fills via `POST /exec/sync/deals`
 
 ## Prerequisites
 
@@ -52,6 +53,7 @@ Core capabilities:
    ```bash
    uvicorn --app-dir src server:app --reload --port 8000
    ```
+   The server restores the last saved session on start.
 
 5) Run the desktop UI (Tauri + React)
 
@@ -64,6 +66,7 @@ Core capabilities:
    ```
 
    The UI uses `VITE_API_BASE` (defaults to `http://127.0.0.1:8000`).
+   It detects an active session automatically.
 ## Notes
 
 - Paper trading is strongly recommended while testing. Real trading requires careful risk limits and explicit enablement.

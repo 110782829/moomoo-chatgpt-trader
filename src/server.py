@@ -1,9 +1,9 @@
 '''
-Start command: uvicorn --app-dir src server:app --reload --port 8000"
+Start command: uvicorn --app-dir src server:app --reload --port 8000
 '''
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
-from typing import List, Optional 
+from typing import List, Optional, Dict 
 import os
 import json
 from datetime import datetime
@@ -27,13 +27,17 @@ try:
     from routers import exec_orders as exec_orders_router
 except Exception:
     exec_orders_router = None  # type: ignore
+try:
+    from routers import exec_sync as exec_sync_router
+except Exception:
+    exec_sync_router = None  # type: ignore
 
 
 # --- Internal modules ---
 from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
 from core.futu_client import TrdEnv
-from core.session import load_session, save_session, clear_session
+from core.session import load_session, save_session, clear_session, reconnect_from_session
 from risk.limits import enforce_order_limits
 
 # Automation (scheduler + storage + strategy step)
@@ -86,6 +90,8 @@ app = FastAPI(title="Moomoo ChatGPT Trader API")
 init_execution(app)  # ensure SIM tables exist
 if exec_orders_router is not None:
     app.include_router(exec_orders_router.router)
+if exec_sync_router is not None:
+    app.include_router(exec_sync_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -286,11 +292,16 @@ except Exception:
 
 @app.on_event("startup")
 async def _on_startup():
-    # Start scheduler if automation modules are importable
     global scheduler
+    try:
+        c = reconnect_from_session()
+        if c:
+            set_client(c)
+    except Exception:
+        pass
     if _AUTOMATION_AVAILABLE:
         init_db()
-        scheduler = TraderScheduler(get_client)  # pass accessor
+        scheduler = TraderScheduler(get_client)
         scheduler.register("ma_crossover", ma_crossover_step)
         scheduler.start()
 
@@ -308,6 +319,24 @@ async def _on_shutdown():
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/debug/bars")
+def debug_bars(symbol: str, ktype: str = "K_DAY", n: int = 120):
+    """
+    Fetch recent bars via unified provider to help diagnose planner idling.
+    Returns source ('futu' or 'yfinance'), count, and last 3 rows.
+    """
+    try:
+        c = get_client()
+    except Exception:
+        c = None
+    try:
+        bars, source = get_bars_safely(c, symbol, ktype, n)
+        sample = bars[-3:] if isinstance(bars, list) else []
+        return {"symbol": symbol, "ktype": ktype, "source": source, "count": (len(bars) if isinstance(bars, list) else 0), "last": sample}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Connection & accounts ---
@@ -398,6 +427,45 @@ def accounts_active():
         "account_id": c.account_id,
         "trd_env": "SIMULATE" if getattr(c, "env", None) == TrdEnv.SIMULATE else "REAL"
     }
+
+@app.get("/accounts/assets")
+def accounts_assets():
+    """
+    Best-effort account assets snapshot to help verify the selected account.
+    - In 'moomoo' mode: queries broker via accinfo_query if available.
+    - In 'sim' mode: estimates from SIM positions' market value (no cash tracking).
+    """
+    # Prefer execution mode to decide source
+    try:
+        from execution.container import get_mode, get_execution  # type: ignore
+        mode = get_mode()
+    except Exception:
+        mode = "sim"
+        get_execution = lambda: None  # type: ignore
+
+    if mode == "moomoo":
+        c = get_client()
+        if c is None or not getattr(c, "connected", False):
+            raise HTTPException(status_code=400, detail="Not connected")
+        try:
+            info = c.get_account_assets()  # type: ignore[attr-defined]
+            return {"mode": "moomoo", **info}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch broker assets: {e}")
+
+    # SIM fallback: sum MV across positions
+    try:
+        exec_service = get_execution()
+    except Exception:
+        exec_service = None
+    equity = None
+    if exec_service is not None and hasattr(exec_service, "list_positions"):
+        try:
+            poss = exec_service.list_positions() or []
+            equity = sum(float(p.get("mv") or 0.0) for p in poss)
+        except Exception:
+            equity = None
+    return {"mode": "sim", "equity": equity, "bp": None, "cash": None}
 
 @app.get("/debug/accounts_raw")
 def accounts_raw():
@@ -1213,6 +1281,17 @@ async def autopilot_status():
         st["stats"] = stats
     except Exception:
         pass
+    # Planner meta for UI (provider + enabled)
+    try:
+        provider = (os.getenv("PLANNER_PROVIDER", "stub") or "stub").strip().lower()
+        has_key = bool((os.getenv("OPENAI_API_KEY", "") or "").strip())
+        st["planner_info"] = {
+            "provider": provider,
+            "enabled": (provider == "gpt" and has_key),
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        }
+    except Exception:
+        pass
     return st
 
 @autopilot_router.post("/preview")
@@ -1265,9 +1344,6 @@ async def _autopilot_shutdown():
     except Exception:
         pass
 
-# mount the router
-app.include_router(autopilot_router)
- 
 # ---------------- Autopilot: Preferences, Style, Watchlist ---------------- #
 
 class AutopilotPrefs(BaseModel):
@@ -1419,6 +1495,24 @@ def autopilot_style_post(body: StyleUpdate):
         _set_json_setting("autopilot.style_symbols", syms)
     insert_action_log("style_update", mode=_two_mode(), reason="user_update", status="ok", extra={"len": len(raw), "symbols": len(syms)})  # type: ignore[name-defined]
     return {"raw": raw, "summary": summary, "symbols": syms}
+
+
+@autopilot_router.delete("/style")
+def autopilot_style_delete():
+    """
+    Clear stored natural-language style and its summary (and any derived symbols).
+    Safe no-op if nothing is stored.
+    """
+    try:
+        _set_json_setting("autopilot.style_raw", "")
+        _set_json_setting("autopilot.style_summary", "")
+        # Also clear derived symbols and toggle (best-effort)
+        _set_json_setting("autopilot.style_symbols", [])
+        _set_json_setting("autopilot.style_symbols_enabled", False)
+        insert_action_log("style_update", mode=_two_mode(), reason="delete", status="ok", extra={})  # type: ignore[name-defined]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete style: {e}")
+    return {"raw": "", "summary": "", "symbols": []}
 
 
 class StyleSymbolsUpdate(BaseModel):
@@ -1576,6 +1670,7 @@ def autopilot_planner_put(body: PlannerUpdate):
 class NewsUpdate(BaseModel):
     enabled: bool | None = None
     ttl_sec: int | None = None
+    provider: str | None = None  # 'heuristic' | 'gpt'
 
 
 @autopilot_router.get("/news")
@@ -1593,7 +1688,15 @@ def autopilot_news_get():
         ttl = 0
     if ttl <= 0:
         ttl = int(os.getenv("AUTOPILOT_NEWS_TTL_SEC", "1800") or "1800")
-    return {"enabled": enabled, "ttl_sec": ttl}
+    # provider (default heuristic)
+    provider = "heuristic"
+    try:
+        pv = _get_json_setting("autopilot.news_provider", None)
+        if isinstance(pv, str) and pv.strip():
+            provider = pv.strip()
+    except Exception:
+        pass
+    return {"enabled": enabled, "ttl_sec": ttl, "provider": provider}
 
 
 @autopilot_router.put("/news")
@@ -1604,6 +1707,12 @@ def autopilot_news_put(body: NewsUpdate):
     if isinstance(body.ttl_sec, int) and body.ttl_sec > 0:
         _set_json_setting("autopilot.news_ttl_sec", int(body.ttl_sec))
         insert_action_log("news_update", mode=_two_mode(), reason="ttl_update", status="ok", extra={"ttl_sec": int(body.ttl_sec)})  # type: ignore[name-defined]
+    if isinstance(body.provider, str) and body.provider.strip():
+        pv = body.provider.strip().lower()
+        if pv not in ("heuristic", "gpt"):
+            raise HTTPException(status_code=400, detail="provider must be 'heuristic' or 'gpt'")
+        _set_json_setting("autopilot.news_provider", pv)
+        insert_action_log("news_update", mode=_two_mode(), reason="provider", status="ok", extra={"provider": pv})  # type: ignore[name-defined]
     return autopilot_news_get()
 
 
@@ -1651,3 +1760,66 @@ def autopilot_data_put(body: DataUpdate):
         _set_json_setting("autopilot.deals_sync_sec", int(body.deals_sync_sec))
         insert_action_log("data_update", mode=_two_mode(), reason="deals_sync", status="ok", extra={"deals_sync_sec": int(body.deals_sync_sec)})  # type: ignore[name-defined]
     return autopilot_data_get()
+
+
+# ---- Signals settings (enable + per-strategy weights) ----
+class SignalsSettings(BaseModel):
+    enabled: Optional[bool] = None
+    strategies: Optional[Dict[str, bool]] = None
+    weights: Optional[Dict[str, float]] = None
+
+
+@autopilot_router.get("/signals")
+def autopilot_signals_get():
+    # defaults
+    enabled = True
+    strategies: Dict[str, bool] = {"macd_cross": True, "bb_breakout": True, "stoch_rsi_extreme": True}
+    weights: Dict[str, float] = {"macd_cross": 1.0, "bb_breakout": 1.0, "stoch_rsi_extreme": 1.0}
+    try:
+        raw = _get_json_setting("autopilot.signals.enabled", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    try:
+        m = _get_json_setting("autopilot.signals.strategies", None)
+        if isinstance(m, dict):
+            strategies.update({str(k): bool(v) for k, v in m.items()})
+    except Exception:
+        pass
+    try:
+        w = _get_json_setting("autopilot.signals.weights", None)
+        if isinstance(w, dict):
+            for k, v in w.items():
+                try:
+                    weights[str(k)] = float(v)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return {"enabled": enabled, "strategies": strategies, "weights": weights}
+
+
+@autopilot_router.put("/signals")
+def autopilot_signals_put(body: SignalsSettings):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.signals.enabled", bool(body.enabled))
+        insert_action_log("signals_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if isinstance(body.strategies, dict):
+        # sanitize to booleans
+        clean = {str(k): bool(v) for k, v in body.strategies.items()}
+        _set_json_setting("autopilot.signals.strategies", clean)
+        insert_action_log("signals_update", mode=_two_mode(), reason="strategies", status="ok", extra={"n": len(clean)})  # type: ignore[name-defined]
+    if isinstance(body.weights, dict):
+        clean_w: Dict[str, float] = {}
+        for k, v in body.weights.items():
+            try:
+                clean_w[str(k)] = float(v)
+            except Exception:
+                continue
+        _set_json_setting("autopilot.signals.weights", clean_w)
+        insert_action_log("signals_update", mode=_two_mode(), reason="weights", status="ok", extra={"n": len(clean_w)})  # type: ignore[name-defined]
+    return autopilot_signals_get()
+
+# Ensure all /autopilot routes are registered only after definitions
+app.include_router(autopilot_router)

@@ -222,6 +222,53 @@ class MoomooExecutionService(ExecutionService):
             out.append(FillRecord(fill_id=r["fill_id"], order_id=r["order_id"], ts=r["ts"], symbol=r["symbol"], qty=r["qty"], price=r["price"]))
         return out
 
+    def sync_deals(self, recs: List[Dict[str, Any]]) -> int:
+        """Insert fills and update orders."""
+        inserted = 0
+        for r in recs:
+            oid = str(r.get("order_id") or r.get("orderId") or "")
+            code = str(r.get("code") or r.get("stock_code") or "")
+            qty = float(r.get("deal_qty") or r.get("qty") or r.get("fill_qty") or 0)
+            price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
+            ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
+            if not oid or not code or qty <= 0 or price <= 0 or not ts:
+                continue
+            cur = self.conn.execute(
+                "SELECT 1 FROM fills WHERE order_id=? AND ts=?", (oid, ts)
+            ).fetchone()
+            if cur:
+                continue
+            fid = uuid.uuid4().hex
+            self.conn.execute(
+                "INSERT INTO fills (fill_id, order_id, ts, symbol, qty, price) VALUES (?, ?, ?, ?, ?, ?)",
+                (fid, oid, ts, code, int(qty), float(price)),
+            )
+            o = self.conn.execute(
+                "SELECT filled_qty, requested_qty, avg_fill_price FROM orders WHERE order_id=?",
+                (oid,),
+            ).fetchone()
+            if o:
+                prev_qty = int(o["filled_qty"] or 0)
+                prev_avg = float(o["avg_fill_price"] or 0.0)
+                new_qty = prev_qty + int(qty)
+                new_avg = (
+                    (prev_avg * prev_qty + float(price) * int(qty)) / new_qty
+                    if new_qty > 0
+                    else 0.0
+                )
+                status = (
+                    OrderStatus.filled.value
+                    if new_qty >= int(o["requested_qty"] or 0)
+                    else OrderStatus.open.value
+                )
+                self.conn.execute(
+                    "UPDATE orders SET filled_qty=?, avg_fill_price=?, status=?, updated_at=? WHERE order_id=?",
+                    (new_qty, new_avg, status, _utc_ts(), oid),
+                )
+            inserted += 1
+        self.conn.commit()
+        return inserted
+
     # Optional positions view for UI (best-effort via broker)
     def list_positions(self) -> List[Dict[str, Any]]:
         try:

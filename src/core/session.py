@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from core.moomoo_client import MoomooClient
+from core.futu_client import TrdEnv
+
 SESSION_PATH = Path("data/session.json")
 
 
@@ -36,3 +39,28 @@ def clear_session() -> None:
             SESSION_PATH.unlink()
     except Exception:
         pass
+
+
+def reconnect_from_session() -> Optional[MoomooClient]:
+    """Try connect using saved session."""
+    s = load_session()
+    if not s:
+        return None
+    host = s.get("host")
+    port = s.get("port")
+    if not host or not port:
+        return None
+    try:
+        c = MoomooClient(host, int(port))
+        c.connect()
+        acc = s.get("account_id")
+        env = s.get("trd_env")
+        if acc and env:
+            env_obj = TrdEnv.SIMULATE if str(env).upper() == "SIMULATE" else TrdEnv.REAL
+            try:
+                c.set_account(str(acc), env_obj)
+            except Exception:
+                pass
+        return c
+    except Exception:
+        return None

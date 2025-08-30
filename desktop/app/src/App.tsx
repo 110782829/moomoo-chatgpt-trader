@@ -410,10 +410,10 @@ async function GET<T>(path: string, params?: Record<string, any>): Promise<T> {
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<T>;
 }
-async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" | "PATCH" = "POST"): Promise<T> {
+async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" | "PATCH" | "DELETE" = "POST"): Promise<T> {
   const r = await fetch(new URL(path, API_BASE), {
     method, headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
+    body: method==="DELETE" ? undefined : (body ? JSON.stringify(body) : undefined),
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json() as Promise<T>;
@@ -435,8 +435,8 @@ function statusTag(status?: string) {
   return <span className={cls}>{status ?? ""}</span>;
 }
 
-// ---------- API bindings ----------
-const api = {
+  // ---------- API bindings ----------
+  const api = {
   // connection
   connect: (host: string, port: number, client_id: number) => SEND("/connect", { host, port, client_id }),
   accountsActive: () => GET<{ account_id: string | null; trd_env: string | null }>("/accounts/active"),
@@ -456,6 +456,7 @@ const api = {
   putRiskConfig: (cfg: RiskConfig) => SEND<RiskConfig>("/risk/config", cfg, "PUT"),
   getRiskStatus: () => GET<{ ok: boolean; config: RiskConfig; open_positions: number | null }>("/risk/status"),
   getPnlToday: () => GET<{ date: string; realized_pnl: number }>("/pnl/today"),
+  getAccountAssets: () => GET<{ mode:string; equity?: number|null; bp?: number|null; cash?: number|null }>("/accounts/assets"),
 
   flattenAll: (symbols?: string[]) => SEND("/positions/flatten", symbols?.length ? { symbols } : {}),
   listStrategies: () => GET<Array<{ id: number; name: string; active: boolean; symbol: string }>>("/automation/strategies"),
@@ -480,16 +481,20 @@ const api = {
   putAutoPrefs: (prefs: any) => SEND("/autopilot/prefs", prefs, "PUT"),
   getAutoStyle: () => GET<{ raw: string; summary: string }>("/autopilot/style"),
   postAutoStyle: (text: string) => SEND<{ raw: string; summary: string }>("/autopilot/style", { text }),
+  deleteAutoStyle: () => SEND<{ raw: string; summary: string }>("/autopilot/style", undefined, "DELETE"),
   // watchlist endpoints intentionally not used in UI for now
   getDiscovery: () => GET<{ enabled: boolean; only: boolean; seed: string[]; preview: string[] }>("/autopilot/discovery"),
   putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
-  getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number }>("/autopilot/news"),
-  putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number }) => SEND("/autopilot/news", payload, "PUT"),
-  getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number }>("/autopilot/data"),
-  putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number }) => SEND("/autopilot/data", payload, "PUT"),
+    getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number; provider?: string }>("/autopilot/news"),
+    putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number; provider?: string }) => SEND("/autopilot/news", payload, "PUT"),
+    getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number }>("/autopilot/data"),
+    putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number }) => SEND("/autopilot/data", payload, "PUT"),
+    getSignalsSettings: () => GET<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>("/autopilot/signals"),
+    putSignalsSettings: (payload: Partial<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>) => SEND("/autopilot/signals", payload, "PUT"),
   getExecMode: () => GET<{ mode: "sim"|"moomoo" }>("/execution/mode"),
   putExecMode: (mode: "sim"|"moomoo") => SEND("/execution/mode", { mode }, "PUT"),
   syncDealsNow: () => SEND("/sync/deals", {}),
+  syncExecDeals: () => SEND("/exec/sync/deals", {}),
   getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
   putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
 
@@ -611,8 +616,20 @@ export default function App() {
     (async () => {
       try {
         const st = await api.sessionStatus();
-        setConnected(!!st.connected);
-        setActiveAccount(st.active_account || null);
+        if (st.connected) {
+          setConnected(true);
+          setActiveAccount(st.active_account || null);
+        } else if (st.saved?.host && st.saved?.port) {
+          try {
+            await api.connect(String(st.saved.host), Number(st.saved.port), Number(clientId));
+            if (st.saved?.account_id && st.saved?.trd_env) {
+              try { await api.selectAccount(String(st.saved.account_id), st.saved.trd_env); } catch {}
+            }
+            const st2 = await api.sessionStatus();
+            setConnected(!!st2.connected);
+            setActiveAccount(st2.active_account || null);
+          } catch {}
+        }
         if (st.saved?.host) setHost(String(st.saved.host));
         if (st.saved?.port) setPort(Number(st.saved.port));
         if (st.saved?.account_id) setAccountId(String(st.saved.account_id));
@@ -734,6 +751,7 @@ useEffect(() => {
       toast.show(`Flatten sent: ${sym}`);
       await refreshPositions(false);
       await refreshStatus(false);
+      await refreshExec(false);
     } catch (e:any) {
       toast.show(`Flatten failed: ${brief(e)}`);
     }
@@ -751,6 +769,7 @@ useEffect(() => {
       toast.show(`Flatten sent: ${symbols.join(", ")}`);
       await refreshPositions(false);
       await refreshStatus(false);
+      await refreshExec(false);
     } catch (e:any) {
       toast.show(`Flatten failed: ${brief(e)}`);
     }
@@ -770,6 +789,7 @@ useEffect(() => {
   async function refreshExec(show = true) {
     try {
       setExLoading(true);
+      try { await api.syncExecDeals(); } catch {}
       const q: any = {};
       if (exSymbol) q.symbol = exSymbol;
       setOrders(await api.listExecOrders(q));
@@ -1000,6 +1020,8 @@ async function openExplain(r:any) {
           <div className="panel compact">
             <h2 style={{marginTop:0}}>Data & Discovery</h2>
             <DiscoverySettings />
+            <div style={{margin:"12px 0", borderTop:"1px solid var(--border)"}} />
+            <SignalsSettings />
           </div>
           {/* Trading Behavior (Style) */}
           <div className="panel compact">
@@ -1023,13 +1045,20 @@ async function openExplain(r:any) {
           <div className="grid-3">
             <div className="card card-lg" style={{gridColumn:"span 2"}}>
   <h3>Autopilot Health</h3>
-  <div className="health">
+    <div className="health">
     <div className="health-top">
       <span className={`badge ${autoStatus?.on ? "good" : "bad"} health-badge`}>
         {autoStatus?.on ? "ON" : "OFF"}
       </span>
-      <span className="badge good health-badge" title="Planner model">
-        {"GPT: " + (autoStatus?.model || autoStatus?.stats?.model || "gpt 4o-mini")}
+      <span
+        className={`badge ${(autoStatus as any)?.planner_info?.enabled ? "good" : "bad"} health-badge`}
+        title="Planner provider/model"
+      >
+        {(() => {
+          const pi:any = (autoStatus as any)?.planner_info || {};
+          const model = pi.model || (autoStatus as any)?.stats?.model || "stub";
+          return pi.enabled ? `GPT: ${model}` : `Planner: Stub`;
+        })()}
       </span>
     </div>
     <div className="health-metrics">
@@ -1312,6 +1341,47 @@ async function openExplain(r:any) {
             </pre>
             <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
               <button className="btn" onClick={()=>setPreviewOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
+      {explainOpen && createPortal(
+        <div id="explain-modal" style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
+        }} onClick={()=>setExplainOpen(false)}>
+          <div className="panel" style={{width: "min(860px, 94vw)", maxHeight: "80vh", overflow: "auto"}} onClick={e=>e.stopPropagation()}>
+            <h2 style={{marginTop:0}}>Decision Details</h2>
+            <div className="help" style={{marginBottom:8}}>What the bot was thinking and why it acted</div>
+            {(() => {
+              try {
+                const row:any = explainRow || {};
+                const extra:any = row.extra_json ? JSON.parse(row.extra_json) : (row.extra || {});
+                const sigs:any[] = Array.isArray(extra?.signals_used) ? extra.signals_used : [];
+                const tone = extra?.news_tone;
+                const conf = extra?.conf; const minc = extra?.min_conf;
+                if (!sigs.length && !tone && conf==null) return null;
+                return (
+                  <div className="panel compact" style={{background:"#0e1320", marginBottom:8}}>
+                    <div className="row" style={{gap:8, flexWrap:"wrap"}}>
+                      {typeof conf === 'number' && typeof minc === 'number' && (
+                        <span className="badge" title="Confidence gate">conf {conf.toFixed(2)} ≥ {minc.toFixed(2)}</span>
+                      )}
+                      {tone && <span className="badge" title="News tone">news {String(tone)}</span>}
+                      {sigs.slice(0,6).map((s:any, i:number)=> (
+                        <span key={i} className="badge" title={`${s.strategy} ${s.signal}`}>{s.strategy}:{s.signal} {Number(s.strength||0).toFixed(2)}</span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              } catch { return null; }
+            })()}
+            <pre style={{whiteSpace:"pre-wrap", background:"#0b1320", padding:"12px", borderRadius:"8px", border:"1px solid var(--border)"}}>
+{JSON.stringify(explainData || explainRow, null, 2)}
+            </pre>
+            <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
+              <button className="btn" onClick={()=>setExplainOpen(false)}>Close</button>
             </div>
           </div>
         </div>, document.body
@@ -1612,6 +1682,8 @@ function ActivityLog(props: {
 
   const [coverage, setCoverage] = useState<{ exits?: number; stops?: number; tp?: number } | null>(null);
   const [covAt, setCovAt] = useState<string>("—");
+  const [assets, setAssets] = useState<{ mode:string; equity?: number|null; bp?: number|null }|null>(null);
+  const [assetsAt, setAssetsAt] = useState<string>("—");
 
   useEffect(() => { (async ()=>{
     try {
@@ -1619,6 +1691,11 @@ function ActivityLog(props: {
       const s = st?.stats || {};
       setCoverage({ exits: Number(s?.exits_coverage_pct ?? NaN), stops: Number(s?.stops_coverage_pct ?? NaN), tp: Number(s?.tp_coverage_pct ?? NaN) });
       setCovAt(new Date().toLocaleTimeString());
+    } catch {}
+    try {
+      const a:any = await api.getAccountAssets();
+      setAssets(a || null);
+      setAssetsAt(new Date().toLocaleTimeString());
     } catch {}
   })(); }, [logsAt, logsSource, logSince]);
 
@@ -1658,6 +1735,13 @@ function ActivityLog(props: {
             <span className="help">Last updated: {logsAt}</span>
           </div>
         </div>
+
+        {assets && (
+          <div className="row" style={{gap:12, margin:"8px 0"}}>
+            <span className="badge" title={`Updated ${assetsAt}`}>{assets.mode === 'moomoo' ? 'Broker' : 'SIM'} Net Assets: {assets?.equity!=null ? `$${Number(assets.equity).toFixed(2)}` : '—'}</span>
+            {assets?.bp!=null && <span className="badge" title="Buying Power">BP: {`$${Number(assets.bp).toFixed(2)}`}</span>}
+          </div>
+        )}
 
         {coverage && isFinite(coverage.exits||NaN) && (
           <div className="row" style={{gap:12, margin:"8px 0"}}>
@@ -1921,10 +2005,6 @@ function StrategyCatalog({ connected }: { connected: boolean }) {
 function PresetPicker({ presets, onLoad, onDelete }:{ presets: Record<string, any>, onLoad:(n:string)=>void, onDelete:(n:string)=>void }) {
   const names = Object.keys(presets);
   const [sel, setSel] = useState(names[0] || "");
-  // local explain modal state (was referenced but not defined)
-  const [explainOpen, setExplainOpen] = useState(false);
-  const [explainRow, setExplainRow] = useState<any|null>(null);
-  const [explainData, setExplainData] = useState<any|null>(null);
   useEffect(()=>{ if (!names.includes(sel)) setSel(names[0] || ""); }, [JSON.stringify(names)]);
   if (!names.length) return <span className="help">No presets yet.</span>;
   return (
@@ -1941,25 +2021,6 @@ function PresetPicker({ presets, onLoad, onDelete }:{ presets: Record<string, an
       </div>
       <button className="btn" onClick={()=>onLoad(sel)} disabled={!sel}>Load</button>
       <button className="btn red" onClick={()=>onDelete(sel)} disabled={!sel}>Delete</button>
-    
-      {explainOpen && createPortal(
-        <div id="explain-modal" style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
-          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
-        }} onClick={()=>setExplainOpen(false)}>
-          <div className="panel" style={{width: "min(860px, 94vw)", maxHeight: "80vh", overflow: "auto"}} onClick={e=>e.stopPropagation()}>
-            <h2 style={{marginTop:0}}>Decision Details</h2>
-            <div className="help" style={{marginBottom:8}}>What the bot was thinking and why it acted</div>
-            <pre style={{whiteSpace:"pre-wrap", background:"#0b1320", padding:"12px", borderRadius:"8px", border:"1px solid var(--border)"}}>
-{JSON.stringify(explainData || explainRow, null, 2)}
-            </pre>
-            <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
-              <button className="btn" onClick={()=>setExplainOpen(false)}>Close</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
 </div>
   );
 }
@@ -1977,16 +2038,91 @@ function StrategyPicker() {
     { key: "news-momo", name: "News Momentum", desc: "Spike-follow with risk caps" },
   ];
   const [selected, setSelected] = useLocalStorage<string[]>("pref.strategies", ["ma-crossover"]);
+
+  // Map UI keys to backend signal strategy keys
+  function mapToBackend(key: string): { signals?: Record<string, boolean>; newsEnabled?: boolean } {
+    switch (key) {
+      case "ma-crossover":
+        return { signals: { macd_cross: true } };
+      case "rsi-gate":
+        return { signals: { stoch_rsi_extreme: true } };
+      case "breakout-retest":
+        return { signals: { bb_breakout: true } };
+      case "news-momo":
+        return { newsEnabled: true };
+      default:
+        return {};
+    }
+  }
+
+  // Initialize from backend so toggles reflect real state
+  useEffect(() => { (async () => {
+    try {
+      const sig = await api.getSignalsSettings();
+      const news = await api.getNewsSettings();
+      const enabled: string[] = [];
+      if (sig?.strategies?.macd_cross) enabled.push("ma-crossover");
+      if (sig?.strategies?.stoch_rsi_extreme) enabled.push("rsi-gate");
+      if (sig?.strategies?.bb_breakout) enabled.push("breakout-retest");
+      if (news?.enabled) enabled.push("news-momo");
+      // keep any previously selected unknowns
+      const known = new Set(CATALOG.map(s=>s.key));
+      const prev = (selected || []).filter(k => !known.has(k));
+      const merged = Array.from(new Set([...prev, ...enabled]));
+      setSelected(merged);
+    } catch {}
+  })(); }, []);
+
+  async function persistToggle(key: string, on: boolean) {
+    // Persist to backend based on mapping
+    const mapped = mapToBackend(key);
+    try {
+      if (mapped.signals) {
+        // read existing to merge
+        const cur = await api.getSignalsSettings();
+        const next = { ...(cur?.strategies || {}) } as Record<string, boolean>;
+        for (const k of Object.keys(mapped.signals)) next[k] = on;
+        await api.putSignalsSettings({ strategies: next });
+      } else if (mapped.newsEnabled !== undefined) {
+        await api.putNewsSettings({ enabled: on });
+      } else {
+        // Unsupported today: no-op (kept locally)
+      }
+    } catch {}
+  }
   function toggle(k: string) {
-    setSelected(sel => sel.includes(k) ? sel.filter(x=>x!==k) : sel.concat(k));
+    setSelected(sel => {
+      const on = !sel.includes(k);
+      persistToggle(k, on);
+      return on ? sel.concat(k) : sel.filter(x=>x!==k);
+    });
   }
   return (
     <div className="stack">
       <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
         <div className="help" style={{fontWeight:700}}>Selected: <b>{selected.length}</b> / {CATALOG.length}</div>
         <div className="row" style={{gap:8}}>
-          <button className="btn" onClick={()=>setSelected(CATALOG.map(s=>s.key))}>All</button>
-          <button className="btn red" onClick={()=>setSelected([])}>Clear</button>
+          <button className="btn" onClick={async()=>{
+            const keys = CATALOG.map(s=>s.key);
+            setSelected(keys);
+            try {
+              const cur = await api.getSignalsSettings();
+              const next = { ...(cur?.strategies || {}) } as Record<string, boolean>;
+              next.macd_cross = true; next.stoch_rsi_extreme = true; next.bb_breakout = true;
+              await api.putSignalsSettings({ strategies: next });
+              await api.putNewsSettings({ enabled: true });
+            } catch {}
+          }}>All</button>
+          <button className="btn red" onClick={async()=>{
+            setSelected([]);
+            try {
+              const cur = await api.getSignalsSettings();
+              const next = { ...(cur?.strategies || {}) } as Record<string, boolean>;
+              next.macd_cross = false; next.stoch_rsi_extreme = false; next.bb_breakout = false;
+              await api.putSignalsSettings({ strategies: next });
+              await api.putNewsSettings({ enabled: false });
+            } catch {}
+          }}>Clear</button>
         </div>
       </div>
       <div className="strat-grid">
@@ -2278,14 +2414,29 @@ function StyleAndWatchlist() {
     }
   }
 
+  async function deleteStyle() {
+    try {
+      setBusy(true);
+      await api.deleteAutoStyle();
+      setStyleRaw("");
+      setStyleSummary("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="stack">
       <div className="form-row">
         <div style={{flex:1}}>
           <div className="label">Style (natural language)</div>
           <textarea className="input" rows={4} value={styleRaw} onChange={e=>setStyleRaw(e.target.value)} placeholder="Describe your trading preferences, constraints, and style…" />
-          <div className="row" style={{justifyContent:"flex-end", marginTop:6}}>
-            <button className="btn brand" onClick={saveStyle} disabled={busy || !styleRaw.trim()}>Summarize & Save</button>
+          <div className="row" style={{justifyContent:"space-between", marginTop:6}}>
+            <div className="help">Write preferences like: "Focus on short-term trades, prefer small-caps, avoid biotech."</div>
+            <div className="row" style={{gap:8}}>
+              <button className="btn" onClick={deleteStyle} disabled={busy || (!styleRaw && !styleSummary)}>Delete Style</button>
+              <button className="btn brand" onClick={saveStyle} disabled={busy || !styleRaw.trim()}>Summarize & Save</button>
+            </div>
           </div>
         </div>
       </div>
@@ -2306,6 +2457,7 @@ function DiscoverySettings() {
   const [preview, setPreview] = useState<string[]>([]);
   const [newsEnabled, setNewsEnabled] = useState<boolean>(true);
   const [newsTtl, setNewsTtl] = useState<number>(1800);
+  const [newsProvider, setNewsProvider] = useState<string>("heuristic");
   const [ktype, setKtype] = useState<string>("K_DAY");
   const [barsTtl, setBarsTtl] = useState<number>(60);
   const [execMode, setExecMode] = useState<"sim"|"moomoo">("sim");
@@ -2324,6 +2476,7 @@ function DiscoverySettings() {
       const n = await api.getNewsSettings();
       setNewsEnabled(!!n?.enabled);
       setNewsTtl(Number(n?.ttl_sec || 1800));
+      if (n?.provider) setNewsProvider(String(n.provider));
     } catch {}
     try {
       const dset = await api.getDataSettings();
@@ -2348,7 +2501,7 @@ function DiscoverySettings() {
   async function saveNews() {
     setSaving(true);
     try {
-      await api.putNewsSettings({ enabled: newsEnabled, ttl_sec: Number(newsTtl)||1800 });
+      await api.putNewsSettings({ enabled: newsEnabled, ttl_sec: Number(newsTtl)||1800, provider: newsProvider });
       await api.putDataSettings({ ktype, bars_ttl_sec: Number(barsTtl)||60, deals_sync_sec: Number(dealsSync)||180 });
       await api.putExecMode(execMode);
     } finally { setSaving(false); }
@@ -2382,6 +2535,15 @@ function DiscoverySettings() {
             onChange={(v)=>setNewsEnabled(v==="true")}
             options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
             width={140}
+          />
+        </div>
+        <div>
+          <div className="label">News Provider</div>
+          <NiceSelect
+            value={newsProvider}
+            onChange={(v)=>setNewsProvider(v)}
+            options={[{value:"heuristic",label:"Heuristic"},{value:"gpt",label:"GPT"}]}
+            width={160}
           />
         </div>
         <div>
@@ -2430,6 +2592,73 @@ function DiscoverySettings() {
     <div className="help" style={{whiteSpace:"pre-wrap"}}>{preview?.length ? preview.join(", ") : "—"}</div>
   </div>
   <PlannerSettings />
+    </div>
+  );
+}
+
+function SignalsSettings() {
+  const [weights, setWeights] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  const [saving, setSaving] = useState<boolean>(false);
+
+  useEffect(() => { (async () => {
+    try {
+      const s = await api.getSignalsSettings();
+      setWeights(s?.weights || {});
+    } catch {}
+    setLoading(false);
+  })(); }, []);
+
+  function setWeight(name: string, v: number) {
+    setWeights(prev => ({ ...prev, [name]: v }));
+  }
+  async function save() {
+    setSaving(true);
+    try {
+      await api.putSignalsSettings({ weights });
+    } finally { setSaving(false); }
+  }
+
+  const stratNames = Object.keys(weights).length ? Object.keys(weights) : ["macd_cross","bb_breakout","stoch_rsi_extreme"];
+
+  return (
+    <div className="stack">
+      <h3 style={{margin:"4px 0 8px", fontSize:14, color:"var(--muted)", textTransform:"uppercase", letterSpacing:".06em"}}>Signal Weights</h3>
+      <div className="table-wrap" style={{marginTop:8}}>
+        <table className="table-modern">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th className="num" style={{width:160}}>Weight</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stratNames.map(name => (
+              <tr key={name}>
+                <td>{name}</td>
+                <td className="num">
+                  <input
+                    className="input"
+                    type="number"
+                    step={0.1}
+                    min={0}
+                    max={2}
+                    value={(weights[name] ?? 1.0)}
+                    onChange={e=>setWeight(name, Math.max(0, Math.min(2, parseFloat(e.target.value)||0)))}
+                    style={{maxWidth:120}}
+                  />
+                </td>
+              </tr>
+            ))}
+            {!stratNames.length && (
+              <tr><td colSpan={2}>No strategies found.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="row" style={{marginTop:10, justifyContent:"flex-end"}}>
+        <button className="btn brand" onClick={save} disabled={saving || loading}>{saving?"Saving…":"Save Weights"}</button>
+      </div>
     </div>
   );
 }

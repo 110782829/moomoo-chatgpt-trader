@@ -98,17 +98,30 @@ class SimBroker(ExecutionService):
         self.conn.commit()
 
     def _row_to_order(self, r) -> PlacedOrder:
+        def _enum(enum_cls, val, default):
+            try:
+                if val is None:
+                    return default
+                return enum_cls(str(val).lower())
+            except Exception:
+                return default
+
+        status = _enum(OrderStatus, r["status"], OrderStatus.pending)
+        side = _enum(OrderSide, r["side"], OrderSide.buy)
+        order_type = _enum(OrderType, r["order_type"], OrderType.market)
+        tif = _enum(TimeInForce, r["tif"], TimeInForce.day)
+
         return PlacedOrder(
             order_id=r["order_id"],
-            status=OrderStatus(r["status"]),
+            status=status,
             symbol=r["symbol"],
-            side=OrderSide(r["side"]),
-            order_type=OrderType(r["order_type"]),
+            side=side,
+            order_type=order_type,
             limit_price=r["limit_price"],
-            requested_qty=r["requested_qty"],
-            filled_qty=r["filled_qty"],
-            avg_fill_price=r["avg_fill_price"],
-            tif=TimeInForce(r["tif"]),
+            requested_qty=int(r["requested_qty"] or 0),
+            filled_qty=int(r["filled_qty"] or 0),
+            avg_fill_price=(r["avg_fill_price"] if r["avg_fill_price"] is not None else None),
+            tif=tif,
             decision_id=r["decision_id"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
