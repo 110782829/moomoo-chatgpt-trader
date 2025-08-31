@@ -1,6 +1,4 @@
-// desktop/app/src/App.tsx
-// Desktop UI (Tauri + React) with Connection panel, Strategies Catalog (presets + start), richer Status/Logs,
-// and friendly UI for Settings, Bot Status, and Activity Log.
+// Desktop UI with connection panel, strategy catalog, status, logs, settings, and activity log.
 // API base comes from VITE_API_BASE (defaults to http://127.0.0.1:8000)
 
 import { useEffect, useRef, useState } from 'react';
@@ -126,16 +124,14 @@ body{margin:0;background:var(--bg);
 .menu .item {
   padding: 8px 10px; border-radius: 8px; cursor: pointer;
 }
-/* slight vertical gap between items */
-.menu .item + .item { margin-top: 6px; }
-.menu .item:hover, .menu .item.active {
-  background: rgba(124,58,237,.18);
-}
-/* Combobox search input inside menu */
-.menu .search {
-  width: 100%; margin: 4px 0 6px; padding: 8px 10px;
-  background: #0c111b; border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-}
+  .menu .item + .item { margin-top: 6px; }
+  .menu .item:hover, .menu .item.active {
+    background: rgba(124,58,237,.18);
+  }
+  .menu .search {
+    width: 100%; margin: 4px 0 6px; padding: 8px 10px;
+    background: #0c111b; border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  }
 
 .label{font-size:12px;color:var(--muted);margin-bottom:6px}
 .form-row{display:grid;gap:12px;grid-template-columns:repeat(3,1fr)} @media (max-width:900px){.form-row{grid-template-columns:1fr}}
@@ -143,6 +139,7 @@ body{margin:0;background:var(--bg);
 table{width:100%;border-collapse:collapse;background:var(--panel)}
 th,td{padding:8px 10px;border-top:1px solid var(--border)} th{text-align:left;font-size:12px;color:var(--muted);background:#0f1420;position:sticky;top:0;z-index:1}
 tr:hover td{background:rgba(124,58,237,.08)}
+th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;font-feature-settings:"tnum";white-space:nowrap}
 .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap: 8px} @media (max-width:900px){.kpis{grid-template-columns:1fr}}
 .help{color:var(--muted);font-size:12px}
 .toast{position:fixed;right:16px;bottom:16px;padding:10px 12px;border-radius:10px;background:#0e1320;border:1px solid var(--border);color:var(--text);box-shadow:0 10px 30px rgba(0,0,0,.35);max-width:360px}
@@ -155,48 +152,46 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .sticky-controls{position: sticky; top: 0; background: #0f1420; padding: 6px 0; z-index: 2; border-bottom: 1px solid var(--border);}
 .activity .sticky-controls{ background: transparent; border-bottom: 0; }
-.note{font-size:12px;color:var(--muted)}
+  .note{font-size:12px;color:var(--muted)}
 
-/* indicator font tweak */
-.indicator{font-size:12px;font-weight:600}
+  .indicator{font-size:12px;font-weight:600}
 
-.header, .title, .header-quick{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial }
+  .header, .title, .header-quick{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial }
 .panel h2{ margin:0 0 6px; font-size:15px; color:var(--text); text-transform:uppercase; letter-spacing:.06em }
 .title-lg{ font-size:20px; }
 
 .grid-2{display:grid;grid-template-columns:2fr 1fr;gap: 8px}
 @media (max-width:980px){.grid-2{grid-template-columns:1fr}}
-.panel.thick{padding:22px}
-/* Autopilot toggle */
-.autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06));color:var(--red);transition:transform .06s ease,border-color .18s ease;width:170px}
+  .panel.thick{padding:22px}
+  /* Autopilot toggle */
+  .autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06));color:var(--red);transition:transform .06s ease,border-color .18s ease;width:170px}
 .autopilot-toggle.on{border-color:rgba(16,185,129,.45);color:var(--green);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
-.autopilot-toggle:active{transform:translateY(1px)}
+  .autopilot-toggle:active{transform:translateY(1px)}
 
-/* Align with KPI 3-column track; panels span to align edges */
-.panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap: 8px}
+  /* Align panels to KPI layout */
+  .panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap: 8px}
 .panels3 .span-2{grid-column:span 2 / span 2}
 @media (max-width:980px){.panels3{grid-template-columns:1fr}.panels3 .span-2{grid-column:auto}}
 
 .panels2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
 @media (max-width:980px){.panels2{grid-template-columns:1fr}}
 
-/* Fixed gradient overlay to avoid scroll seams */
+  /* Fixed gradient overlay to avoid scroll seams */
 .bgfx{position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
     radial-gradient(1200px 600px at 20% -10%, rgba(139,92,246,.12), transparent 60%),
     radial-gradient(1000px 500px at 100% 0%, rgba(34,211,238,.10), transparent 60%);
 
 }
-
-/* --- UI tweaks (0826) --- */
-.health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
+  
+  .health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
 .health .health-top { grid-area:top; display:flex; align-items:center; gap:8px; margin-top:6px; }
-.health .health-badge { font-size:14px; padding:4px 10px; border-radius:8px; }
+.health .health-badge { font-size:12px; padding:3px 8px; border-radius:6px; }
 .health .health-metrics { grid-area:metrics; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:10px 22px; align-items:start; justify-self:end; align-self:start; text-align:left; }
 .health .stat { font-size:13px; color:var(--muted); letter-spacing:.02em; }
 
-/* Split card (top/bottom halves) */
-.split-card { display: flex; flex-direction: column; }
+  /* Split card sections */
+  .split-card { display: flex; flex-direction: column; }
 .split-card .section { flex: 1 1 0; display: flex; flex-direction: column; justify-content: center; }
 .split-card .section + .section { margin-top: 8px; padding-top: 8px; }
 .split-card .section.top{padding-bottom:6px padding-top:10px}
@@ -204,8 +199,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .split-card .section.top .row{ margin-top:6px }
 
-/* === Advanced layout & widgets (added) === */
-.panel.no-bottom-line{border-bottom:0}
+  /* Advanced layout and widgets */
+  .panel.no-bottom-line{border-bottom:0}
 
 /* Compact variant for tighter cards */
 .panel.compact{padding:12px}
@@ -225,10 +220,10 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 @media (max-width:980px){.strat-grid{grid-template-columns:1fr}}
 .strat{border:1px solid var(--border);border-radius:12px;background:#151d26;
   padding:12px; display:flex; align-items:flex-start; gap:12px; cursor:pointer; transition:transform .06s ease, border-color .18s ease; min-height:74px;}
-.strat:hover{ box-shadow:none; }
+  .strat:hover{ box-shadow:none; }
 
-/* === Modern tables & utilities === */
-.table-modern{
+  /* Modern tables and utilities */
+  .table-modern{
   width:100%;
   border-collapse:separate;
   border-spacing:0;
@@ -236,8 +231,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 }
 .table-modern thead th{
   position:sticky; top:0; z-index:1;
-  background:#0f1420;                  /* solid (no gradient) */
-  color:var(--muted);                   /* same tone as KPI titles */
+    background:#0f1420;
+    color:var(--muted);
   font-weight:700; font-size:12px; letter-spacing:.05em;
   text-transform:uppercase;
   border-bottom:1px solid var(--border);
@@ -245,7 +240,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .table-modern thead th.num{ text-align:right; }
 
-.table-modern th, .table-modern td{
+  .table-modern th, .table-modern td{
   padding:10px 12px;
   vertical-align:middle;
   border-bottom:1px solid var(--border);
@@ -253,20 +248,20 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .table-modern thead th.num{ text-align:right; }
 
-.table-modern tbody tr:hover{ background:var(--hover); }
-.table-modern .small{ font-size:12px; opacity:.9; }
-.mono{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
-.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .table-modern tbody tr:hover{ background:var(--hover); }
+  .table-modern .small{ font-size:12px; opacity:.9; }
+  .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
 
-/* table containers share the same, subtle scrollbar as page */
-.table-wrap{ overflow:auto; border-radius:0; }
+  /* Shared table scrollbar */
+  .table-wrap{ overflow:auto; border-radius:0; }
 .table-wrap::-webkit-scrollbar{ height:10px; width:10px; }
 .table-wrap::-webkit-scrollbar-track{ background:#0c111b; border-radius:8px; }
 .table-wrap::-webkit-scrollbar-thumb{ background:#1f2937; border-radius:8px; }
 .table-wrap::-webkit-scrollbar-thumb:hover{ background:#2a3446; }
 
-/* Text-only status (no dot/pill) */
-.status{
+  /* Text-only status */
+  .status{
   display:inline-flex; flex-direction:column; align-items:flex-start;
   font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
   color:var(--muted);
@@ -276,8 +271,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .status.bad { color:var(--red);   }
 .status.warn{ color:var(--amber); }
 
-/* truncation helper for long ids */
-.truncate{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Truncate long ids */
+  .truncate{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .strat.on{ border-color: rgba(16,185,129,.45); box-shadow:none; background: rgba(16,185,129,.05); }
 .strat .dot{ width:10px; height:10px; margin-top:3px; }
 .strat .info{ flex:1 1 auto; }
@@ -292,35 +287,36 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .delta.up{color:var(--green);border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.10)}
 .delta.down{color:var(--red);border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.10)}
 .delta.neutral{color:var(--muted);opacity:.9}
-.pref-row .val{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
+  .pref-row .val{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
 
-/* Account card */
-.acctcard{padding:12px;border:1px solid var(--border);background:#131a23;border-radius:10px}
-.acctgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  /* Account metrics layout */
+  .acctcard{padding:12px;border:1px solid var(--border);background:#131a23;border-radius:10px}
+.acctgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
 @media (max-width:980px){.acctgrid{grid-template-columns:1fr}}
 .acctcell{display:flex;flex-direction:column;gap:4px}
-.acctcell.lever{grid-column:span 3}
 .acctcell .label{font-size:12px;color:var(--muted)}
 .acctcell .value{font-weight:700;font-variant-numeric:tabular-nums}
 .acctcell .usage{display:flex;align-items:center;gap:8px}
 .acctcell .usage .bar{flex:1;height:6px;border-radius:4px;background:var(--border);overflow:hidden}
 .acctcell .usage .bar .fill{height:100%;background:var(--green)}
+.acctcell.lever{grid-column:1/-1}
+  .acctcell .usage .value{min-width:40px;text-align:right}
 
 
-/* === Current Stats (list view, fewer boxes) === */
-.statlist{display:block}
+  /* Current stats list */
+  .statlist{display:block}
 .statrow{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--border)}
 .statrow:first-child{border-top:0;padding-top:0}
 .statrow .k{font-size:12px;color:var(--muted)}
-.statrow .v{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
-.statrow .delta{white-space:nowrap}
-/* === Numeric steppers (custom) === */
-/* Hide native spinners */
+  .statrow .v{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .statrow .delta{white-space:nowrap}
+  /* Numeric steppers */
+  /* Hide native spinners */
 .input[type=number]::-webkit-outer-spin-button,
 .input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.input[type=number]{ -moz-appearance: textfield; }
-/* Wrapper that provides compact up/down arrows with no background */
-.num{ position: relative; }
+  .input[type=number]{ -moz-appearance: textfield; }
+  /* Custom number input arrows */
+  .num{ position: relative; }
 .num > .input{ padding-right: 28px; text-align:left; } /* room for arrows */
 .num .spin{ position:absolute; right:4px; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:0; align-items:center; }
 .num .spin button{ width:16px; height:14px; display:flex; align-items:center; justify-content:center; border:0; background:transparent; padding:0; cursor:pointer; color:var(--muted); line-height:1; }
@@ -866,18 +862,17 @@ async function openExplain(r:any) {
       <div className="bgfx" aria-hidden="true"></div>
       <style>{css}</style>
 
-      <style>{`/* --- overrides: autopilot health metrics position tweak + horizontal spread + control nudge --- */
-/* --- overrides: compact vertical rhythm --- */
-.panels2.vsplit{gap:8px} /* tighten spacing between left/right panels */
+      <style>{`/* overrides: autopilot health metrics alignment and compact spacing */
+.panels2.vsplit{gap:8px}
 .panel{padding:14px}
 .stack{gap: 8px}
 .strat-grid{gap: 8px}
 .card-lg{padding:16px}
 
 .health{ align-items: center !important; }
-.health .health-metrics{ justify-self: center !important; align-self: center !important; margin-top: -8px; gap: 8px 24px; }
+.health .health-metrics{ justify-self: center !important; align-self: center !important; margin-top: -14px; gap: 8px 24px; }
 .health .stat{ font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; white-space: nowrap; }
-.autopilot-controls{ margin-top: 11px; } /* bumped ~5px more down */`}</style>
+.autopilot-controls{ margin-top: 11px; }`}</style>
 
 
       <header className="header">
@@ -917,7 +912,7 @@ async function openExplain(r:any) {
         </div>
       )}
 
-      {/* ===== Settings ===== */}
+      {/* Settings */}
       {tab===Tab.Settings && (
         <section className="stack">
           {/* Connection */}
@@ -1035,12 +1030,11 @@ async function openExplain(r:any) {
             </div>
           </div>
 
-          {/* Strategies Catalog removed per new design */}
         </section>
       )}
 
       
-      {/* ===== Bot Status ===== */}
+      {/* Bot Status */}
       {tab===Tab.Status && (
         <section className="stack">
           {/* KPIs */}
@@ -1226,8 +1220,8 @@ async function openExplain(r:any) {
               <table className="table-modern">
                 <thead>
                   <tr>
-                    <th>Symbol</th><th>Qty</th><th>Avg</th><th>Last</th>
-                    <th>MV</th><th>UPL</th><th>RPL Today</th><th>Actions</th>
+                    <th>Symbol</th><th className="num">Qty</th><th className="num">Avg</th><th className="num">Last</th>
+                    <th className="num">MV</th><th className="num">UPL</th><th className="num">RPL Today</th><th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1299,8 +1293,8 @@ async function openExplain(r:any) {
                       <td>{statusTag(o.status)}</td>
                       <td className="num">{o.requested_qty}</td>
                       <td className="num">{o.filled_qty}</td>
-                      <td className="num">{o.avg_fill_price==null ? "" : o.avg_fill_price}</td>
-                      <td className="num">{o.limit_price==null ? "" : o.limit_price}</td>
+                      <td className="num">{o.avg_fill_price==null ? "" : Number(o.avg_fill_price).toFixed(2)}</td>
+                      <td className="num">{o.limit_price==null ? "" : Number(o.limit_price).toFixed(2)}</td>
                       <td>
                         <button className="btn red" disabled={o.status!=="open" && o.status!=="pending"} onClick={()=>cancelOrder(o.order_id)}>Cancel</button>
                       </td>
@@ -1313,7 +1307,7 @@ async function openExplain(r:any) {
         </section>
       )}
 
-      {/* ===== Activity Log ===== */}
+      {/* Activity Log */}
       {tab===Tab.Activity && (
         <ActivityLog
           logs={logs} logsAt={logsAt}
@@ -1393,7 +1387,7 @@ async function openExplain(r:any) {
     </div>
   );
 
-// ===== Handlers & helpers (scoped to App) =====
+// Handlers and helpers (scoped to App)
 async function doConnect() {
   try {
     await api.connect(String(host), Number(port), Number(clientId));
@@ -1864,7 +1858,7 @@ function ActiveStrategies({ onStopped, refreshKey }: { onStopped?: () => void; r
   );
 }
 
-// ---- Strategies Catalog (select / configure / presets / start) ----
+// Strategies catalog
 function StrategyCatalog({ connected }: { connected: boolean }) {
   const [kind, setKind] = useLocalStorage<StrategyKind>("strat.kind", "ma-crossover");
 
