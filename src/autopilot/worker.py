@@ -70,12 +70,28 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fetch_bars(symbol: str, period: str = "6mo", interval: str = "1d") -> tuple[list[float], list[float], list[float]]:
+def _yf_period(interval: str, n: int) -> str:
+    # cover at least n bars
+    interval = interval.lower()
+    if interval.endswith("m"):
+        per_day = {"1m": 390, "5m": 78, "15m": 26, "30m": 13, "60m": 6}
+        bpd = per_day.get(interval, 390)
+        days = (n + bpd - 1) // bpd
+        cap = 7 if interval == "1m" else 60
+        days = max(1, min(days, cap))
+        return f"{days}d"
+    if n <= 60:
+        return f"{n}d"
+    return "2y" if n <= 365 * 2 else "max"
+
+
+def _fetch_bars(symbol: str, n: int = 180, interval: str = "1d") -> tuple[list[float], list[float], list[float]]:
     if yf is None:
         return [], [], []
     try:
         import contextlib, io as _io
         yf_sym = symbol.replace("US.", "")
+        period = _yf_period(interval, n)
         # Suppress noisy stderr from yfinance (e.g., delisted tickers)
         with contextlib.redirect_stderr(_io.StringIO()):
             try:
@@ -402,7 +418,7 @@ class AutopilotManager:
                         continue
             except Exception:
                 used_fallback = True
-                h2, l2, c2 = _fetch_bars(sym, period="6mo", interval="1d")
+                h2, l2, c2 = _fetch_bars(sym, n=220, interval="1d")
                 highs, lows, closes = h2 or [], l2 or [], c2 or []
 
             if not closes:

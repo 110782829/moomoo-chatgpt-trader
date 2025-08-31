@@ -25,7 +25,7 @@ body{margin:0;background:var(--bg);
 .header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
 .title{display:flex;align-items:center;gap:12px}
 .badge{font-size:12px;color:var(--text-dim);background:linear-gradient(135deg, rgba(124,58,237,.25), rgba(6,182,212,.25));
-  border:1px solid rgba(124,58,237,.35);padding:4px 8px;border-radius:999px}
+  border:1px solid rgba(124,58,237,.35);padding:4px 8px;border-radius:8px}
 .badge.good{color:var(--green);border-color:rgba(16,185,129,.45);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
 .badge.bad{color:var(--red);border-color:rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06))}
 .tabs{display:flex;gap:8px;margin:8px 0 18px}
@@ -47,7 +47,10 @@ body{margin:0;background:var(--bg);
 .btn[disabled]{opacity:.55;cursor:not-allowed}
 .btn:hover{background:var(--hover)} .btn:active{transform:translateY(1px)}
 .btn.brand{background:linear-gradient(180deg, rgba(124,58,237,.5), rgba(6,182,212,.4));border-color:rgba(124,58,237,.5)}
-.btn.red{background:linear-gradient(180deg, rgba(239,68,68,.25), rgba(239,68,68,.15));border-color:rgba(239,68,68,.4)}
+.btn.red{background:linear-gradient(180deg, rgba(239,68,68,.25), rgba(239,68,68,.15));border-color:rgba(239,68,68,.4);color:var(--red)}
+/* solid red button */
+.btn.red-solid{background:linear-gradient(180deg,#7f1d1d,#651616);border-color:#8b2020;color:#fff;border-radius:12px}
+.btn.red-solid:hover{background:#8b2020}
 .btn.amber{background:linear-gradient(180deg, rgba(245,158,11,.25), rgba(245,158,11,.15));border-color:rgba(245,158,11,.4)}
 .input,.select{width:100%;padding:8px 10px;border-radius:8px;background:#0c111b;color:var(--text);border:1px solid var(--border);outline:none;transition:border-color .18s}
 .input:focus,.select:focus{border-color:rgba(124,58,237,.6)}
@@ -164,12 +167,10 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .grid-2{display:grid;grid-template-columns:2fr 1fr;gap: 8px}
 @media (max-width:980px){.grid-2{grid-template-columns:1fr}}
 .panel.thick{padding:22px}
-/* Autopilot switch (solid color) */
-.switch-lg{position:relative;width:60px;height:30px;border-radius:999px;background:#334155;border:1px solid #475569;display:inline-flex;align-items:center;transition:background .18s ease,border-color .18s ease}
-.switch-lg .thumb{position:absolute;left:3px;width:24px;height:24px;border-radius:999px;background:#0b1220;box-shadow:0 6px 16px rgba(0,0,0,.35);transition:transform .2s ease, background .2s ease}
-.switch-lg.on{background:#22a6f2;border-color:#22a6f2}
-.switch-lg.on .thumb{transform:translateX(30px);background:#ffffff}
-.help.strong{font-weight:600;color:var(--text)}
+/* Autopilot toggle */
+.autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06));color:var(--red);transition:transform .06s ease,border-color .18s ease;width:170px}
+.autopilot-toggle.on{border-color:rgba(16,185,129,.45);color:var(--green);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
+.autopilot-toggle:active{transform:translateY(1px)}
 
 /* Align with KPI 3-column track; panels span to align edges */
 .panels3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap: 8px}
@@ -185,10 +186,12 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
     radial-gradient(1200px 600px at 20% -10%, rgba(139,92,246,.12), transparent 60%),
     radial-gradient(1000px 500px at 100% 0%, rgba(34,211,238,.10), transparent 60%);
 
+}
+
 /* --- UI tweaks (0826) --- */
 .health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
-.health .health-top { grid-area:top; display:flex; align-items:center; gap:10px; margin-top:14px; }
-.health .health-badge { font-size: 18px; padding: 9px 16px; border-radius: 999px; }
+.health .health-top { grid-area:top; display:flex; align-items:center; gap:8px; margin-top:6px; }
+.health .health-badge { font-size:14px; padding:4px 10px; border-radius:8px; }
 .health .health-metrics { grid-area:metrics; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:10px 22px; align-items:start; justify-self:end; align-self:start; text-align:left; }
 .health .stat { font-size:13px; color:var(--muted); letter-spacing:.02em; }
 
@@ -197,14 +200,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .split-card .section { flex: 1 1 0; display: flex; flex-direction: column; justify-content: center; }
 .split-card .section + .section { margin-top: 8px; padding-top: 8px; }
 .split-card .section.top{padding-bottom:6px padding-top:10px}
-.split-card .section.bottom{padding-top:32px}
-}
-/* --- Autopilot Health layout --- */
-.health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
-.health .health-top { grid-area:top; display:flex; align-items:center; gap:10px; margin-top:14px; }
-.health .health-metrics { grid-area:metrics; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px 16px; align-items:start; justify-self:end; align-self:start; text-align:left; }
-.health .stat { font-size:13px; color:var(--muted); letter-spacing:.02em; }
-/* --- end health --- */
+.split-card .section.bottom{padding-top:8px}
 
 .split-card .section.top .row{ margin-top:6px }
 
@@ -298,18 +294,17 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .delta.neutral{color:var(--muted);opacity:.9}
 .pref-row .val{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
 
-/* Current Stats layout */
-.statgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-@media (max-width:980px){.statgrid{grid-template-columns:1fr}}
-.statcard{display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:10px;border:1px solid var(--border);border-radius:10px;background:#0e1320}
-.statcard .label{font-size:12px;color:var(--muted)}
-.statcard .value{font-weight:700;font-variant-numeric:tabular-nums}
-.statcard .meta{display:flex;align-items:center;gap:8px}
-.delta{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320;display:inline-flex;align-items:center;gap:6px}
-.delta.up{color:var(--green);border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.10)}
-.delta.down{color:var(--red);border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.10)}
-.delta.neutral{color:var(--muted);opacity:.9}
+/* Account card */
+.acctcard{padding:12px;border:1px solid var(--border);background:#131a23;border-radius:10px}
+.acctgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:980px){.acctgrid{grid-template-columns:1fr}}
+.acctcell{display:flex;flex-direction:column;gap:4px}
+.acctcell.lever{grid-column:span 3}
+.acctcell .label{font-size:12px;color:var(--muted)}
+.acctcell .value{font-weight:700;font-variant-numeric:tabular-nums}
+.acctcell .usage{display:flex;align-items:center;gap:8px}
+.acctcell .usage .bar{flex:1;height:6px;border-radius:4px;background:var(--border);overflow:hidden}
+.acctcell .usage .bar .fill{height:100%;background:var(--green)}
 
 
 /* === Current Stats (list view, fewer boxes) === */
@@ -880,7 +875,7 @@ async function openExplain(r:any) {
 .card-lg{padding:16px}
 
 .health{ align-items: center !important; }
-.health .health-metrics{ justify-self: center !important; align-self: center !important; margin-top: -16px; gap: 8px 24px; }
+.health .health-metrics{ justify-self: center !important; align-self: center !important; margin-top: -8px; gap: 8px 24px; }
 .health .stat{ font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; white-space: nowrap; }
 .autopilot-controls{ margin-top: 11px; } /* bumped ~5px more down */`}</style>
 
@@ -1016,17 +1011,28 @@ async function openExplain(r:any) {
             )}
             <div className="help" style={{marginTop:8}}>Risk checks are enforced server-side before any order is sent.</div>
           </div>
-          {/* Data & Discovery */}
-          <div className="panel compact">
-            <h2 style={{marginTop:0}}>Data & Discovery</h2>
-            <DiscoverySettings />
-            <div style={{margin:"12px 0", borderTop:"1px solid var(--border)"}} />
-            <SignalsSettings />
+          {/* Discovery and Data */}
+          <div className="panels2">
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Discovery</h2>
+              <DiscoverySettings />
+            </div>
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Data & Signals</h2>
+              <SignalsSettings />
+            </div>
           </div>
-          {/* Trading Behavior (Style) */}
-          <div className="panel compact">
-            <h2 style={{marginTop:0}}>Trading Behavior</h2>
-            <StyleAndWatchlist />
+
+          {/* Trading Preferences & Behavior */}
+          <div className="panels2">
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Trading Preferences</h2>
+              <TradingPreferences />
+            </div>
+            <div className="panel compact">
+              <h2 style={{marginTop:0}}>Trading Behavior</h2>
+              <StyleAndWatchlist />
+            </div>
           </div>
 
           {/* Strategies Catalog removed per new design */}
@@ -1075,27 +1081,23 @@ async function openExplain(r:any) {
   <div className="section top">
     <h3>Autopilot</h3>
     <div className="row autopilot-controls" style={{alignItems:"center", justifyContent:"space-between"}}>
-      <div className="row" style={{gap:12}}>
+      <div className="row">
         <button
-          className={`switch-lg ${mode==="automatic" ? "on" : ""}`}
-          role="switch"
-          aria-checked={mode==="automatic"}
+          className={`autopilot-toggle ${mode==="automatic" ? "on" : ""}`}
           onClick={async()=> {
-            const turnOn = !(mode==="automatic");
-            try { await api.autopilotEnable(turnOn); }
+            try { await api.autopilotEnable(mode!=="automatic"); }
             catch(e:any) { toast.show(`Autopilot toggle failed: ${brief(e)}`); }
-            setMode(turnOn ? "automatic" : "manual");
+            setMode(mode!=="automatic" ? "automatic" : "manual");
           }}
-          title="Toggle Autopilot On/Off"
+          title={mode==="automatic" ? "Disable Autopilot" : "Enable Autopilot"}
         >
-          <span className="thumb" />
+          {mode==="automatic" ? "Running..." : "Click to Enable"}
         </button>
-        <div className="help strong">{mode==="automatic" ? "On" : "Off"}</div>
       </div>
       <button className="btn brand" style={{marginRight:16}} onClick={doPreview}>Preview Plan</button>
     </div>
   </div>
-  <div className="section bottom" style={{marginTop:34}}>
+  <div className="section bottom">
     <h3>Positions & Orders</h3>
     <div className="row" style={{alignItems:"baseline",gap:16}}>
       <div><div className="help">Open positions</div><div className="value">{openPositions ?? "—"}</div></div>
@@ -1117,15 +1119,15 @@ async function openExplain(r:any) {
           
           {/* Autopilot & Active Strategies */}
           
-          {/* Strategy & Preferences row */}
+          {/* Strategy & Account row */}
           <div className="panels2 vsplit">
             <div className="panel no-bottom-line" style={{ gridRow: "span 2" }}>
               <h2 style={{marginTop:0}}>Active Strategies</h2>
               <StrategyPicker />
             </div>
             <div className="panel compact">
-              <h2 style={{marginTop:0}}>Trading Preferences</h2>
-              <TradingPreferences />
+              <h2 style={{marginTop:0}}>Account</h2>
+              <AccountCard connected={connected} activeAccount={activeAccount} />
             </div>
             <div className="panel compact">
               <h2 style={{marginTop:0}}>Current Stats</h2>
@@ -1665,6 +1667,63 @@ export function NiceCombobox({
 }
 
 
+
+function AccountCard({ connected, activeAccount }: { connected: boolean; activeAccount: { account_id: string | null; trd_env: string | null } | null }) {
+  const [assets, setAssets] = useState<{ equity?: number | null; bp?: number | null; cash?: number | null } | null>(null);
+
+  useEffect(() => {
+    let timer: any;
+    const load = async () => {
+      if (!connected || !activeAccount?.account_id) {
+        setAssets(null);
+        return;
+      }
+      try {
+        const a: any = await api.getAccountAssets();
+        setAssets(a || null);
+      } catch {}
+    };
+    load();
+    timer = setInterval(load, 10000);
+    return () => clearInterval(timer);
+  }, [connected, activeAccount?.account_id]);
+
+  const equity = assets?.equity ?? null;
+  const cash = assets?.cash ?? null;
+  const bp = assets?.bp ?? null;
+  const usage = bp != null && cash != null ? Math.min(1, Math.max(0, (bp - cash) / bp)) : null;
+  const leverage = equity != null && bp != null && equity !== 0 ? bp / equity : null;
+
+  return (
+    <div className="stack">
+      <div className="acctcard">
+        <div className="acctgrid">
+          <div className="acctcell">
+            <div className="label">Equity</div>
+            <div className="value">{equity != null ? `$${Number(equity).toFixed(2)}` : "—"}</div>
+          </div>
+          <div className="acctcell">
+            <div className="label">Cash</div>
+            <div className="value">{cash != null ? `$${Number(cash).toFixed(2)}` : "—"}</div>
+          </div>
+          <div className="acctcell">
+            <div className="label">Buying Power</div>
+            <div className="value">{bp != null ? `$${Number(bp).toFixed(2)}` : "—"}</div>
+          </div>
+          <div className="acctcell lever">
+            <div className="label">Leverage</div>
+            <div className="usage">
+              <div className="bar"><div className="fill" style={{width: usage != null ? `${(usage*100).toFixed(0)}%` : "0%"}}></div></div>
+              <span className="delta neutral">{usage != null ? `${(usage*100).toFixed(0)}%` : "—"}</span>
+              <div className="value">{leverage != null ? `${leverage.toFixed(2)}x` : "—"}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ActivityLog(props: {
   logs: any[]; logsAt: string; logsEvery: number; setLogsEvery: (n:number)=>void;
   logsAuto: boolean; setLogsAuto: (b:boolean)=>void;
@@ -1680,24 +1739,6 @@ function ActivityLog(props: {
           logsSource, setLogsSource, onExplain,
           refreshLogs, logsLoading } = props;
 
-  const [coverage, setCoverage] = useState<{ exits?: number; stops?: number; tp?: number } | null>(null);
-  const [covAt, setCovAt] = useState<string>("—");
-  const [assets, setAssets] = useState<{ mode:string; equity?: number|null; bp?: number|null }|null>(null);
-  const [assetsAt, setAssetsAt] = useState<string>("—");
-
-  useEffect(() => { (async ()=>{
-    try {
-      const st:any = await api.autopilotStatus();
-      const s = st?.stats || {};
-      setCoverage({ exits: Number(s?.exits_coverage_pct ?? NaN), stops: Number(s?.stops_coverage_pct ?? NaN), tp: Number(s?.tp_coverage_pct ?? NaN) });
-      setCovAt(new Date().toLocaleTimeString());
-    } catch {}
-    try {
-      const a:any = await api.getAccountAssets();
-      setAssets(a || null);
-      setAssetsAt(new Date().toLocaleTimeString());
-    } catch {}
-  })(); }, [logsAt, logsSource, logSince]);
 
   return (
     <section className="stack activity">
@@ -1735,21 +1776,6 @@ function ActivityLog(props: {
             <span className="help">Last updated: {logsAt}</span>
           </div>
         </div>
-
-        {assets && (
-          <div className="row" style={{gap:12, margin:"8px 0"}}>
-            <span className="badge" title={`Updated ${assetsAt}`}>{assets.mode === 'moomoo' ? 'Broker' : 'SIM'} Net Assets: {assets?.equity!=null ? `$${Number(assets.equity).toFixed(2)}` : '—'}</span>
-            {assets?.bp!=null && <span className="badge" title="Buying Power">BP: {`$${Number(assets.bp).toFixed(2)}`}</span>}
-          </div>
-        )}
-
-        {coverage && isFinite(coverage.exits||NaN) && (
-          <div className="row" style={{gap:12, margin:"8px 0"}}>
-            <span className="delta" title={`Updated ${covAt}`}>Exits coverage: {coverage.exits?.toFixed(1)}%</span>
-            <span className="delta" title={`Updated ${covAt}`}>Stops: {coverage.stops?.toFixed(1)}%</span>
-            <span className="delta" title={`Updated ${covAt}`}>Take‑profit: {coverage.tp?.toFixed(1)}%</span>
-          </div>
-        )}
 
         <div className="table-wrap" style={{maxHeight: 460}}>
           <table className="table-modern">
@@ -2113,7 +2139,7 @@ function StrategyPicker() {
               await api.putNewsSettings({ enabled: true });
             } catch {}
           }}>All</button>
-          <button className="btn red" onClick={async()=>{
+          <button className="btn amber" onClick={async()=>{
             setSelected([]);
             try {
               const cur = await api.getSignalsSettings();

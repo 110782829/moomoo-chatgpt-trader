@@ -7,6 +7,7 @@ Core capabilities:
 - Connect to moomoo via local OpenD gateway
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
+- Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
 - Sync recent fills via `POST /exec/sync/deals`
 
@@ -72,3 +73,6 @@ Core capabilities:
 - Paper trading is strongly recommended while testing. Real trading requires careful risk limits and explicit enablement.
 - SIM execution uses `db/trader.db` by default (auto-created). Strategy/automation storage uses `data/trader.db`.
 - To enable GPT Autopilot set `PLANNER_PROVIDER=gpt` and `OPENAI_API_KEY`.
+- If the GPT call fails, planner can fall back to a stub. Set `PLANNER_FALLBACK_STUB=0` to surface the error instead.
+- Execution mode switches to `moomoo` upon connect and reverts to `sim` on disconnect.
+- Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.

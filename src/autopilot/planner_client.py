@@ -85,15 +85,12 @@ class CompositePlanner:
         # Prefer GPT
         if self.gpt is not None:
             try:
-                out = self.gpt.plan(planner_input)
-                # If GPT produced any decisions, execute them
-                decisions = list(getattr(out, "decisions", []))
-                if len(decisions) > 0:
-                    return out
-                # GPT returned valid but empty -> no trade
-                return out
+                return self.gpt.plan(planner_input)
             except Exception:
-                pass  # fall through to stub (if enabled)
+                if not FALLBACK_STUB:
+                    raise
+                # fall through to stub when enabled
+                pass
 
         # Optional fallback
         if FALLBACK_STUB:

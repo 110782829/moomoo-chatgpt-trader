@@ -91,7 +91,9 @@ def _strip_to_json(text: str) -> str:
     except Exception:
         pass
     m = re.search(r"\{[\s\S]*\}", text)
-    return m.group(0) if m else '{"decisions":[],"global_action":"proceed"}'
+    if m:
+        return m.group(0)
+    raise ValueError(f"no JSON object found in response: {text!r}")
 
 
 class GPTPlannerClient:
@@ -153,8 +155,7 @@ class GPTPlannerClient:
                 last_exc = e
                 system = JSON_ONLY_RULES + "\nIf your last output failed validation, fix it and return ONLY JSON."
 
-        # Fallback: empty, schema-valid output
-        try:
-            return validate_output({"decisions": [], "global_action": "proceed"})
-        except Exception:
-            return PlannerOutput(decisions=[], global_action="proceed")  # type: ignore
+        # Raise to allow CompositePlanner to fall back to stub
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("planner failed")

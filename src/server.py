@@ -18,11 +18,13 @@ except Exception:
     pass
 
 try:
-    from execution.container import init_execution, get_execution
+    from execution.container import init_execution, get_execution, set_mode
 except Exception:
     init_execution = lambda *a, **k: None  # type: ignore
     def get_execution():
         return None
+    def set_mode(_: str) -> None:
+        pass
 try:
     from routers import exec_orders as exec_orders_router
 except Exception:
@@ -355,6 +357,10 @@ def connect(req: ConnectRequest):
         c = MoomooClient(host=host, port=port)  # client_id not required by current build
         c.connect()
         set_client(c)
+        try:
+            set_mode("moomoo")
+        except Exception:
+            pass
         # persist partial session (account may be None here)
         try:
             save_session(
@@ -435,13 +441,18 @@ def accounts_assets():
     - In 'moomoo' mode: queries broker via accinfo_query if available.
     - In 'sim' mode: estimates from SIM positions' market value (no cash tracking).
     """
-    # Prefer execution mode to decide source
+    # Prefer execution mode; if unavailable, infer from client
     try:
         from execution.container import get_mode, get_execution  # type: ignore
         mode = get_mode()
     except Exception:
-        mode = "sim"
         get_execution = lambda: None  # type: ignore
+        c_try = None
+        try:
+            c_try = get_client()
+        except Exception:
+            pass
+        mode = "moomoo" if c_try is not None and getattr(c_try, "connected", False) else "sim"
 
     if mode == "moomoo":
         c = get_client()
@@ -1140,6 +1151,10 @@ def disconnect():
     except Exception:
         pass  # ignore errors on shutdown
     set_client(None)
+    try:
+        set_mode("sim")
+    except Exception:
+        pass
     return {"status": "disconnected"}
 
 

@@ -14,6 +14,7 @@ import re
 
 # local client utils
 from core.moomoo_client import MoomooClient, _df_to_records
+from core.futu_client import SubType
 
 # --- Moomoo (futu) ---
 
@@ -24,6 +25,11 @@ def _bars_from_futu(client: MoomooClient, symbol: str, ktype: str, n: int) -> Li
     if not client.quote_ctx:
         raise RuntimeError("Quote context not available")
     code = _normalize(symbol)
+    subtype = getattr(SubType, ktype.upper(), SubType.K_1M)
+    # subscribe before fetching bars
+    ret, data = client.quote_ctx.subscribe([code], [subtype], True)
+    if ret != 0:
+        raise RuntimeError(f"subscribe failed: {data}")
     tried = [
         {"code": code, "ktype": ktype, "max_count": n},
         {"code": code, "ktype": ktype, "num": n},
@@ -61,6 +67,21 @@ def _symbol_for_yf(symbol: str) -> str:
     # US.AAPL -> AAPL
     return symbol.split(".")[-1]
 
+
+def _yf_period(interval: str, n: int) -> str:
+    # cover at least n bars
+    interval = interval.lower()
+    if interval.endswith("m"):
+        per_day = {"1m": 390, "5m": 78, "15m": 26, "30m": 13, "60m": 6}
+        bpd = per_day.get(interval, 390)
+        days = (n + bpd - 1) // bpd
+        cap = 7 if interval == "1m" else 60
+        days = max(1, min(days, cap))
+        return f"{days}d"
+    if n <= 60:
+        return f"{n}d"
+    return "2y" if n <= 365 * 2 else "max"
+
 def _bars_from_yf(symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
     try:
         import yfinance as yf  # install at runtime if needed
@@ -68,8 +89,7 @@ def _bars_from_yf(symbol: str, ktype: str, n: int) -> List[Dict[str, Any]]:
         raise RuntimeError("yfinance not installed; run `pip install yfinance`") from e
 
     interval = _yf_interval(ktype)
-    # 1m data: 7 days available via period="7d". For others use wider period.
-    period = "7d" if interval.endswith("m") else "60d"
+    period = _yf_period(interval, n)
 
     # Suppress yfinance noisy stderr (e.g., delisted symbols). Try raise_errors flag if available.
     dl_kwargs = dict(
