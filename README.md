@@ -76,7 +76,7 @@ Core capabilities:
 - SIM execution uses `db/trader.db` by default (auto-created). Strategy/automation storage uses `data/trader.db`.
 - To enable GPT Autopilot set `PLANNER_PROVIDER=gpt` and `OPENAI_API_KEY`.
 - If the GPT call fails, planner can fall back to a stub. Set `PLANNER_FALLBACK_STUB=0` to surface the error instead.
-- Execution mode switches to `moomoo` upon connect and reverts to `sim` on disconnect.
+- Execution mode switches to `moomoo` upon connect or session restore and reverts to `sim` on disconnect.
 - Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.
 - Account assets query falls back to get_accinfo if accinfo_query is missing and logs errors.
 - Market data source is selectable (Moomoo or Yahoo Finance) with no automatic fallback.

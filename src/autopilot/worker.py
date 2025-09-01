@@ -265,9 +265,11 @@ class AutopilotManager:
             except Exception:
                 account = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
             try:
-                positions_raw = c.get_positions()
+                broker_positions = c.get_positions() or []
+                if broker_positions:
+                    positions_raw = broker_positions
             except Exception:
-                positions_raw = []
+                pass
 
         # Normalize positions
         pos_norm: List[Dict[str, Any]] = []

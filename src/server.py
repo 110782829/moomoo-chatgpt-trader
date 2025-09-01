@@ -317,6 +317,10 @@ async def _on_startup():
         c = reconnect_from_session()
         if c:
             set_client(c)
+            try:
+                set_mode("moomoo")
+            except Exception:
+                pass
     except Exception:
         pass
     if _AUTOMATION_AVAILABLE:
