@@ -7,8 +7,10 @@ Core capabilities:
 - Connect to moomoo via local OpenD gateway
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
+- Activity tab shows recent market data with its provider
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
+- Uses Yahoo Finance for recent bars when broker quotes are unavailable
 - Sync recent fills via `POST /exec/sync/deals`
 
 ## Prerequisites
@@ -76,3 +78,20 @@ Core capabilities:
 - If the GPT call fails, planner can fall back to a stub. Set `PLANNER_FALLBACK_STUB=0` to surface the error instead.
 - Execution mode switches to `moomoo` upon connect and reverts to `sim` on disconnect.
 - Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.
+- Account assets query falls back to get_accinfo if accinfo_query is missing and logs errors.
+- Market data source is selectable (Moomoo or Yahoo Finance) with no automatic fallback.
+- Yahoo Finance fetches at least five days of intraday bars to avoid empty data on market closures.
+
+## Troubleshooting market data
+
+If you see `bars_unavailable: yfinance fetch failed`:
+
+1. Ensure `yfinance` is installed:
+   ```bash
+   pip install yfinance
+   ```
+2. Verify internet access and that the symbol exists on Yahoo Finance.
+3. Check `AUTOPILOT_DATA_SOURCE` in your environment; set it to `yfinance` or `futu` as needed.
+4. Use the `/debug/bars` endpoint to test fetching bars:
+   `GET /debug/bars?symbol=US.AAPL&ktype=K_1M&n=3`
+5. If "The truth value of a Series is ambiguous" appears, upgrade to a recent build.

@@ -6,12 +6,6 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-# Optional market data (yfinance)
-try:
-    import yfinance as yf  # type: ignore
-except Exception:  # pragma: no cover
-    yf = None  # type: ignore
-
 # Optional durable action log + settings + fills
 try:
     from core.storage import insert_action_log, get_setting, record_fill  # type: ignore
@@ -100,6 +94,9 @@ def _fetch_bars(symbol: str, n: int = 180, interval: str = "1d") -> tuple[list[f
                 df = yf.download(yf_sym, period=period, interval=interval, auto_adjust=True, progress=False)
         if df is None or df.empty:
             return [], [], []
+        import pandas as pd
+        if isinstance(df.columns, pd.MultiIndex):  # flatten ticker columns
+            df.columns = [c[0] for c in df.columns]
         highs = [float(x) for x in df["High"].tolist()]
         lows = [float(x) for x in df["Low"].tolist()]
         closes = [float(x) for x in df["Close"].tolist()]
@@ -258,6 +255,16 @@ class AutopilotManager:
 
         if c is not None and getattr(c, "connected", False):
             try:
+                # best-effort account snapshot
+                info = c.get_account_assets()  # type: ignore[attr-defined]
+                account = {
+                    "equity": float(info.get("equity") or 0.0),
+                    "bp": float(info.get("bp") or info.get("buying_power") or 0.0),
+                    "pnl_today": float(info.get("pnl_day") or info.get("pnl_today") or 0.0),
+                }
+            except Exception:
+                account = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
+            try:
                 positions_raw = c.get_positions()
             except Exception:
                 positions_raw = []
@@ -396,16 +403,18 @@ class AutopilotManager:
             highs: List[float] = []
             lows: List[float] = []
             closes: List[float] = []
-            used_fallback = False
+            reason = ""  # reason for missing bars
             # cache by sym and ttl
             if sym in getattr(self, "_feat_cache_ts", {}) and (now_ts - self._feat_cache_ts.get(sym, 0.0) < bars_ttl):
                 feat = self._feat_cache.get(sym, {})
                 if feat:
                     universe.append(dict(feat))
                     continue
+            source = ""
             try:
-                from core.market_data import get_bars_safely  # type: ignore
-                bars, _source = get_bars_safely(c, sym, ktype_val, 220)
+                from core.market_data import get_bars_safely, _data_source  # type: ignore
+                source = _data_source()
+                bars, source = get_bars_safely(c, sym, ktype_val, 220)
                 for b in bars:
                     h = b.get("high", b.get("High", 0.0))
                     l = b.get("low", b.get("Low", 0.0))
@@ -416,15 +425,19 @@ class AutopilotManager:
                         closes.append(float(cl or 0.0))
                     except Exception:
                         continue
-            except Exception:
-                used_fallback = True
-                h2, l2, c2 = _fetch_bars(sym, n=220, interval="1d")
-                highs, lows, closes = h2 or [], l2 or [], c2 or []
+                if not closes:
+                    reason = f"{source} returned no data"
+            except Exception as e:
+                # include original error for clarity
+                reason = f"{source or 'data source'} fetch failed: {e}"
 
             if not closes:
-                universe.append({
+                entry = {
                     "sym": sym, "px": 0.0, "atr": 0.0, "rsi": 50, "ma50": 0.0, "ma200": 0.0, "trend": "flat",
-                })
+                }
+                if reason:
+                    entry["bars_unavailable"] = reason
+                universe.append(entry)
                 continue
 
             px = float(closes[-1])
@@ -671,11 +684,11 @@ class AutopilotManager:
                     sym = str(u.get("sym") or "")
                     if not sym:
                         continue
-                    # obtain series (prefer yfinance-derived earlier)
+                    # obtain series if available
                     highs: List[float] = u.get("_highs") if isinstance(u.get("_highs"), list) else []  # type: ignore
                     lows: List[float] = u.get("_lows") if isinstance(u.get("_lows"), list) else []   # type: ignore
                     closes: List[float] = u.get("_closes") if isinstance(u.get("_closes"), list) else []  # type: ignore
-                    # When _fetch_bars failed, universe may not carry series; skip
+                    # Skip if series missing
                     if not closes:
                         continue
                     extra = signals_for_series(sym, highs, lows, closes) or []

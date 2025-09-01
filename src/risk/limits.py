@@ -75,7 +75,7 @@ def _estimate_price(client, symbol: str, order_type: str, price: Optional[float]
         return float(price)
     if (order_type or "").upper() != "MARKET":
         return float(price or 0)
-    # try last close via safe fallback (futu→yfinance)
+    # use last close from selected source
     try:
         bars, _src = get_bars_safely(client, symbol, "K_1M", 1)
         if bars:

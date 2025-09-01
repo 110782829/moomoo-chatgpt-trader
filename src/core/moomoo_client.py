@@ -8,6 +8,7 @@ and placing orders. It interacts with the OpenD session and Futu API via our wra
 from typing import List, Optional, Dict, Any
 import os
 import pandas as pd
+import logging
 
 from core.futu_client import (
     FUTU_AVAILABLE,
@@ -20,6 +21,8 @@ from core.futu_client import (
     RET_OK,
 )
 
+
+log = logging.getLogger(__name__)
 
 # ---------------- utilities ---------------- #
 
@@ -452,16 +455,33 @@ class MoomooClient:
 
     # -------- account assets (best-effort) -------- #
     def get_account_assets(self) -> Dict[str, Any]:
-        """Return a best-effort snapshot of account assets (equity/buying power/cash).
-        Tries various method/arg signatures to be compatible across futu builds.
+        """Return a snapshot of account assets.
+        Tries accinfo_query then get_accinfo across futu builds.
         """
         if not self.connected:
             raise RuntimeError("Not connected")
         if not self.account_id:
             raise RuntimeError("No account selected")
 
-        tried_calls = []
-        # Prefer accinfo_query
+        def normalize(r: Dict[str, Any]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {}
+            def f(*keys, default=0.0):
+                for k in keys:
+                    if k in r and r[k] is not None:
+                        try:
+                            return float(r[k])
+                        except Exception:
+                            pass
+                return float(default)
+            out["equity"] = f("total_assets", "net_assets", "total_asset")
+            out["bp"] = f("power", "buying_power", "available_funds")
+            out["cash"] = f("cash", "cash_usd", "available_cash")
+            out["raw"] = r
+            return out
+
+        errors: List[str] = []
+
+        # try accinfo_query
         fn = getattr(self.trading_ctx, "accinfo_query", None)
         if callable(fn):
             tried = [
@@ -470,31 +490,45 @@ class MoomooClient:
                 {"acc_id": self.account_id},
                 {},
             ]
-            last_err = None
             for kwargs in tried:
                 try:
                     ret, df = fn(**kwargs)  # type: ignore[arg-type]
                     if ret != RET_OK:
-                        raise RuntimeError(f"accinfo_query failed: {df}")
+                        raise RuntimeError(df)
                     recs = _df_to_records(df)
-                    r = recs[0] if recs else {}
-                    out = {}
-                    def f(*keys, default=0.0):
-                        for k in keys:
-                            if k in r and r[k] is not None:
-                                try:
-                                    return float(r[k])
-                                except Exception:
-                                    continue
-                        return float(default)
-                    out["equity"] = f("total_assets", "net_assets", "total_asset")
-                    out["bp"] = f("power", "buying_power", "available_funds")
-                    out["cash"] = f("cash", "cash_usd", "available_cash")
-                    out["raw"] = r
-                    return out
-                except TypeError as e:
-                    last_err = e
-                    continue
-            raise RuntimeError(f"accinfo_query incompatible with this futu build: {last_err}")
-        # Fallback: not available
-        raise RuntimeError("accinfo_query not available in this futu build")
+                    if recs:
+                        return normalize(recs[0])
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"accinfo_query{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        else:
+            errors.append("accinfo_query not available")
+
+        # fallback get_accinfo
+        fn = getattr(self.trading_ctx, "get_accinfo", None)
+        if callable(fn):
+            tried = [
+                {"trd_env": self.env, "acc_id": self.account_id},
+                {"env": self.env, "acc_id": self.account_id},
+                {"acc_id": self.account_id},
+                {},
+            ]
+            for kwargs in tried:
+                try:
+                    ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(df)
+                    recs = _df_to_records(df)
+                    if recs:
+                        return normalize(recs[0])
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"get_accinfo{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        else:
+            errors.append("get_accinfo not available")
+
+        raise RuntimeError("; ".join(errors))

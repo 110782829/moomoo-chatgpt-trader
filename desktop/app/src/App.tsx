@@ -478,8 +478,8 @@ function statusTag(status?: string) {
   putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
     getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number; provider?: string }>("/autopilot/news"),
     putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number; provider?: string }) => SEND("/autopilot/news", payload, "PUT"),
-    getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number }>("/autopilot/data"),
-    putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number }) => SEND("/autopilot/data", payload, "PUT"),
+    getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number; data_source: string }>("/autopilot/data"),
+    putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number; data_source?: string }) => SEND("/autopilot/data", payload, "PUT"),
     getSignalsSettings: () => GET<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>("/autopilot/signals"),
     putSignalsSettings: (payload: Partial<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>) => SEND("/autopilot/signals", payload, "PUT"),
   getExecMode: () => GET<{ mode: "sim"|"moomoo" }>("/execution/mode"),
@@ -1733,6 +1733,29 @@ function ActivityLog(props: {
           logsSource, setLogsSource, onExplain,
           refreshLogs, logsLoading } = props;
 
+  // Market data display
+  const [mdSymbol, setMdSymbol] = useState("US.AAPL");
+  const [mdBars, setMdBars] = useState<any[]>([]);
+  const [mdSource, setMdSource] = useState("");
+
+  useEffect(() => {
+    let t: any;
+    async function load() {
+      if (!mdSymbol) {
+        setMdBars([]);
+        setMdSource("");
+        return;
+      }
+      try {
+        const r = await GET<any>("/debug/bars", { symbol: mdSymbol, ktype: "K_1M", n: 3 });
+        setMdBars(r.last || []);
+        setMdSource(r.source || "");
+      } catch {}
+    }
+    load();
+    t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [mdSymbol]);
 
   return (
     <section className="stack activity">
@@ -1792,6 +1815,41 @@ function ActivityLog(props: {
           </table>
         </div>
         <div className="help" style={{marginTop:8}}>All actions are logged server-side for traceability.</div>
+      </div>
+      <div className="panel">
+        <h2 className="title-lg" style={{marginTop:0}}>Market Data</h2>
+        <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
+          <div style={{minWidth:220}}>
+            <div className="label">Symbol</div>
+            <input className="input search" value={mdSymbol}
+                   onChange={e=>setMdSymbol(e.target.value)}
+                   placeholder="US.AAPL" />
+          </div>
+          <div className="row" style={{marginLeft:"auto", gap:10}}>
+            <span className="help">Source: {mdSource || "—"}</span>
+          </div>
+        </div>
+        <div className="table-wrap" style={{maxHeight:200}}>
+          <table className="table-modern">
+            <thead>
+              <tr>
+                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Vol</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mdBars.length ? mdBars.map((b:any,i:number)=>(
+                <tr key={i}>
+                  <td className="small mono">{b.time}</td>
+                  <td className="num">{b.open}</td>
+                  <td className="num">{b.high}</td>
+                  <td className="num">{b.low}</td>
+                  <td className="num">{b.close}</td>
+                  <td className="num">{b.volume}</td>
+                </tr>
+              )) : <tr><td colSpan={6}>No data.</td></tr>}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );
@@ -2482,6 +2540,7 @@ function DiscoverySettings() {
   const [barsTtl, setBarsTtl] = useState<number>(60);
   const [execMode, setExecMode] = useState<"sim"|"moomoo">("sim");
   const [dealsSync, setDealsSync] = useState<number>(180);
+  const [dataSource, setDataSource] = useState<string>("futu");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => { (async () => {
@@ -2503,6 +2562,7 @@ function DiscoverySettings() {
       setKtype(String(dset?.ktype || "K_DAY"));
       setBarsTtl(Number(dset?.bars_ttl_sec || 60));
       if (dset?.deals_sync_sec != null) setDealsSync(Number(dset.deals_sync_sec));
+      if (dset?.data_source) setDataSource(String(dset.data_source));
     } catch {}
     try {
       const em = await api.getExecMode(); setExecMode((em?.mode as any) || "sim");
@@ -2522,7 +2582,7 @@ function DiscoverySettings() {
     setSaving(true);
     try {
       await api.putNewsSettings({ enabled: newsEnabled, ttl_sec: Number(newsTtl)||1800, provider: newsProvider });
-      await api.putDataSettings({ ktype, bars_ttl_sec: Number(barsTtl)||60, deals_sync_sec: Number(dealsSync)||180 });
+      await api.putDataSettings({ ktype, bars_ttl_sec: Number(barsTtl)||60, deals_sync_sec: Number(dealsSync)||180, data_source: dataSource });
       await api.putExecMode(execMode);
     } finally { setSaving(false); }
   }
@@ -2577,6 +2637,15 @@ function DiscoverySettings() {
             onChange={(v)=>setKtype(v as string)}
             options={["K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY"].map(k=>({value:k,label:k}))}
             width={140}
+          />
+        </div>
+        <div>
+          <div className="label">Data Source</div>
+          <NiceSelect
+            value={dataSource}
+            onChange={(v)=>setDataSource(v as string)}
+            options={[{value:"futu",label:"Moomoo"},{value:"yfinance",label:"Yahoo Finance"}]}
+            width={160}
           />
         </div>
         <div>

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi.middleware.cors import CORSMiddleware
+import yfinance as yf
 
 try:
     from dotenv import load_dotenv
@@ -139,6 +140,23 @@ def _risk_load() -> dict:
 def _risk_save(cfg: dict) -> None:
     RISK_PATH.parent.mkdir(parents=True, exist_ok=True)
     RISK_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+# yfinance fetch helper
+def fetch_yf(symbol: str):
+    attempts = [
+        {"period": "5d", "interval": "1m"},
+        {"period": "1mo", "interval": "5m"},
+        {"period": "1mo", "interval": "1d"},
+    ]
+    for kw in attempts:
+        df = yf.download(symbol, progress=False, repair=True, **kw)
+        if not df.empty:
+            return df
+    df = yf.Ticker(symbol).history(period="1mo", interval="1d")
+    if not df.empty:
+        return df
+    raise HTTPException(502, f"yfinance empty for '{symbol}' (check ticker, interval, or network)")
 
 
 # ---------- Request Models ----------
@@ -336,9 +354,16 @@ def debug_bars(symbol: str, ktype: str = "K_DAY", n: int = 120):
     try:
         bars, source = get_bars_safely(c, symbol, ktype, n)
         sample = bars[-3:] if isinstance(bars, list) else []
-        return {"symbol": symbol, "ktype": ktype, "source": source, "count": (len(bars) if isinstance(bars, list) else 0), "last": sample}
+        return {
+            "symbol": symbol,
+            "ktype": ktype,
+            "source": source,
+            "count": (len(bars) if isinstance(bars, list) else 0),
+            "last": sample,
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # expose error to help diagnose fetch issues
+        return {"symbol": symbol, "ktype": ktype, "error": str(e)}
 
 
 # --- Connection & accounts ---
@@ -710,7 +735,7 @@ def sync_deals(simulate_if_absent: bool = True):
     If the broker (paper trading) does not support deal_list_query, fall back to
     synthesizing fills from orders:
       - Use dealt_avg_price when available
-      - Otherwise pull a last close via unified market-data fallback and use that
+      - Otherwise pull a last close via configured market data and use that
     This synthetic path is for development/testing only.
     """
     c = get_client()
@@ -1736,6 +1761,7 @@ class DataUpdate(BaseModel):
     ktype: str | None = None
     bars_ttl_sec: int | None = None
     deals_sync_sec: int | None = None
+    data_source: str | None = None
 
 
 _KTYPES = {"K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY","K_1D"}
@@ -1757,7 +1783,8 @@ def autopilot_data_get():
         deals_sync = 0
     if deals_sync <= 0:
         deals_sync = int(os.getenv("AUTOPILOT_DEALS_SYNC_SEC", "180") or "180")
-    return {"ktype": ktype, "bars_ttl_sec": bars_ttl, "deals_sync_sec": deals_sync}
+    src = str(_get_json_setting("autopilot.data_source", None) or os.getenv("AUTOPILOT_DATA_SOURCE", "futu"))
+    return {"ktype": ktype, "bars_ttl_sec": bars_ttl, "deals_sync_sec": deals_sync, "data_source": src}
 
 
 @autopilot_router.put("/data")
@@ -1774,6 +1801,12 @@ def autopilot_data_put(body: DataUpdate):
     if isinstance(body.deals_sync_sec, int) and body.deals_sync_sec > 0:
         _set_json_setting("autopilot.deals_sync_sec", int(body.deals_sync_sec))
         insert_action_log("data_update", mode=_two_mode(), reason="deals_sync", status="ok", extra={"deals_sync_sec": int(body.deals_sync_sec)})  # type: ignore[name-defined]
+    if body.data_source is not None:
+        ds = str(body.data_source).lower().strip()
+        if ds not in {"futu", "yfinance"}:
+            raise HTTPException(status_code=400, detail="data_source must be 'futu' or 'yfinance'")
+        _set_json_setting("autopilot.data_source", ds)
+        insert_action_log("data_update", mode=_two_mode(), reason="data_source", status="ok", extra={"data_source": ds})  # type: ignore[name-defined]
     return autopilot_data_get()
 
 

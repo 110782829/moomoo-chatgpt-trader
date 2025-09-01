@@ -59,7 +59,7 @@ except Exception:
         return True
 
 
-# data provider (futu first, yfinance fallback)
+# data provider (selected source)
 from core.market_data import get_bars_safely
 
 def _normalize(symbol: str) -> str:
@@ -132,7 +132,7 @@ def step(strategy_id: int, client: MoomooClient, symbol: str, params: Dict[str, 
             insert_run(strategy_id, "SKIP", "No account selected")
             return
 
-        # fetch bars via unified provider (futu → yfinance fallback)
+        # fetch bars via selected provider
         bars, source = get_bars_safely(client, symbol, ktype, slow + 1)
         closes = [float(b.get("close", 0) or 0) for b in bars if float(b.get("close", 0) or 0) > 0]
         if len(closes) < slow:
