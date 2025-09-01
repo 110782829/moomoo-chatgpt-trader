@@ -13,10 +13,10 @@ import re
 
 # local client utils
 from core.moomoo_client import MoomooClient, _df_to_records
-from core.futu_client import SubType
+from moomoo import SubType
 from core.storage import get_setting
 
-# --- Moomoo (futu) ---
+# --- Moomoo ---
 
 def _normalize(symbol: str) -> str:
     return symbol if "." in symbol else f"US.{symbol.upper()}"

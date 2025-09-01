@@ -1,6 +1,6 @@
 # moomoo-chatgpt-trader
 
-ChatGPT‑powered automated US‑stock trading using the moomoo (Futu) OpenAPI. It includes a FastAPI backend, a SIM execution engine, and a Tauri + React desktop UI for status, preferences, and logs.
+ChatGPT‑powered automated US‑stock trading using the moomoo OpenAPI (`moomoo-api`). It includes a FastAPI backend, a SIM execution engine, and a Tauri + React desktop UI for status, preferences, and logs.
 
 Core capabilities:
 
@@ -12,11 +12,12 @@ Core capabilities:
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
 - Sync recent fills via `POST /exec/sync/deals`
+- Trading API wrapper in `core.moomoo_client.MoomooClient`
 
 ## Prerequisites
 
 - Python 3.9+
-- A moomoo (Futu) account with OpenAPI enabled and the OpenD gateway running locally
+- A moomoo account with OpenAPI enabled and the OpenD gateway running locally
 - Node.js 18+ (for the desktop app)
 
 ## Setup
@@ -49,6 +50,8 @@ Core capabilities:
    OPENAI_API_KEY=sk-...
    ```
 
+- `/connect` reads host and port from the request body first, then `MOOMOO_HOST` and `MOOMOO_PORT`, defaulting to `127.0.0.1` and `11111`.
+
 3) Start OpenD (moomoo) and ensure it’s reachable at the host/port you configured.
 
 4) Run the backend server
@@ -79,6 +82,8 @@ Core capabilities:
 - Execution mode switches to `moomoo` upon connect or session restore and reverts to `sim` on disconnect.
 - Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.
 - Account assets query falls back to get_accinfo if accinfo_query is missing and logs errors.
+- Account assets sums per-currency rows and adds unsettled cash when present.
+- Broker returns best-effort figures; totals can still differ from paper-trade app.
 - Market data source is selectable (Moomoo or Yahoo Finance) with no automatic fallback.
 - Yahoo Finance fetches at least five days of intraday bars to avoid empty data on market closures.
 

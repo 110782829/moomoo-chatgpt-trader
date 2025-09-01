@@ -1,6 +1,6 @@
 backtrader>=1.9.76.123
 fastapi>=0.110.0
-futu-api>=9.3.5308
+moomoo-api>=9.4.5408
 pandas>=2.0.0
 pydantic>=1.10.0
 python-dotenv>=1.0.0

@@ -1,8 +1,5 @@
 """
-Wrapper client for the moomoo/Futu OpenAPI for stock trading.
-
-This module provides high-level methods for logging in, retrieving account info,
-and placing orders. It interacts with the OpenD session and Futu API via our wrapper.
+Wrapper client for the moomoo OpenAPI for stock trading.
 """
 
 from typing import List, Optional, Dict, Any
@@ -10,16 +7,44 @@ import os
 import pandas as pd
 import logging
 
-from core.futu_client import (
-    FUTU_AVAILABLE,
-    TradeContext,
-    OpenQuoteContext,
-    TrdEnv,
-    TrdSide,
-    OrderType,
-    SubType,
-    RET_OK,
-)
+MOOMOO_AVAILABLE = False
+
+try:
+    from moomoo import (
+        OpenQuoteContext,
+        RET_OK,
+        TrdEnv,
+        TrdSide,
+        OrderType,
+        SubType,
+    )
+    try:
+        from moomoo import OpenUSTradeContext as TradeContext
+    except Exception:
+        try:
+            from moomoo import OpenSecTradeContext as TradeContext
+        except Exception:
+            try:
+                from moomoo import OpenTradeContext as TradeContext
+            except Exception:
+                TradeContext = None  # type: ignore
+    MOOMOO_AVAILABLE = True
+except Exception:
+    class _DummyEnv:
+        SIMULATE = "SIMULATE"
+        REAL = "REAL"
+
+    class _DummyCtx:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("moomoo-api not installed. Install on Python 3.10/3.11 via `pip install moomoo-api`.")
+
+    OpenQuoteContext = _DummyCtx  # type: ignore
+    TradeContext = _DummyCtx      # type: ignore
+    TrdEnv = _DummyEnv            # type: ignore
+    class TrdSide: BUY="BUY"; SELL="SELL"  # type: ignore
+    class OrderType: NORMAL="NORMAL"; MARKET="MARKET"  # type: ignore
+    class SubType: QUOTE="QUOTE"; K_1M="K_1M"  # type: ignore
+    RET_OK = 0                                     # type: ignore
 
 
 log = logging.getLogger(__name__)
@@ -61,9 +86,9 @@ class MoomooClient:
         self.trading_ctx = None
         self.quote_ctx = None  # type: ignore
 
-        if not FUTU_AVAILABLE:
+        if not MOOMOO_AVAILABLE:
             raise RuntimeError(
-                "futu-api not available. Install on Python 3.10/3.11 via `pip install futu-api`."
+                "moomoo-api not available. Install on Python 3.10/3.11 via `pip install moomoo-api`."
             )
         self.env = TrdEnv.SIMULATE
 
@@ -74,7 +99,7 @@ class MoomooClient:
         if self.connected:
             return
         if TradeContext is None:
-            raise RuntimeError("Trade context class not found in futu (USTrade/SecTrade).")
+            raise RuntimeError("Trade context class not found in moomoo (USTrade/SecTrade).")
 
         # Trade context
         self.trading_ctx = TradeContext(host=self.host, port=self.port)
@@ -140,7 +165,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"get_acc_list incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"get_acc_list incompatible with this moomoo build: {last_err}")
 
     def set_account(self, account_id: str, trd_env) -> None:
         """
@@ -179,7 +204,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"position_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"position_list_query incompatible with this moomoo build: {last_err}")
 
     def get_orders(self) -> List[Dict[str, Any]]:
         if not self.connected:
@@ -203,7 +228,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"order_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
 
     def get_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:
@@ -227,7 +252,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"order_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
 
     # -------- NEW: fills (deals) -------- #
 
@@ -252,7 +277,7 @@ class MoomooClient:
                 # Some builds expose 'deal_list_query'
                 fn = getattr(self.trading_ctx, "deal_list_query", None)
                 if not callable(fn):
-                    raise RuntimeError("deal_list_query not available in this futu build")
+                    raise RuntimeError("deal_list_query not available in this moomoo build")
                 ret, df = fn(**kwargs)  # type: ignore[arg-type]
                 if ret != RET_OK:
                     raise RuntimeError(f"deal_list_query failed: {df}")
@@ -260,7 +285,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"deal_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"deal_list_query incompatible with this moomoo build: {last_err}")
 
     # -------- trade ops -------- #
 
@@ -319,7 +344,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"place_order incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"place_order incompatible with this moomoo build: {last_err}")
 
     def cancel_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:
@@ -350,9 +375,9 @@ class MoomooClient:
         # ---- Fallback: modify_order(CANCEL) with required qty/price ----
         try:
             try:
-                from futu import ModifyOrderOp  # type: ignore
+                from moomoo import ModifyOrderOp  # type: ignore
             except Exception:
-                from futu.common.constant import ModifyOrderOp  # type: ignore
+                from moomoo.common.constant import ModifyOrderOp  # type: ignore
         except Exception as e:
             raise RuntimeError(f"modify_order not available: {e}")
 
@@ -393,7 +418,7 @@ class MoomooClient:
                 last_err = e
                 continue
 
-        raise RuntimeError(f"modify_order CANCEL incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"modify_order CANCEL incompatible with this moomoo build: {last_err}")
 
     # -------- quotes -------- #
 
@@ -404,8 +429,6 @@ class MoomooClient:
             raise RuntimeError("Quote context not available")
 
         codes = [s if "." in s else f"US.{s.upper()}" for s in symbols]
-        from core.futu_client import SubType
-
         tried = [
             {"codes": codes, "subtype_list": [SubType.QUOTE], "is_first_push": True},
             {"code_list": codes, "subtype_list": [SubType.QUOTE], "is_first_push": True},
@@ -420,7 +443,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"subscribe incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"subscribe incompatible with this moomoo build: {last_err}")
 
     def get_quote_latest(self, symbol: str) -> Dict[str, Any]:
         if not self.connected:
@@ -451,21 +474,21 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"get_stock_quote incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"get_stock_quote incompatible with this moomoo build: {last_err}")
 
     # -------- account assets (best-effort) -------- #
     def get_account_assets(self) -> Dict[str, Any]:
         """Return a snapshot of account assets.
-        Tries accinfo_query then get_accinfo across futu builds.
+        Tries accinfo_query then get_accinfo across moomoo builds.
         """
         if not self.connected:
             raise RuntimeError("Not connected")
         if not self.account_id:
             raise RuntimeError("No account selected")
 
-        def normalize(r: Dict[str, Any]) -> Dict[str, Any]:
-            out: Dict[str, Any] = {}
-            def f(*keys, default=0.0):
+        def normalize(recs: List[Dict[str, Any]]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {"equity": 0.0, "bp": 0.0, "cash": 0.0, "unsettled_cash": 0.0}
+            def f(r: Dict[str, Any], *keys, default=0.0):
                 for k in keys:
                     if k in r and r[k] is not None:
                         try:
@@ -473,10 +496,15 @@ class MoomooClient:
                         except Exception:
                             pass
                 return float(default)
-            out["equity"] = f("total_assets", "net_assets", "total_asset")
-            out["bp"] = f("power", "buying_power", "available_funds")
-            out["cash"] = f("cash", "cash_usd", "available_cash")
-            out["raw"] = r
+            for r in recs:
+                out["equity"] += f(r, "total_assets", "net_assets", "total_asset")
+                out["bp"] += f(r, "power", "buying_power", "available_funds")
+                cash = f(r, "cash", "cash_usd", "available_cash")
+                unsettled = f(r, "uncleared_cash", "unclearedCash", "unsettled_cash")
+                out["cash"] += cash + unsettled
+                out["unsettled_cash"] += unsettled
+            out["raw"] = recs
+            # API may omit fields or currencies
             return out
 
         errors: List[str] = []
@@ -497,7 +525,7 @@ class MoomooClient:
                         raise RuntimeError(df)
                     recs = _df_to_records(df)
                     if recs:
-                        return normalize(recs[0])
+                        return normalize(recs)
                     raise RuntimeError("empty data")
                 except Exception as e:
                     msg = f"accinfo_query{kwargs} failed: {e}"
@@ -522,7 +550,7 @@ class MoomooClient:
                         raise RuntimeError(df)
                     recs = _df_to_records(df)
                     if recs:
-                        return normalize(recs[0])
+                        return normalize(recs)
                     raise RuntimeError("empty data")
                 except Exception as e:
                     msg = f"get_accinfo{kwargs} failed: {e}"

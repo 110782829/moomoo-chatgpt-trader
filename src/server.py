@@ -39,7 +39,7 @@ except Exception:
 # --- Internal modules ---
 from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
-from core.futu_client import TrdEnv
+from moomoo import TrdEnv
 from core.session import load_session, save_session, clear_session, reconnect_from_session
 from risk.limits import enforce_order_limits
 
@@ -378,9 +378,16 @@ def connect(req: ConnectRequest):
     Connect to the OpenD gateway using host/port from request JSON
     or .env (MOOMOO_HOST/MOOMOO_PORT). Keeps a singleton client.
     """
-    host = req.host or os.getenv("MOOMOO_HOST", "127.0.0.1")
-    port = req.port or int(os.getenv("MOOMOO_PORT", "11111"))
+    host = req.host or os.getenv("MOOMOO_HOST") or "127.0.0.1"
+    port_raw = req.port or os.getenv("MOOMOO_PORT") or "11111"
     _ = req.client_id or int(os.getenv("MOOMOO_CLIENT_ID", "1"))  # parity only
+
+    if not (host and host.strip()):
+        raise HTTPException(status_code=400, detail="host empty")
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="port not numeric")
 
     try:
         c = MoomooClient(host=host, port=port)  # client_id not required by current build

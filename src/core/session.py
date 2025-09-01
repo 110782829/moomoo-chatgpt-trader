@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.moomoo_client import MoomooClient
-from core.futu_client import TrdEnv
+from moomoo import TrdEnv
 
 SESSION_PATH = Path("data/session.json")
 
