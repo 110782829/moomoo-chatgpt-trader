@@ -5,6 +5,15 @@ export default function SettingsSignals({ toast }: any) {
   const [weights, setWeights] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Strategy name map
+  const pretty: Record<string, string> = {
+    macd_cross: "MACD Cross",
+    bb_breakout: "Bollinger Breakout",
+    stoch_rsi_extreme: "Stochastic RSI Extreme",
+    ma_trend: "MA Trend",
+    rsi_extreme: "RSI Extreme",
+    news: "News",
+  };
 
   useEffect(() => { (async () => { try { const s = await api.getSignalsSettings(); setWeights(s.weights||{}); } catch {} finally { setLoading(false); } })(); }, []);
 
@@ -21,17 +30,26 @@ export default function SettingsSignals({ toast }: any) {
     try { await api.putSignalsSettings({ weights }); toast.show("Signals saved."); } catch(e:any){ toast.show(String(e)); } finally { setSaving(false); }
   }
 
-  const names = Object.keys(weights).length ? Object.keys(weights) : ["macd_cross","bb_breakout","stoch_rsi_extreme"];
+  const names = Object.keys(weights).length
+    ? Object.keys(weights)
+    : [
+        "macd_cross",
+        "bb_breakout",
+        "stoch_rsi_extreme",
+        "ma_trend",
+        "rsi_extreme",
+        "news",
+      ];
 
   return (
     <div className="stack">
-      <div className="table-wrap" style={{marginTop:8}}>
+      <div className="table-wrap" style={{ marginTop: 8, overflowY: "visible" }}>
         <table className="table-modern">
           <thead><tr><th>Strategy</th><th className="num" style={{width:160}}>Weight</th></tr></thead>
           <tbody>
             {names.map(n => (
               <tr key={n}>
-                <td>{n}</td>
+                <td>{pretty[n] || n.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}</td>
                 <td className="num"><input className="input" type="number" step={0.1} min={0} max={2} value={weights[n] ?? 1} onChange={e=>setWeight(n, parseFloat(e.target.value)||0)} style={{maxWidth:120}} /></td>
               </tr>
             ))}

@@ -19,7 +19,7 @@ export default function SettingsPlanner({ toast }: any) {
 
   return (
     <div className="stack">
-      <div className="form-row">
+      <div className="form-row save">
         <div>
           <div className="label">Min confidence (0–1)</div>
           <input className="input" type="number" step={0.01} min={0} max={1} value={minConf} onChange={e=>setMinConf(parseFloat(e.target.value)||0)} />
@@ -30,12 +30,11 @@ export default function SettingsPlanner({ toast }: any) {
         </div>
         <div>
           <div className="label">Strict Prefs</div>
-          <NiceSelect value={String(strict)} onChange={(v)=>setStrict(v==="true")} options={[{value:"false",label:"False"},{value:"true",label:"True"}]} width={140} />
+          <NiceSelect value={String(strict)} onChange={(v)=>setStrict(v==="true")} options={[{value:"false",label:"False"},{value:"true",label:"True"}]} width="100%" />
         </div>
-      </div>
-      <div className="row" style={{ justifyContent: "flex-start" }}>
-        {/* Save button anchored to bottom-left */}
-        <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save Planner"}</button>
+        <div style={{display:"flex",alignItems:"flex-end"}}>
+          <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save Planner"}</button>
+        </div>
       </div>
     </div>
   );

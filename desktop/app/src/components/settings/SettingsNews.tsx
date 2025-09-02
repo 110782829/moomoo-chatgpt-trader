@@ -19,16 +19,15 @@ export default function SettingsNews({ toast }: any) {
 
   return (
     <div className="stack">
-      <div className="form-row">
+      <div className="form-row save">
         <div>
           <div className="label">News Enabled</div>
           <NiceSelect
             value={String(newsEnabled)}
             onChange={(v)=>setNewsEnabled(v==="true")}
             options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
-            width={140}
+            width="100%"
           />
-          {/* Toggle news usage */}
         </div>
         <div>
           <div className="label">TTL (sec)</div>
@@ -40,14 +39,12 @@ export default function SettingsNews({ toast }: any) {
             value={newsProvider}
             onChange={setNewsProvider}
             options={[{value:"heuristic",label:"Heuristic"},{value:"gpt",label:"GPT"}]}
-            width={160}
+            width="100%"
           />
-          {/* Supported providers */}
         </div>
-      </div>
-      <div className="row" style={{ justifyContent: "flex-start" }}>
-        {/* Save button anchored to bottom-left */}
-        <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save News"}</button>
+        <div style={{display:"flex",alignItems:"flex-end"}}>
+          <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save News"}</button>
+        </div>
       </div>
     </div>
   );

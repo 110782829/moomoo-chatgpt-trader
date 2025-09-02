@@ -27,28 +27,52 @@ export default function SettingsData({ toast }: any) {
   }
 
   return (
-    <div className="stack">
-      <div className="form-row">
-        <div>
-          <div className="label">K-Type</div>
-          <NiceSelect value={ktype} onChange={setKtype} options={[{value:"K_DAY",label:"K_DAY"},{value:"K_1M",label:"K_1M"},{value:"K_5M",label:"K_5M"}]} width={140} />
-        </div>
-        <div><div className="label">Bars TTL (sec)</div><input className="input" type="number" value={barsTtl} onChange={e=>setBarsTtl(parseInt(e.target.value)||0)} /></div>
-        <div><div className="label">Deals sync (sec)</div><input className="input" type="number" value={dealsSync} onChange={e=>setDealsSync(parseInt(e.target.value)||0)} /></div>
-        <div>
-          <div className="label">Data Source</div>
-          <NiceSelect
-            value={dataSource}
-            onChange={setDataSource}
-            options={[{value:"futu",label:"Moomoo"},{value:"yfinance",label:"Yahoo Finance"}]}
-            width={160}
-          />
-          {/* you choose where data comes from */}
-        </div>
+    <div className="form-row data-grid">{/* 3 rows x 2 columns */}
+      <div>
+        <div className="label">K-Type</div>
+        <NiceSelect value={ktype} onChange={setKtype} options={[{value:"K_DAY",label:"K_DAY"},{value:"K_1M",label:"K_1M"},{value:"K_5M",label:"K_5M"}]} width="100%" />
       </div>
-      <div className="row" style={{marginTop:8}}>
-        <button className="btn" onClick={()=>api.syncDealsNow().then(()=>toast.show("Sync triggered")).catch((e:any)=>toast.show(String(e)))}>Sync Deals Now</button>
-        <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save Data Settings"}</button>
+      <div>
+        <div className="label">Bars TTL (sec)</div>
+        <input className="input" type="number" value={barsTtl} onChange={e=>setBarsTtl(parseInt(e.target.value)||0)} />
+      </div>
+      <div>
+        <div className="label">Deals sync (sec)</div>
+        <input className="input" type="number" value={dealsSync} onChange={e=>setDealsSync(parseInt(e.target.value)||0)} />
+      </div>
+      <div>
+        <div className="label">Data Source</div>
+        <NiceSelect
+          value={dataSource}
+          onChange={setDataSource}
+          options={[{value:"futu",label:"Moomoo"},{value:"yfinance",label:"Yahoo Finance"}]}
+          width="100%"
+        />
+      </div>
+      {/* action buttons */}
+      <div style={{ display:"flex", alignItems:"flex-start", marginTop:10 }}>
+        <button
+          className="btn"
+          style={{ width:"100%" }}
+          onClick={() =>
+            api
+              .syncDealsNow()
+              .then(() => toast.show("Sync triggered"))
+              .catch((e: any) => toast.show(String(e)))
+          }
+        >
+          Sync Deals Now
+        </button>
+      </div>
+      <div style={{ display:"flex", alignItems:"flex-start", marginTop:10 }}>
+        <button
+          className="btn brand"
+          style={{ width:"100%" }}
+          onClick={save}
+          disabled={saving}
+        >
+          {saving ? "Saving…" : "Save Data Settings"}
+        </button>
       </div>
     </div>
   );

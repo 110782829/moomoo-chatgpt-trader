@@ -10,7 +10,7 @@ export default function SettingsRisk({ cfg, setCfg, cfgGet, saveRisk, saving }: 
             value={String(cfgGet("enabled", true))}
             onChange={(v: string)=>setCfg({ ...(cfg||{}), enabled: v === "true" })}
             options={[{ value:"true", label:"True" }, { value:"false", label:"False" }]}
-            width={140}
+            width="100%"
           />
         </div>
         <div><div className="label">Max $ per trade</div>

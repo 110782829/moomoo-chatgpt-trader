@@ -7,7 +7,9 @@ Core capabilities:
 - Connect to moomoo via local OpenD gateway
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
-- Settings tab for connection, risk, data, signals, planner, trading preferences, style preferences, watchlist, news, and advanced tools
+- Settings tab for connection, risk, data, signals, planner, trading preferences, style preferences, watchlist, and news
+- Signal card adjusts weights for six built-in strategies
+- Watchlist card lists up to six symbols with scroll
 - Activity tab shows recent market data with its provider
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs

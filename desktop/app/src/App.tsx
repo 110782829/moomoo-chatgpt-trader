@@ -14,7 +14,6 @@ import SettingsTrading from "./components/settings/SettingsTrading";
 import SettingsPreferences from "./components/settings/SettingsPreferences";
 import SettingsWatchlist from "./components/settings/SettingsWatchlist";
 import SettingsNews from "./components/settings/SettingsNews";
-import SettingsAdvanced from "./components/settings/SettingsAdvanced";
 
 // ---------- Styles ----------
 const css = `
@@ -141,7 +140,10 @@ body{margin:0;background:var(--bg);
   }
 
 .label{font-size:12px;color:var(--muted);margin-bottom:6px}
-.form-row{display:grid;gap:12px;grid-template-columns:repeat(3,1fr)} @media (max-width:900px){.form-row{grid-template-columns:1fr}}
+.form-row{display:grid;gap:12px;grid-template-columns:repeat(3,1fr)}
+.form-row.data-grid{grid-template-columns:repeat(2,1fr);grid-template-rows:repeat(3,auto)}
+.form-row.save{grid-template-columns:repeat(3,1fr) auto}
+@media (max-width:900px){.form-row{grid-template-columns:1fr}.form-row.save{grid-template-columns:1fr}}
 .table-wrap{overflow:auto;border-radius:10px}
 table{width:100%;border-collapse:collapse;background:var(--panel)}
 th,td{padding:8px 10px;border-top:1px solid var(--border)} th{text-align:left;font-size:12px;color:var(--muted);background:#0f1420;position:sticky;top:0;z-index:1}
@@ -185,7 +187,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 @media (max-width:980px){.panels3{grid-template-columns:1fr}.panels3 .span-2{grid-column:auto}}
 
 .panels2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
-@media (max-width:980px){.panels2{grid-template-columns:1fr}}
+.panels2.w23{grid-template-columns:2fr 3fr}
+@media (max-width:980px){.panels2{grid-template-columns:1fr}.panels2.w23{grid-template-columns:1fr}}
 
   /* Fixed gradient overlay to avoid scroll seams */
 .bgfx{position:fixed;inset:0;z-index:-1;pointer-events:none;
@@ -847,7 +850,7 @@ async function openExplain(r:any) {
               clientId={clientId} setClientId={setClientId}
               accountId={accountId} setAccountId={setAccountId}
               trdEnv={trdEnv} setTrdEnv={setTrdEnv}
-              doConnect={doConnect} reconnectFromSaved={reconnectFromSaved} doSelect={doSelect}
+              doConnect={doConnect} doSelect={doSelect}
               connected={connected} activeAccount={activeAccount} toast={toast}
             />
           </SectionCard>
@@ -856,31 +859,14 @@ async function openExplain(r:any) {
             <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} />
           </SectionCard>
 
-          <div className="panels2">
-            <SectionCard id="data" title="Data">
-              <SettingsData toast={toast} />
+          <div className="panels2" style={{ alignItems: "stretch" }}>
+            <SectionCard id="watchlist" title="Watchlist">
+              <SettingsWatchlist toast={toast} />
             </SectionCard>
             <SectionCard id="signals" title="Signals">
               <SettingsSignals toast={toast} />
             </SectionCard>
           </div>
-
-          <div className="panels2" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
-            <SectionCard
-              id="watchlist"
-              title="Watchlist"
-              style={{ gridRow: "span 2" }}
-            >
-              <SettingsWatchlist toast={toast} />
-            </SectionCard>
-            <SectionCard id="planner" title="Planner">
-              <SettingsPlanner toast={toast} />
-            </SectionCard>
-            <SectionCard id="news" title="News">
-              <SettingsNews toast={toast} />
-            </SectionCard>
-          </div>
-
           <SectionCard id="trading" title="Trading Preferences">
             <SettingsTrading />
           </SectionCard>
@@ -889,9 +875,17 @@ async function openExplain(r:any) {
             <SettingsPreferences toast={toast} />
           </SectionCard>
 
-          <SectionCard id="advanced" title="Advanced">
-            <SettingsAdvanced toast={toast} />
-          </SectionCard>
+          <div className="panels2 w23" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
+            <SectionCard id="data" title="Data" style={{ gridRow: "span 2" }}>
+              <SettingsData toast={toast} />
+            </SectionCard>
+            <SectionCard id="planner" title="Planner">
+              <SettingsPlanner toast={toast} />
+            </SectionCard>
+            <SectionCard id="news" title="News">
+              <SettingsNews toast={toast} />
+            </SectionCard>
+          </div>
         </div>
       )}
 
@@ -1261,23 +1255,6 @@ async function doConnect() {
   }
 }
 
-async function reconnectFromSaved() {
-  try {
-    const st = await api.sessionStatus();
-    const saved = st?.saved || {};
-    const h = String(saved.host || host);
-    const p = Number(saved.port || port);
-    const cid = Number(saved.client_id || clientId);
-    await api.connect(h, p, cid);
-    setHost(h); setPort(p); setClientId(cid);
-    setConnected(true);
-    try { setActiveAccount(await api.accountsActive()); } catch {}
-    toast.show("Reconnected from saved.");
-  } catch (e:any) {
-    toast.show(`Reconnect failed: ${brief(e)}`);
-  }
-}
-
 async function doSelect() {
   try {
     const resp = await api.selectAccount(String(accountId), trdEnv);
@@ -1429,8 +1406,8 @@ function useAnchorPosition(trigger: HTMLElement | null, open: boolean, menuMaxH 
 }
 
 export function NiceSelect({
-  value, onChange, options, width = 160, placeholder = "Select…"
-}: { value: string; onChange: (v: string) => void; options: Opt[]; width?: number; placeholder?: string }) {
+  value, onChange, options, width = "100%", placeholder = "Select…"
+}: { value: string; onChange: (v: string) => void; options: Opt[]; width?: number | string; placeholder?: string }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -1474,8 +1451,8 @@ export function NiceSelect({
 }
 
 export function NiceCombobox({
-  value, onChange, options, width = 200, placeholder = "Search…"
-}: { value: string; onChange: (v: string) => void; options: Opt[]; width?: number; placeholder?: string }) {
+  value, onChange, options, width = "100%", placeholder = "Search…"
+}: { value: string; onChange: (v: string) => void; options: Opt[]; width?: number | string; placeholder?: string }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -1896,7 +1873,7 @@ function StrategyCatalog({ connected }: { connected: boolean }) {
                 value={ktype}
                 onChange={setKType}
                 options={["K_1M","K_5M","K_15M","K_30M","K_60M","K_1D"].map(k=>({value:k,label:k}))}
-                width={180}
+                width="100%"
                 placeholder="Search ktype…"
               />
             </div>
@@ -1910,7 +1887,7 @@ function StrategyCatalog({ connected }: { connected: boolean }) {
                 value={sizeMode}
                 onChange={(v)=>setSizeMode(v as any)}
                 options={[{value:"shares",label:"shares"},{value:"usd",label:"usd"}]}
-                width={140}
+                width="100%"
               />
             </div>
           </div>
@@ -1922,7 +1899,7 @@ function StrategyCatalog({ connected }: { connected: boolean }) {
                 value={String(allowReal)}
                 onChange={(v)=>setAllowReal(v==="true")}
                 options={[{value:"false",label:"False"},{value:"true",label:"True"}]}
-                width={140}
+                width="100%"
               />
             </div>
           </div>
@@ -2458,7 +2435,7 @@ function DiscoverySettings() {
             value={String(discEnabled)}
             onChange={(v)=>setDiscEnabled(v==="true")}
             options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
-            width={140}
+            width="100%"
           />
         </div>
         <div>
@@ -2467,7 +2444,7 @@ function DiscoverySettings() {
             value={String(discOnly)}
             onChange={(v)=>setDiscOnly(v==="true")}
             options={[{value:"false",label:"False"},{value:"true",label:"True"}]}
-            width={160}
+            width="100%"
           />
         </div>
         <div>
@@ -2476,7 +2453,7 @@ function DiscoverySettings() {
             value={String(newsEnabled)}
             onChange={(v)=>setNewsEnabled(v==="true")}
             options={[{value:"true",label:"True"},{value:"false",label:"False"}]}
-            width={140}
+            width="100%"
           />
         </div>
         <div>
@@ -2485,7 +2462,7 @@ function DiscoverySettings() {
             value={newsProvider}
             onChange={(v)=>setNewsProvider(v)}
             options={[{value:"heuristic",label:"Heuristic"},{value:"gpt",label:"GPT"}]}
-            width={160}
+            width="100%"
           />
         </div>
         <div>
@@ -2498,7 +2475,7 @@ function DiscoverySettings() {
             value={ktype}
             onChange={(v)=>setKtype(v as string)}
             options={["K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY"].map(k=>({value:k,label:k}))}
-            width={140}
+            width="100%"
           />
         </div>
         <div>
@@ -2507,7 +2484,7 @@ function DiscoverySettings() {
             value={dataSource}
             onChange={(v)=>setDataSource(v as string)}
             options={[{value:"futu",label:"Moomoo"},{value:"yfinance",label:"Yahoo Finance"}]}
-            width={160}
+            width="100%"
           />
         </div>
         <div>
@@ -2520,7 +2497,7 @@ function DiscoverySettings() {
             value={execMode}
             onChange={(v)=>setExecMode((v as any) as ("sim"|"moomoo"))}
             options={[{value:"sim",label:"SIM"},{value:"moomoo",label:"Moomoo"}]}
-            width={140}
+            width="100%"
           />
         </div>
         <div>
@@ -2570,7 +2547,16 @@ function SignalsSettings() {
     } finally { setSaving(false); }
   }
 
-  const stratNames = Object.keys(weights).length ? Object.keys(weights) : ["macd_cross","bb_breakout","stoch_rsi_extreme"];
+  const stratNames = Object.keys(weights).length
+    ? Object.keys(weights)
+    : [
+        "macd_cross",
+        "bb_breakout",
+        "stoch_rsi_extreme",
+        "ma_trend",
+        "rsi_extreme",
+        "news",
+      ];
 
   return (
     <div className="stack">
@@ -2653,7 +2639,7 @@ function PlannerSettings() {
             value={String(strict)}
             onChange={(v)=>setStrict(v==="true")}
             options={[{value:"false",label:"False"},{value:"true",label:"True"}]}
-            width={140}
+            width="100%"
           />
         </div>
         <div className="row" style={{alignItems:"flex-end", marginLeft:"auto"}}>

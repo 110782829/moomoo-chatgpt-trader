@@ -9,7 +9,6 @@ export default function SettingsConnection({
   accountId, setAccountId,
   trdEnv, setTrdEnv,
   doConnect,
-  reconnectFromSaved,
   doSelect,
   connected,
   activeAccount,
@@ -26,22 +25,20 @@ export default function SettingsConnection({
       .then(() => { setExecMode(m); toast.show("Exec mode saved."); })
       .catch((e: any) => toast.show(String(e)));
   }
+
+  async function connectAccount() {
+    await doConnect();
+    await doSelect();
+  }
   return (
     <>
       <div className="help" style={{marginBottom:8}}>
-        Connect to your local OpenD gateway, then select an account (SIMULATE recommended).
+        {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}
       </div>
       <div className="form-row">
         <div><div className="label">Host</div><input className="input" value={host} onChange={e=>setHost(e.target.value)} /></div>
         <div><div className="label">Port</div><input className="input" type="number" value={port} onChange={e=>setPort(parseInt(e.target.value)||0)} /></div>
         <div><div className="label">Client ID</div><input className="input" type="number" value={clientId} onChange={e=>setClientId(parseInt(e.target.value)||1)} /></div>
-      </div>
-      <div className="row" style={{marginTop:8}}>
-        <button className="btn" onClick={doConnect}>Connect</button>
-        <button className="btn" onClick={reconnectFromSaved}>Reconnect (Saved)</button>
-        <span className="help" style={{marginLeft:"auto"}}>
-          {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}
-        </span>
       </div>
       <div className="form-row" style={{marginTop:12}}>
         <div>
@@ -57,7 +54,7 @@ export default function SettingsConnection({
               { value: "SIMULATE", label: "SIMULATE" },
               { value: "REAL", label: "REAL" },
             ]}
-            width={160}
+            width="100%"
           />
         </div>
         <div>
@@ -69,14 +66,12 @@ export default function SettingsConnection({
               { value: "sim", label: "Sim" },
               { value: "moomoo", label: "Moomoo" },
             ]}
-            width={160}
+            width="100%"
           />
         </div>
       </div>
       <div className="row" style={{marginTop:8}}>
-        <button className="btn brand" onClick={doSelect}>Select Account</button>
-        <button className="btn" onClick={()=>api.sessionSave(host as string, Number(port), String(accountId), String(trdEnv)).then(()=>toast.show("Session saved.")).catch((e: any)=>toast.show(String(e)))}>Save Session</button>
-        <button className="btn" onClick={()=>api.sessionClear().then(()=>toast.show("Saved session cleared.")).catch((e: any)=>toast.show(String(e)))}>Clear Saved</button>
+        <button className="btn brand" onClick={connectAccount}>Connect Account</button>
       </div>
     </>
   );

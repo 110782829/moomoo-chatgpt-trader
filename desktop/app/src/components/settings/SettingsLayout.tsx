@@ -8,7 +8,7 @@ export interface Section {
 
 export function SectionCard({ id, title, children, style }: { id: string; title: string; children: ReactNode; style?: CSSProperties }) {
   return (
-    <section id={id} style={{ scrollMarginTop: 20, display: "flex", ...style }}>
+    <section id={id} style={{ scrollMarginTop: 20, display: "flex", height: "100%", ...style }}>
       {/* Panel fills height */}
       <div className="panel" style={{ flex: 1 }}>
         {/* parent gap controls spacing */}

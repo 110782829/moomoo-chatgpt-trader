@@ -1147,12 +1147,20 @@ def risk_status():
 def session_status():
     s = load_session()
     c = get_client()
+    # env as string
+    env_obj = getattr(c, "env", None)
+    env_name = getattr(env_obj, "name", None)
+    if env_name is None:
+        if env_obj == TrdEnv.SIMULATE:
+            env_name = "SIMULATE"
+        elif env_obj == TrdEnv.REAL:
+            env_name = "REAL"
     return {
         "saved": s or {},
         "connected": bool(c and getattr(c, "connected", False)),
         "active_account": {
             "account_id": getattr(c, "account_id", None),
-            "trd_env": getattr(getattr(c, "env", None), "name", None),
+            "trd_env": env_name,
         } if c else None,
     }
 
@@ -1832,8 +1840,22 @@ class SignalsSettings(BaseModel):
 def autopilot_signals_get():
     # defaults
     enabled = True
-    strategies: Dict[str, bool] = {"macd_cross": True, "bb_breakout": True, "stoch_rsi_extreme": True}
-    weights: Dict[str, float] = {"macd_cross": 1.0, "bb_breakout": 1.0, "stoch_rsi_extreme": 1.0}
+    strategies: Dict[str, bool] = {
+        "macd_cross": True,
+        "bb_breakout": True,
+        "stoch_rsi_extreme": True,
+        "ma_trend": True,
+        "rsi_extreme": True,
+        "news": True,
+    }
+    weights: Dict[str, float] = {
+        "macd_cross": 1.0,
+        "bb_breakout": 1.0,
+        "stoch_rsi_extreme": 1.0,
+        "ma_trend": 1.0,
+        "rsi_extreme": 1.0,
+        "news": 1.0,
+    }
     try:
         raw = _get_json_setting("autopilot.signals.enabled", None)
         if raw is not None:
