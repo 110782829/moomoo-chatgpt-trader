@@ -3,11 +3,18 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from "react-dom";
-
-// ---------- Config ----------
-const DEFAULT_API_BASE = "http://127.0.0.1:8000";
-const API_BASE =
-  (import.meta as any)?.env?.VITE_API_BASE?.toString() || DEFAULT_API_BASE;
+import api, { API_BASE, SEND, GET } from "./api";
+import { SectionCard } from "./components/settings/SettingsLayout";
+import SettingsConnection from "./components/settings/SettingsConnection";
+import SettingsRisk from "./components/settings/SettingsRisk";
+import SettingsData from "./components/settings/SettingsData";
+import SettingsSignals from "./components/settings/SettingsSignals";
+import SettingsPlanner from "./components/settings/SettingsPlanner";
+import SettingsTrading from "./components/settings/SettingsTrading";
+import SettingsPreferences from "./components/settings/SettingsPreferences";
+import SettingsWatchlist from "./components/settings/SettingsWatchlist";
+import SettingsNews from "./components/settings/SettingsNews";
+import SettingsAdvanced from "./components/settings/SettingsAdvanced";
 
 // ---------- Styles ----------
 const css = `
@@ -144,6 +151,10 @@ th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;font-feature-se
 .help{color:var(--muted);font-size:12px}
 .toast{position:fixed;right:16px;bottom:16px;padding:10px 12px;border-radius:10px;background:#0e1320;border:1px solid var(--border);color:var(--text);box-shadow:0 10px 30px rgba(0,0,0,.35);max-width:360px}
 small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background:rgba(124,58,237,.18);padding:2px 6px;border-radius:6px}
+.nl-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px}
+.nl-fixed{height:340px;resize:none;font-family:Inter, ui-sans-serif;line-height:1.5}
+.toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:8px}
+.counter{font-size:12px;color:var(--muted)}
 
 .indicator{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320}
 .dot{width:8px;height:8px;border-radius:50%}
@@ -341,7 +352,7 @@ type RiskConfig = {
 type StrategyKind = "ma-crossover" | "ma-grid";
 
 // ---------- Small helpers ----------
-function useLocalStorage<T>(key: string, initial: T) {
+export function useLocalStorage<T>(key: string, initial: T) {
   const [v, setV] = useState<T>(() => {
     try {
       const raw = localStorage.getItem(key);
@@ -394,21 +405,6 @@ async function askConfirm(message: string) {
   return window.confirm(message);
 }
 
-async function GET<T>(path: string, params?: Record<string, any>): Promise<T> {
-  const url = new URL(path, API_BASE);
-  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
-  const r = await fetch(url, { credentials: "omit" });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<T>;
-}
-async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" | "PATCH" | "DELETE" = "POST"): Promise<T> {
-  const r = await fetch(new URL(path, API_BASE), {
-    method, headers: { "Content-Type": "application/json" },
-    body: method==="DELETE" ? undefined : (body ? JSON.stringify(body) : undefined),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<T>;
-}
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 const nowIso = () => new Date().toLocaleTimeString();
 const shortId = (s?: string) => {
@@ -427,78 +423,7 @@ function statusTag(status?: string) {
 }
 
   // ---------- API bindings ----------
-  const api = {
-  // connection
-  connect: (host: string, port: number, client_id: number) => SEND("/connect", { host, port, client_id }),
-  accountsActive: () => GET<{ account_id: string | null; trd_env: string | null }>("/accounts/active"),
-  selectAccount: (account_id: string, trd_env: "SIMULATE" | "REAL") =>
-    SEND("/accounts/select", { account_id, trd_env }),
-
-  // session helpers
-  sessionStatus: () => GET<{ saved: any; connected: boolean; active_account: any }>("/session/status"),
-  sessionSave: (host: string, port: number, account_id?: string, trd_env?: string) =>
-    SEND("/session/save", { host, port, account_id, trd_env }),
-  sessionClear: () => SEND("/session/clear", {}),
-
-  // bot core
-  getBotMode: () => GET<{ mode: Mode }>("/bot/mode"),
-  setBotMode: (mode: Mode) => SEND<{ mode: Mode }>("/bot/mode", { mode }, "PUT"),
-  getRiskConfig: () => GET<RiskConfig>("/risk/config"),
-  putRiskConfig: (cfg: RiskConfig) => SEND<RiskConfig>("/risk/config", cfg, "PUT"),
-  getRiskStatus: () => GET<{ ok: boolean; config: RiskConfig; open_positions: number | null }>("/risk/status"),
-  getPnlToday: () => GET<{ date: string; realized_pnl: number }>("/pnl/today"),
-  getAccountAssets: () => GET<{ mode:string; equity?: number|null; bp?: number|null; cash?: number|null }>("/accounts/assets"),
-
-  flattenAll: (symbols?: string[]) => SEND("/positions/flatten", symbols?.length ? { symbols } : {}),
-  listStrategies: () => GET<Array<{ id: number; name: string; active: boolean; symbol: string }>>("/automation/strategies"),
-  stopStrategy: (id: number) => SEND(`/automation/stop/${id}`),
-
-  getActionLogs: (q: { limit?: number; symbol?: string; since_hours?: number }) => GET<any[]>("/logs/actions", q),
-  backtestMA: (payload: any) => SEND("/backtest/ma-crossover", payload),
-
-  // strategy starters (live)
-  startMA: (payload: any) => SEND("/automation/start/ma-crossover", payload),
-  // startGrid: (payload: any) => SEND("/automation/start/ma-grid", payload),
-  // autopilot
-  autopilotStatus: () => GET("/autopilot/status"),
-  autopilotEnable: (on: boolean) => SEND("/autopilot/enable", { on }),
-  autopilotPreview: () => SEND("/autopilot/preview", {}),
-  autopilotLogs: (limit: number) => GET<any[]>("/autopilot/logs", { limit }),
-  autopilotContext: () => GET("/autopilot/context"),
-  autopilotLastOutput: () => GET("/autopilot/last_output"),
-
-  // autopilot prefs/style/watchlist
-  getAutoPrefs: () => GET<any>("/autopilot/prefs"),
-  putAutoPrefs: (prefs: any) => SEND("/autopilot/prefs", prefs, "PUT"),
-  getAutoStyle: () => GET<{ raw: string; summary: string }>("/autopilot/style"),
-  postAutoStyle: (text: string) => SEND<{ raw: string; summary: string }>("/autopilot/style", { text }),
-  deleteAutoStyle: () => SEND<{ raw: string; summary: string }>("/autopilot/style", undefined, "DELETE"),
-  // watchlist endpoints intentionally not used in UI for now
-  getDiscovery: () => GET<{ enabled: boolean; only: boolean; seed: string[]; preview: string[] }>("/autopilot/discovery"),
-  putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
-    getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number; provider?: string }>("/autopilot/news"),
-    putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number; provider?: string }) => SEND("/autopilot/news", payload, "PUT"),
-    getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number; data_source: string }>("/autopilot/data"),
-    putDataSettings: (payload: { ktype?: string; bars_ttl_sec?: number; deals_sync_sec?: number; data_source?: string }) => SEND("/autopilot/data", payload, "PUT"),
-    getSignalsSettings: () => GET<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>("/autopilot/signals"),
-    putSignalsSettings: (payload: Partial<{ enabled: boolean; strategies: Record<string, boolean>; weights: Record<string, number> }>) => SEND("/autopilot/signals", payload, "PUT"),
-  getExecMode: () => GET<{ mode: "sim"|"moomoo" }>("/execution/mode"),
-  putExecMode: (mode: "sim"|"moomoo") => SEND("/execution/mode", { mode }, "PUT"),
-  syncDealsNow: () => SEND("/sync/deals", {}),
-  syncExecDeals: () => SEND("/exec/sync/deals", {}),
-  getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
-  putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
-
-  // execution (SIM)
-  listExecOrders: (q: { symbol?: string; status?: string; limit?: number }) => GET<any[]>("/exec/orders", q),
-  cancelExecOrder: (id: string) => SEND(`/exec/orders/${id}/cancel`, {}, "POST"),
-  listExecFills: (q: { symbol?: string; limit?: number }) => GET<any[]>("/exec/fills", q),
-  // execution (SIM) – positions
-  listExecPositions: (q?: { symbol?: string; limit?: number }) => GET<any[]>("/exec/positions", q || {}),
-  flattenExecPositions: (symbols?: string[]) => SEND("/exec/flatten", symbols?.length ? { symbols } : {}),
-
-
-};
+  // (moved to src/api.ts and imported as `api`)
 
 // ---------- Toast ----------
 function useToast() {
@@ -914,123 +839,60 @@ async function openExplain(r:any) {
 
       {/* Settings */}
       {tab===Tab.Settings && (
-        <section className="stack">
-          {/* Connection */}
-          <div className="panel">
-            <h2 style={{marginTop:0,marginBottom:8}}>Connection</h2>
-            <div className="help" style={{marginBottom:8}}>
-              Connect to your local OpenD gateway, then select an account (SIMULATE recommended).
-            </div>
-            <div className="form-row">
-              <div><div className="label">Host</div><input className="input" value={host} onChange={e=>setHost(e.target.value)} /></div>
-              <div><div className="label">Port</div><input className="input" type="number" value={port} onChange={e=>setPort(parseInt(e.target.value)||0)} /></div>
-              <div><div className="label">Client ID</div><input className="input" type="number" value={clientId} onChange={e=>setClientId(parseInt(e.target.value)||1)} /></div>
-            </div>
-            <div className="row" style={{marginTop:8}}>
-              <button className="btn" onClick={doConnect}>Connect</button>
-              <button className="btn" onClick={reconnectFromSaved}>Reconnect (Saved)</button>
-              <span className="help" style={{marginLeft:"auto"}}>
-                {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}
-              </span>
-            </div>
+        <div className="stack">
+          <SectionCard id="connection" title="Connection">
+            <SettingsConnection
+              host={host} setHost={setHost}
+              port={port} setPort={setPort}
+              clientId={clientId} setClientId={setClientId}
+              accountId={accountId} setAccountId={setAccountId}
+              trdEnv={trdEnv} setTrdEnv={setTrdEnv}
+              doConnect={doConnect} reconnectFromSaved={reconnectFromSaved} doSelect={doSelect}
+              connected={connected} activeAccount={activeAccount} toast={toast}
+            />
+          </SectionCard>
 
-            <div className="form-row" style={{marginTop:12}}>
-              <div><div className="label">Account ID</div><input className="input" value={accountId} onChange={e=>setAccountId(e.target.value)} placeholder="e.g., 54871" /></div>
-              <div>
-                <div className="label">Trading Env</div>
-                  <NiceSelect
-                    value={trdEnv}
-                    onChange={(v)=>setTrdEnv((v === "REAL" ? "REAL" : "SIMULATE") as "REAL"|"SIMULATE")}
-                    options={[
-                      { value: "SIMULATE", label: "SIMULATE" },
-                      { value: "REAL", label: "REAL" },
-                    ]}
-                    width={180}
-                  />
-              </div>
-            </div>
-            <div className="row" style={{marginTop:8}}>
-              <button className="btn brand" onClick={doSelect}>Select Account</button>
-              <button className="btn" onClick={()=>api.sessionSave(host as string, Number(port), String(accountId), String(trdEnv)).then(()=>toast.show("Session saved.")).catch(e=>toast.show(brief(e)))}>Save Session</button>
-              <button className="btn" onClick={()=>api.sessionClear().then(()=>toast.show("Saved session cleared.")).catch(e=>toast.show(brief(e)))}>Clear Saved</button>
-            </div>
-      </div>
+          <SectionCard id="risk" title="Risk">
+            <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} />
+          </SectionCard>
 
-          {/* Risk */}
-          <div className="panel">
-            <h2 style={{marginTop:0,marginBottom:10}}>Risk Configuration</h2>
-            {!cfg ? (<div className="help">Loading risk config…</div>) : (
-              <>
-                <div className="form-row">
-                  <div><div className="label">Enabled</div>
-                    <NiceSelect
-                      value={String(cfgGet("enabled", true))}
-                      onChange={(v)=>setCfg({ ...(cfg||{}), enabled: v === "true" })}
-                      options={[{ value:"true", label:"True" }, { value:"false", label:"False" }]}
-                      width={140}
-                    />
-                  </div>
-                  <div><div className="label">Max $ per trade</div>
-                    <input className="input" type="number" value={cfgGet("max_usd_per_trade", 1000)}
-                      onChange={e=>setCfg({ ...(cfg||{}), max_usd_per_trade: Number(e.target.value) })}/>
-                  </div>
-                  <div><div className="label">Max open positions</div>
-                    <input className="input" type="number" value={cfgGet("max_open_positions", 5)}
-                      onChange={e=>setCfg({ ...(cfg||{}), max_open_positions: Number(e.target.value) })}/>
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div><div className="label">Max daily loss ($)</div>
-                    <input className="input" type="number" value={cfgGet("max_daily_loss_usd", 200)}
-                      onChange={e=>setCfg({ ...(cfg||{}), max_daily_loss_usd: Number(e.target.value) })}/>
-                  </div>
-                  <div><div className="label">Start (PT)</div>
-                    <input className="input" value={cfgGet("trading_hours_pt", {start:"06:30",end:"13:00"}).start}
-                      onChange={e=>setCfg({ ...(cfg||{}), trading_hours_pt: { ...(cfg?.trading_hours_pt||{start:"06:30",end:"13:00"}), start: e.target.value }})}/>
-                  </div>
-                  <div><div className="label">End (PT)</div>
-                    <input className="input" value={cfgGet("trading_hours_pt", {start:"06:30",end:"13:00"}).end}
-                      onChange={e=>setCfg({ ...(cfg||{}), trading_hours_pt: { ...(cfg?.trading_hours_pt||{start:"06:30",end:"13:00"}), end: e.target.value }})}/>
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div><div className="label">Flatten before close (min)</div>
-                    <input className="input" type="number" value={cfgGet("flatten_before_close_min", 5)}
-                      onChange={e=>setCfg({ ...(cfg||{}), flatten_before_close_min: Number(e.target.value) })}/>
-                  </div>
-                </div>
-                <div className="row" style={{marginTop:10}}>
-                  <button className="btn brand" onClick={saveRisk} disabled={saving}>{saving ? "Saving…" : "Save Risk Config"}</button>
-                </div>
-              </>
-            )}
-            <div className="help" style={{marginTop:8}}>Risk checks are enforced server-side before any order is sent.</div>
-          </div>
-          {/* Discovery and Data */}
           <div className="panels2">
-            <div className="panel compact">
-              <h2 style={{marginTop:0}}>Discovery</h2>
-              <DiscoverySettings />
-            </div>
-            <div className="panel compact">
-              <h2 style={{marginTop:0}}>Data & Signals</h2>
-              <SignalsSettings />
-            </div>
+            <SectionCard id="data" title="Data">
+              <SettingsData toast={toast} />
+            </SectionCard>
+            <SectionCard id="signals" title="Signals">
+              <SettingsSignals toast={toast} />
+            </SectionCard>
           </div>
 
-          {/* Trading Preferences & Behavior */}
-          <div className="panels2">
-            <div className="panel compact">
-              <h2 style={{marginTop:0}}>Trading Preferences</h2>
-              <TradingPreferences />
-            </div>
-            <div className="panel compact">
-              <h2 style={{marginTop:0}}>Trading Behavior</h2>
-              <StyleAndWatchlist />
-            </div>
+          <div className="panels2" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
+            <SectionCard
+              id="watchlist"
+              title="Watchlist"
+              style={{ gridRow: "span 2" }}
+            >
+              <SettingsWatchlist toast={toast} />
+            </SectionCard>
+            <SectionCard id="planner" title="Planner">
+              <SettingsPlanner toast={toast} />
+            </SectionCard>
+            <SectionCard id="news" title="News">
+              <SettingsNews toast={toast} />
+            </SectionCard>
           </div>
 
-        </section>
+          <SectionCard id="trading" title="Trading Preferences">
+            <SettingsTrading />
+          </SectionCard>
+
+          <SectionCard id="preferences" title="Preferences">
+            <SettingsPreferences toast={toast} />
+          </SectionCard>
+
+          <SectionCard id="advanced" title="Advanced">
+            <SettingsAdvanced toast={toast} />
+          </SectionCard>
+        </div>
       )}
 
       
