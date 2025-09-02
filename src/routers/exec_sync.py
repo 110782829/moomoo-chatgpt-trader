@@ -2,20 +2,28 @@ from fastapi import APIRouter, Depends, HTTPException
 from execution.container import get_execution
 from execution.base import ExecutionService
 
-try:
-    from server import get_client
-except Exception:  # pragma: no cover
-    def get_client():
+
+def _get_client():
+    """Import lazily to avoid circular reference."""
+    try:
+        from server import get_client
+
+        return get_client()
+    except Exception:
         return None
+
 
 router = APIRouter(prefix="/exec/sync", tags=["execution"])
 
 
 @router.post("/deals")
 def sync_deals(exec_service: ExecutionService = Depends(get_execution)):
-    c = get_client()
-    if c is None:
+    c = _get_client()
+    # Require link and account
+    if c is None or not getattr(c, "connected", False):
         raise HTTPException(status_code=400, detail="Not connected")
+    if not getattr(c, "account_id", None):
+        raise HTTPException(status_code=400, detail="No account selected")
     if not hasattr(exec_service, "sync_deals"):
         raise HTTPException(status_code=400, detail="Sync not supported")
     try:

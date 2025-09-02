@@ -153,10 +153,15 @@ th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;font-feature-se
 .help{color:var(--muted);font-size:12px}
 .toast{position:fixed;right:16px;bottom:16px;padding:10px 12px;border-radius:10px;background:#0e1320;border:1px solid var(--border);color:var(--text);box-shadow:0 10px 30px rgba(0,0,0,.35);max-width:360px}
 small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background:rgba(124,58,237,.18);padding:2px 6px;border-radius:6px}
-.nl-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px}
-.nl-fixed{height:340px;resize:none;font-family:Inter, ui-sans-serif;line-height:1.5}
-.toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:8px}
-.counter{font-size:12px;color:var(--muted)}
+.pref-card{padding:16px;display:flex;flex-direction:column;gap:16px}
+.pref-grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+@media (max-width:900px){.pref-grid{grid-template-columns:1fr}}
+.pref-input{height:340px;resize:none;font-family:Inter, ui-sans-serif;line-height:1.5}
+.pref-summary{height:340px;overflow-y:auto;padding:12px}
+.pref-summary .subtitle{font-size:15px;color:var(--muted);margin-bottom:8px}
+.pref-summary ul{margin:0;padding-left:20px;list-style:disc;font-size:16px;line-height:1.5}
+.pref-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px}
+.pref-count{font-size:12px;color:var(--muted);margin-right:auto}
 
 .indicator{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320}
 .dot{width:8px;height:8px;border-radius:50%}
@@ -859,6 +864,18 @@ async function openExplain(r:any) {
             <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} />
           </SectionCard>
 
+          <div className="panels2 w23" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
+            <SectionCard id="data" title="Data" style={{ gridRow: "span 2" }}>
+              <SettingsData toast={toast} />
+            </SectionCard>
+            <SectionCard id="planner" title="Planner">
+              <SettingsPlanner toast={toast} />
+            </SectionCard>
+            <SectionCard id="news" title="News">
+              <SettingsNews toast={toast} />
+            </SectionCard>
+          </div>
+
           <div className="panels2" style={{ alignItems: "stretch" }}>
             <SectionCard id="watchlist" title="Watchlist">
               <SettingsWatchlist toast={toast} />
@@ -874,18 +891,6 @@ async function openExplain(r:any) {
           <SectionCard id="preferences" title="Preferences">
             <SettingsPreferences toast={toast} />
           </SectionCard>
-
-          <div className="panels2 w23" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
-            <SectionCard id="data" title="Data" style={{ gridRow: "span 2" }}>
-              <SettingsData toast={toast} />
-            </SectionCard>
-            <SectionCard id="planner" title="Planner">
-              <SettingsPlanner toast={toast} />
-            </SectionCard>
-            <SectionCard id="news" title="News">
-              <SettingsNews toast={toast} />
-            </SectionCard>
-          </div>
         </div>
       )}
 

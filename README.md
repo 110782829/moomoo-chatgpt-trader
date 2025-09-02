@@ -8,13 +8,14 @@ Core capabilities:
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
 - Settings tab for connection, risk, data, signals, planner, trading preferences, style preferences, watchlist, and news
+- Preference card accepts natural language style instructions with bullet summary under "GPT will note:"
 - Signal card adjusts weights for six built-in strategies
 - Watchlist card lists up to six symbols with scroll
 - Activity tab shows recent market data with its provider
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
-- Sync recent fills via `POST /exec/sync/deals`
+- Sync recent fills via `POST /exec/sync/deals` (requires active broker link and selected account)
 - Trading API wrapper in `core.moomoo_client.MoomooClient`
 
 ## Prerequisites

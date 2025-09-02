@@ -25,6 +25,14 @@ export default function SettingsSignals({ toast }: any) {
     Object.keys(weights).forEach(k=>{ next[k] = Number(((weights[k]||0)/sum).toFixed(2)); });
     setWeights(next);
   }
+  function assignAuto() {
+    const n = Object.keys(weights).length;
+    if (!n) return;
+    const w = Number((1/n).toFixed(2));
+    const next: Record<string, number> = {};
+    Object.keys(weights).forEach(k=>{ next[k] = w; });
+    setWeights(next);
+  }
   async function save() {
     setSaving(true);
     try { await api.putSignalsSettings({ weights }); toast.show("Signals saved."); } catch(e:any){ toast.show(String(e)); } finally { setSaving(false); }
@@ -42,8 +50,12 @@ export default function SettingsSignals({ toast }: any) {
       ];
 
   return (
-    <div className="stack">
-      <div className="table-wrap" style={{ marginTop: 8, overflowY: "visible" }}>
+    <div className="stack" style={{ marginTop: 32 }}>
+      <div className="row" style={{marginBottom:8, gap:8}}>
+        <button className="btn" onClick={normalize}>Normalize Weights</button>
+        <button className="btn" onClick={assignAuto}>Assign Automatically</button>
+      </div>
+      <div className="table-wrap" style={{ overflowY: "visible" }}>
         <table className="table-modern">
           <thead><tr><th>Strategy</th><th className="num" style={{width:160}}>Weight</th></tr></thead>
           <tbody>
@@ -56,8 +68,7 @@ export default function SettingsSignals({ toast }: any) {
           </tbody>
         </table>
       </div>
-      <div className="row" style={{marginTop:8, justifyContent:"space-between"}}>
-        <button className="btn" onClick={normalize}>Normalize Weights</button>
+      <div className="row" style={{marginTop:8, justifyContent:"flex-end"}}>
         <button className="btn brand" onClick={save} disabled={saving || loading}>{saving?"Saving…":"Save Signals"}</button>
       </div>
     </div>
