@@ -23,8 +23,8 @@ export async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" |
 
 const api = {
   connect: (host: string, port: number, client_id: number) => SEND("/connect", { host, port, client_id }),
-  accountsActive: () => GET<{ account_id: string | null; trd_env: string | null }>("/accounts/active"),
-  selectAccount: (account_id: string, trd_env: "SIMULATE" | "REAL") => SEND("/accounts/select", { account_id, trd_env }),
+  accountsActive: () => GET<{ account_id: string | null; trd_env: string | null; account_type?: string | null }>("/accounts/active"),
+  selectAccount: (account_id: string) => SEND("/accounts/select", { account_id }),
   unlockTrade: (passcode: string) => SEND("/trade/unlock", { passcode }),
   sessionStatus: () => GET<{ saved: any; connected: boolean; active_account: any }>("/session/status"),
   sessionSave: (host: string, port: number, account_id?: string, trd_env?: string) => SEND("/session/save", { host, port, account_id, trd_env }),

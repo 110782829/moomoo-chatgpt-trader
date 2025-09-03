@@ -461,9 +461,8 @@ export default function App() {
   const [port, setPort] = useLocalStorage("conn.port", 11111);
   const [clientId, setClientId] = useLocalStorage("conn.clientId", 1);
   const [accountId, setAccountId] = useLocalStorage("conn.accountId", "");
-  const [trdEnv, setTrdEnv] = useLocalStorage<"SIMULATE"|"REAL">("conn.env", "SIMULATE");
   const [connected, setConnected] = useState(false);
-  const [activeAccount, setActiveAccount] = useState<{ account_id: string | null; trd_env: string | null } | null>(null);
+  const [activeAccount, setActiveAccount] = useState<{ account_id: string | null; trd_env: string | null; account_type?: string | null } | null>(null);
 
   // bot state
   const [mode, setMode] = useState<Mode>("manual");
@@ -547,8 +546,8 @@ export default function App() {
         } else if (st.saved?.host && st.saved?.port) {
           try {
             await api.connect(String(st.saved.host), Number(st.saved.port), Number(clientId));
-            if (st.saved?.account_id && st.saved?.trd_env) {
-              try { await api.selectAccount(String(st.saved.account_id), st.saved.trd_env); } catch {}
+            if (st.saved?.account_id) {
+              try { await api.selectAccount(String(st.saved.account_id)); } catch {}
             }
             const st2 = await api.sessionStatus();
             setConnected(!!st2.connected);
@@ -558,7 +557,6 @@ export default function App() {
         if (st.saved?.host) setHost(String(st.saved.host));
         if (st.saved?.port) setPort(Number(st.saved.port));
         if (st.saved?.account_id) setAccountId(String(st.saved.account_id));
-        if (st.saved?.trd_env) setTrdEnv((st.saved.trd_env as "SIMULATE" | "REAL") || "SIMULATE");
       } catch {}
       try { setMode((await api.getBotMode()).mode); } catch {}
       try { setCfg(await api.getRiskConfig()); } catch {}
@@ -842,6 +840,7 @@ async function openExplain(r:any) {
           <span className="indicator" title="Active account">
             <span>{activeAccount?.account_id || "—"}</span>
             {activeAccount?.trd_env ? <span>• {activeAccount.trd_env}</span> : null}
+            {activeAccount?.account_type ? <span>• {activeAccount.account_type}</span> : null}
           </span>
           <span className="indicator" title="Risk Guardrail">
             <span className={`dot ${riskEnabled ? "green" : "red"}`} />
@@ -872,7 +871,6 @@ async function openExplain(r:any) {
               port={port} setPort={setPort}
               clientId={clientId} setClientId={setClientId}
               accountId={accountId} setAccountId={setAccountId}
-              trdEnv={trdEnv} setTrdEnv={setTrdEnv}
               doConnect={doConnect} doSelect={doSelect}
               connected={connected} activeAccount={activeAccount} toast={toast}
             />
@@ -1281,7 +1279,7 @@ async function doConnect() {
 
 async function doSelect() {
   try {
-    const resp = await api.selectAccount(String(accountId), trdEnv);
+    const resp = await api.selectAccount(String(accountId));
     setActiveAccount(resp as any);
     toast.show("Account selected.");
   } catch (e:any) {
@@ -1525,7 +1523,7 @@ export function NiceCombobox({
 
 
 
-function AccountCard({ connected, activeAccount }: { connected: boolean; activeAccount: { account_id: string | null; trd_env: string | null } | null }) {
+function AccountCard({ connected, activeAccount }: { connected: boolean; activeAccount: { account_id: string | null; trd_env: string | null; account_type?: string | null } | null }) {
   const [assets, setAssets] = useState<{ equity?: number | null; bp?: number | null; cash?: number | null } | null>(null);
 
   useEffect(() => {

@@ -97,6 +97,9 @@ Core capabilities:
    Simulation accounts unlock automatically.
 5. Successful calls return `unlock_trade ok`; errors bubble up from OpenD.
 
+Call `GET /accounts` to list account IDs with env and account type. `POST /accounts/select` needs only the account ID; env is derived from that list.
+Use `GET /accounts/info?account_id=<id>` to check account currency and map IDs to US (USD) or HK (HKD).
+
 Paper trading requires `TrdEnv.SIMULATE`. Account authority details: [Authorities and Limitations](https://openapi.moomoo.com/moomoo-api-doc/en/intro/authority.html).
 
 ## Notes

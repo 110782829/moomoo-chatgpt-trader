@@ -143,7 +143,7 @@ class MoomooClient:
 
     # -------- accounts -------- #
 
-    def list_accounts(self) -> List[str]:
+    def list_accounts(self) -> List[Dict[str, str]]:
         if not self.connected:
             raise RuntimeError("Not connected to OpenD")
 
@@ -158,25 +158,61 @@ class MoomooClient:
                 ret, df = self.trading_ctx.get_acc_list(**kwargs)  # type: ignore[arg-type]
                 if ret != RET_OK:
                     raise RuntimeError(f"get_acc_list failed: {df}")
-                # Extract account IDs
                 recs = _df_to_records(df)
-                ids: List[str] = []
+                entries: List[Dict[str, str]] = []
                 for r in recs:
                     acc = r.get("acc_id") or r.get("accCode") or r.get("account_id")
+                    env_raw = str(r.get("trd_env") or r.get("env") or "").upper()
+                    type_raw = r.get("acc_type") or r.get("accType") or r.get("market") or r.get("trd_market")
                     if acc is not None:
-                        ids.append(str(acc))
-                # fallback if schema is unexpected
-                if not ids:
+                        entries.append({
+                            "account_id": str(acc),
+                            "trd_env": "REAL" if env_raw == "REAL" else "SIMULATE",
+                            "account_type": str(type_raw or ""),
+                        })
+                if not entries:
                     for r in recs:
                         for v in r.values():
                             if isinstance(v, (str, int)):
-                                ids.append(str(v))
+                                entries.append({"account_id": str(v), "trd_env": "SIMULATE"})
                                 break
-                return ids
+                return entries
             except TypeError as e:
                 last_err = e
                 continue
         raise RuntimeError(f"get_acc_list incompatible with this moomoo build: {last_err}")
+
+    def get_account_info(self, account_id: str) -> Dict[str, Any]:
+        """Return account info for acc_id."""
+        if not self.connected:
+            raise RuntimeError("Not connected to OpenD")
+
+        tried = [
+            {"trd_env": self.env, "acc_id": account_id},
+            {"env": self.env, "acc_id": account_id},
+            {"acc_id": account_id},
+            {},
+        ]
+        errors: List[str] = []
+        for name in ("accinfo_query", "get_accinfo"):
+            fn = getattr(self.trading_ctx, name, None)
+            if not callable(fn):
+                errors.append(f"{name} not available")
+                continue
+            for kwargs in tried:
+                try:
+                    ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(df)
+                    recs = _df_to_records(df)
+                    if recs:
+                        return recs[0]
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"{name}{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        raise RuntimeError("; ".join(errors))
 
     def set_account(self, account_id: str, trd_env) -> None:
         """

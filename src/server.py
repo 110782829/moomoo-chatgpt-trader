@@ -168,7 +168,6 @@ class ConnectRequest(BaseModel):
 
 class SelectAccountRequest(BaseModel):
     account_id: str
-    trd_env: str = "SIMULATE"  # "SIMULATE" or "REAL"
 
 class PlaceOrderRequest(BaseModel):
     symbol: str                 # e.g., "AAPL" or "US.AAPL"
@@ -421,7 +420,7 @@ def connect(req: ConnectRequest):
 @app.get("/accounts")
 def list_accounts():
     """
-    Return available account IDs. Requires an active connection.
+    Return account IDs with trading env and type. Requires active connection.
     """
     c = get_client()
     if c is None or not c.connected:
@@ -436,15 +435,17 @@ def list_accounts():
 @app.post("/accounts/select")
 def select_account(req: SelectAccountRequest):
     """
-    Select the active account + env (SIMULATE/REAL).
+    Select the active account. Env inferred from account list.
     """
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
     try:
-        env = _env_from_str(req.trd_env)
+        info = next((a for a in c.list_accounts() if a.get("account_id") == req.account_id), None)
+        if not info:
+            raise RuntimeError("account not found")
+        env = _env_from_str(info.get("trd_env", "SIMULATE"))
         c.set_account(req.account_id, env)
-        # persist full session
         try:
             save_session(
                 c.host,
@@ -454,7 +455,12 @@ def select_account(req: SelectAccountRequest):
             )
         except Exception:
             pass
-        return {"status": "ok", "account_id": req.account_id, "trd_env": req.trd_env.upper()}
+        return {
+            "status": "ok",
+            "account_id": req.account_id,
+            "trd_env": info.get("trd_env", "SIMULATE"),
+            "account_type": info.get("account_type"),
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -468,10 +474,32 @@ def accounts_active():
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
+    info = None
+    try:
+        for a in c.list_accounts():
+            if a.get("account_id") == str(c.account_id):
+                info = a
+                break
+    except Exception:
+        pass
     return {
         "account_id": c.account_id,
-        "trd_env": "SIMULATE" if getattr(c, "env", None) == TrdEnv.SIMULATE else "REAL"
+        "trd_env": "SIMULATE" if getattr(c, "env", None) == TrdEnv.SIMULATE else "REAL",
+        "account_type": info.get("account_type") if info else None,
     }
+
+@app.get("/accounts/info")
+def account_info(account_id: str):
+    """Get details for account_id."""
+    c = get_client()
+    if c is None or not c.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return c.get_account_info(account_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get account info: {e}")
 
 @app.get("/accounts/assets")
 def accounts_assets():

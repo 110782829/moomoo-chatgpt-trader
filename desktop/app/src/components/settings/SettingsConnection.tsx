@@ -7,7 +7,6 @@ export default function SettingsConnection({
   port, setPort,
   clientId, setClientId,
   accountId, setAccountId,
-  trdEnv, setTrdEnv,
   doConnect,
   doSelect,
   connected,
@@ -33,7 +32,7 @@ export default function SettingsConnection({
   return (
     <>
       <div className="help" style={{marginBottom:8}}>
-        {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}
+        {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}{activeAccount?.account_type ? ` • ${activeAccount.account_type}` : ""}
       </div>
       <div className="form-row">
         <div><div className="label">Host</div><input className="input" value={host} onChange={e=>setHost(e.target.value)} /></div>
@@ -44,18 +43,6 @@ export default function SettingsConnection({
         <div>
           <div className="label">Account ID</div>
           <input className="input" value={accountId} onChange={e=>setAccountId(e.target.value)} placeholder="e.g., 54871" />
-        </div>
-        <div>
-          <div className="label">Trading Env</div>
-          <NiceSelect
-            value={trdEnv}
-            onChange={(v)=>setTrdEnv((v === "REAL" ? "REAL" : "SIMULATE") as any)}
-            options={[
-              { value: "SIMULATE", label: "SIMULATE" },
-              { value: "REAL", label: "REAL" },
-            ]}
-            width="100%"
-          />
         </div>
         <div>
           <div className="label">Execution</div>
