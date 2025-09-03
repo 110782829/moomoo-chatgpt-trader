@@ -1143,7 +1143,7 @@ async function openExplain(r:any) {
                        onChange={e=>setExSymbol(e.target.value)}
                        placeholder="US.AAPL" />
               </div>
-              <button className="btn red" onClick={cancelAll}>Cancel All</button>
+              <button className="btn amber" onClick={cancelAll}>Cancel All</button>
               <div className="row" style={{marginLeft:"auto", gap:10}}>
                 <span className="help">Last updated: {exAt}</span>
               </div>
