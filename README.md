@@ -16,7 +16,7 @@ Core capabilities:
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
-- Sync recent fills via `POST /exec/sync/deals` (requires active broker link and selected account)
+- Sync recent fills via `POST /exec/sync/deals` (requires active broker link, selected account, and a moomoo build with `deal_list_query` or `history_deal_list_query`)
 - Trading API wrapper in `core.moomoo_client.MoomooClient`
 
 ## Prerequisites

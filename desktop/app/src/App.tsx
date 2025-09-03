@@ -309,7 +309,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
   .pref-row .val{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
 
   /* Account metrics layout */
-  .acctcard{padding:12px;border:1px solid var(--border);background:#131a23;border-radius:10px}
+  /* Align with KPI card color */
+  .acctcard{padding:12px;border:1px solid var(--border);background:var(--card);border-radius:10px}
 .acctgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
 @media (max-width:980px){.acctgrid{grid-template-columns:1fr}}
 .acctcell{display:flex;flex-direction:column;gap:4px}

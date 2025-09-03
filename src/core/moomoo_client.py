@@ -332,21 +332,19 @@ class MoomooClient:
             {"acc_id": self.account_id},
             {},
         ]
-        last_err = None
+        fn = getattr(self.trading_ctx, "deal_list_query", None)
+        if not callable(fn):
+            fn = getattr(self.trading_ctx, "history_deal_list_query", None)
+        if not callable(fn):
+            raise RuntimeError("deal retrieval not supported")
         for kwargs in tried:
             try:
-                # Some builds expose 'deal_list_query'
-                fn = getattr(self.trading_ctx, "deal_list_query", None)
-                if not callable(fn):
-                    raise RuntimeError("deal_list_query not available in this moomoo build")
                 ret, df = fn(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"deal_list_query failed: {df}")
-                return _df_to_records(df)
-            except TypeError as e:
-                last_err = e
+                if ret == RET_OK:
+                    return _df_to_records(df)
+            except TypeError:
                 continue
-        raise RuntimeError(f"deal_list_query incompatible with this moomoo build: {last_err}")
+        raise RuntimeError("deal query failed")
 
     # -------- trade ops -------- #
 
