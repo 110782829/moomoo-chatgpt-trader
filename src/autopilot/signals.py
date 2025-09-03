@@ -186,6 +186,61 @@ def stoch_rsi_signals(sym: str, closes: Sequence[float]) -> List[Dict]:
     return out
 
 
+def ma_trend_signals(sym: str, closes: Sequence[float], fast: int = 50, slow: int = 200) -> List[Dict]:
+    if not closes or len(closes) < slow:
+        return []
+    fast_ma = sum(closes[-fast:]) / fast
+    slow_ma = sum(closes[-slow:]) / slow
+    last = float(closes[-1])
+    if fast_ma > slow_ma and last > fast_ma:
+        strength = _clamp01((fast_ma - slow_ma) / slow_ma)
+        return [{
+            "strategy": "ma_trend",
+            "sym": sym,
+            "signal": "long",
+            "strength": strength,
+            "ttl_sec": 180,
+            "metadata": {"fast": fast_ma, "slow": slow_ma}
+        }]
+    if fast_ma < slow_ma and last < fast_ma:
+        strength = _clamp01((slow_ma - fast_ma) / slow_ma)
+        return [{
+            "strategy": "ma_trend",
+            "sym": sym,
+            "signal": "short",
+            "strength": strength,
+            "ttl_sec": 180,
+            "metadata": {"fast": fast_ma, "slow": slow_ma}
+        }]
+    return []
+
+
+def rsi_extreme_signals(sym: str, closes: Sequence[float], period: int = 14) -> List[Dict]:
+    rsis = _rsi_series(closes, period=period)
+    if not rsis:
+        return []
+    rsi = rsis[-1]
+    if rsi <= 30.0:
+        return [{
+            "strategy": "rsi_extreme",
+            "sym": sym,
+            "signal": "long",
+            "strength": _clamp01((30.0 - rsi) / 30.0),
+            "ttl_sec": 180,
+            "metadata": {"rsi": rsi}
+        }]
+    if rsi >= 70.0:
+        return [{
+            "strategy": "rsi_extreme",
+            "sym": sym,
+            "signal": "short",
+            "strength": _clamp01((rsi - 70.0) / 30.0),
+            "ttl_sec": 180,
+            "metadata": {"rsi": rsi}
+        }]
+    return []
+
+
 def signals_for_series(sym: str, highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]) -> List[Dict]:
     try:
         out: List[Dict] = []
@@ -194,6 +249,8 @@ def signals_for_series(sym: str, highs: Sequence[float], lows: Sequence[float], 
         out.extend(macd_cross_signals(sym, closes))
         out.extend(bb_breakout_signals(sym, closes))
         out.extend(stoch_rsi_signals(sym, closes))
+        out.extend(ma_trend_signals(sym, closes))
+        out.extend(rsi_extreme_signals(sym, closes))
         return out
     except Exception:
         return []

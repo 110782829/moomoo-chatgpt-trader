@@ -18,6 +18,16 @@ export default function SettingsPreferences({ toast }: any) {
       .catch(() => {});
   }, []);
 
+  // Request summary when stored text lacks one
+  useEffect(() => {
+    if (raw && !summary && !dirty) {
+      api
+        .postAutoStyle(raw)
+        .then(r => setSummary(r.summary || ""))
+        .catch(() => {});
+    }
+  }, [raw, summary, dirty]);
+
   async function save() {
     const r = await api.postAutoStyle(raw);
     setSummary(r.summary || "");

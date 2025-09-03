@@ -7,9 +7,10 @@ Core capabilities:
 - Connect to moomoo via local OpenD gateway
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
+- Current stats card shows win rate, average R multiple, average realized move, and drawdown
 - Settings tab for connection, risk, data, signals, planner, trading preferences, style preferences, watchlist, and news
 - Preference card accepts natural language style instructions with bullet summary under "GPT will note:"
-- Signal card adjusts weights for six built-in strategies
+- Signal card adjusts weights for six built-in strategies (MACD Cross, Bollinger Breakout, Stochastic RSI Extreme, MA Trend, RSI Extreme, News)
 - Watchlist card lists up to six symbols with scroll
 - Activity tab shows recent market data with its provider
 - Live account card with equity, cash, buying power, and leverage
@@ -22,6 +23,7 @@ Core capabilities:
 
 - Python 3.9+
 - A moomoo account with OpenAPI enabled and the OpenD gateway running locally
+- OpenD required; the moomoo API communicates through this gateway
 - Node.js 18+ (for the desktop app)
 
 ## Setup
@@ -50,13 +52,21 @@ Core capabilities:
    MOOMOO_HOST=127.0.0.1
    MOOMOO_PORT=11111
    MOOMOO_CLIENT_ID=1
-   # Optional for GPT planner
+   # Optional for GPT planner and preference summarizer
+   # If omitted, uses a basic local summary
    OPENAI_API_KEY=sk-...
    ```
 
 - `/connect` reads host and port from the request body first, then `MOOMOO_HOST` and `MOOMOO_PORT`, defaulting to `127.0.0.1` and `11111`.
 
-3) Start OpenD (moomoo) and ensure it’s reachable at the host/port you configured.
+3) Start OpenD (moomoo) with WebSocket enabled and confirm the gateway responds at the configured host and port. WebSocket uses port `33333` by default.
+
+   For a non-local listening address:
+   - Enable SSL and use a certificate key without password.
+   - Provide a 32-character MD5 hash as the auth key.
+   - The trading interface enforces this requirement; the quote interface does not.
+   - OpenD reads `OpenD.xml` in its run directory. On macOS, run `fixrun.sh` or start with `-cfg_file <path>` when the path is randomized.
+   - Keep log level at `info` during development.
 
 4) Run the backend server
 
@@ -77,6 +87,18 @@ Core capabilities:
 
    The UI uses `VITE_API_BASE` (defaults to `http://127.0.0.1:8000`).
    It detects an active session automatically.
+
+## Unlock trading
+
+1. Start OpenD and sign in.
+2. Confirm a simulated account under the avatar menu; create one in the moomoo app if the list is empty.
+3. Set a trade password in the moomoo app.
+4. If a real trading account exists, send `POST /trade/unlock` with `{ "passcode": "<trade password>" }`.
+   Simulation accounts unlock automatically.
+5. Successful calls return `unlock_trade ok`; errors bubble up from OpenD.
+
+Paper trading requires `TrdEnv.SIMULATE`. Account authority details: [Authorities and Limitations](https://openapi.moomoo.com/moomoo-api-doc/en/intro/authority.html).
+
 ## Notes
 
 - Paper trading is strongly recommended while testing. Real trading requires careful risk limits and explicit enablement.
@@ -90,6 +112,7 @@ Core capabilities:
 - Broker returns best-effort figures; totals can still differ from paper-trade app.
 - Market data source is selectable (Moomoo or Yahoo Finance) with no automatic fallback.
 - Yahoo Finance fetches at least five days of intraday bars to avoid empty data on market closures.
+- Quote context starts on connect to enable basic quote subscriptions.
 
 ## Troubleshooting market data
 

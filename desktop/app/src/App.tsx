@@ -523,7 +523,7 @@ export default function App() {
   const [explainData, setExplainData] = useState<any|null>(null);
 
   const [exLoading, setExLoading] = useState(false);
-  // positions (SIM)
+  // positions
   const [posSymbol, setPosSymbol] = useLocalStorage("pos.symbol", "");
   const [posAuto, setPosAuto] = useLocalStorage("pos.auto", true);
   const [posEvery, setPosEvery] = useLocalStorage("pos.ms", 5000);
@@ -710,6 +710,23 @@ useEffect(() => {
     }
   }
 
+  // Cancel all visible orders
+  async function cancelAll() {
+    try {
+      const list = orders || [];
+      const filtered = exSymbol
+        ? list.filter((o:any) => String(o?.symbol || "").toLowerCase().includes(String(exSymbol).toLowerCase()))
+        : list;
+      const targets = filtered.filter((o:any) => o.status === "open" || o.status === "pending");
+      if (!targets.length) { toast.show("No orders to cancel."); return; }
+      await Promise.all(targets.map((o:any) => api.cancelExecOrder(o.order_id)));
+      toast.show(`Cancel sent: ${targets.length} order${targets.length===1?"":"s"}`);
+      await refreshExec(false);
+    } catch (e:any) {
+      toast.show(`Cancel failed: ${brief(e)}`);
+    }
+  }
+
   async function refreshExec(show = true) {
     try {
       setExLoading(true);
@@ -861,7 +878,7 @@ async function openExplain(r:any) {
           </SectionCard>
 
           <SectionCard id="risk" title="Risk">
-            <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} />
+            <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} toast={toast} />
           </SectionCard>
 
           <div className="panels2 w23" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
@@ -1063,10 +1080,10 @@ async function openExplain(r:any) {
 
 
             </div>
-{/* Positions (SIM) – its own panel */}
+{/* Positions – its own panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
-              <h2 className="title-lg" style={{margin:0}}>Positions (SIM)</h2>
+              <h2 className="title-lg" style={{margin:0}}>Positions</h2>
             </div>
             <div className="row" style={{alignItems:"end", gap:12, marginTop:12}}>
               <div style={{minWidth:220}}>
@@ -1114,11 +1131,11 @@ async function openExplain(r:any) {
             
           </div>
 
-          {/* Orders & Fills (SIM) – separate panel */}
+          {/* Orders & Fills – separate panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
-              <h2 className="title-lg" style={{margin:0}}>Orders (SIM)</h2>
-              
+              <h2 className="title-lg" style={{margin:0}}>Orders</h2>
+
             </div>
             <div className="row" style={{alignItems:"end", gap:12, marginTop:12}}>
               <div style={{minWidth:220}}>
@@ -1126,6 +1143,7 @@ async function openExplain(r:any) {
                        onChange={e=>setExSymbol(e.target.value)}
                        placeholder="US.AAPL" />
               </div>
+              <button className="btn red" onClick={cancelAll}>Cancel All</button>
               <div className="row" style={{marginLeft:"auto", gap:10}}>
                 <span className="help">Last updated: {exAt}</span>
               </div>
@@ -1955,8 +1973,8 @@ function StrategyPicker() {
     { key: "ma-crossover", name: "MA Crossover", desc: "Fast/slow cross with RSI gate" },
     { key: "rsi-gate", name: "RSI Gate", desc: "Enter on RSI cross; avoid extremes" },
     { key: "breakout-retest", name: "Breakout Retest", desc: "Range breakout then retest confirm" },
-    { key: "mean-reversion", name: "Mean Reversion", desc: "Fade stretches (z-score/RSI)" },
-    { key: "atr-trailer", name: "ATR Trailing Stop", desc: "Trend-follow exits with ATR" },
+    { key: "mean-reversion", name: "Mean Reversion", desc: "Fade stretches (RSI)" },
+    { key: "atr-trailer", name: "ATR Trailing Stop", desc: "Trend-follow with MA" },
     { key: "news-momo", name: "News Momentum", desc: "Spike-follow with risk caps" },
   ];
   const [selected, setSelected] = useLocalStorage<string[]>("pref.strategies", ["ma-crossover"]);
@@ -1970,6 +1988,10 @@ function StrategyPicker() {
         return { signals: { stoch_rsi_extreme: true } };
       case "breakout-retest":
         return { signals: { bb_breakout: true } };
+      case "mean-reversion":
+        return { signals: { rsi_extreme: true } };
+      case "atr-trailer":
+        return { signals: { ma_trend: true } };
       case "news-momo":
         return { newsEnabled: true };
       default:
@@ -1986,6 +2008,8 @@ function StrategyPicker() {
       if (sig?.strategies?.macd_cross) enabled.push("ma-crossover");
       if (sig?.strategies?.stoch_rsi_extreme) enabled.push("rsi-gate");
       if (sig?.strategies?.bb_breakout) enabled.push("breakout-retest");
+      if (sig?.strategies?.rsi_extreme) enabled.push("mean-reversion");
+      if (sig?.strategies?.ma_trend) enabled.push("atr-trailer");
       if (news?.enabled) enabled.push("news-momo");
       // keep any previously selected unknowns
       const known = new Set(CATALOG.map(s=>s.key));
@@ -2030,7 +2054,7 @@ function StrategyPicker() {
             try {
               const cur = await api.getSignalsSettings();
               const next = { ...(cur?.strategies || {}) } as Record<string, boolean>;
-              next.macd_cross = true; next.stoch_rsi_extreme = true; next.bb_breakout = true;
+              next.macd_cross = true; next.stoch_rsi_extreme = true; next.bb_breakout = true; next.rsi_extreme = true; next.ma_trend = true;
               await api.putSignalsSettings({ strategies: next });
               await api.putNewsSettings({ enabled: true });
             } catch {}
@@ -2040,7 +2064,7 @@ function StrategyPicker() {
             try {
               const cur = await api.getSignalsSettings();
               const next = { ...(cur?.strategies || {}) } as Record<string, boolean>;
-              next.macd_cross = false; next.stoch_rsi_extreme = false; next.bb_breakout = false;
+              next.macd_cross = false; next.stoch_rsi_extreme = false; next.bb_breakout = false; next.rsi_extreme = false; next.ma_trend = false;
               await api.putSignalsSettings({ strategies: next });
               await api.putNewsSettings({ enabled: false });
             } catch {}

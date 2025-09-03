@@ -76,7 +76,8 @@ export default function SettingsWatchlist({ toast }: any) {
           </div>
         </div>
       </div>
-      <div className="table-wrap" style={{ marginTop: 8, maxHeight: 280 }}>
+      {/* show up to six symbols before scroll */}
+      <div className="table-wrap" style={{ marginTop: 8, maxHeight: 357 }}>
         <table className="table-modern">
           <thead>
             <tr><th>Symbol</th><th className="num" style={{ width: 80 }}>Action</th></tr>

@@ -25,6 +25,7 @@ const api = {
   connect: (host: string, port: number, client_id: number) => SEND("/connect", { host, port, client_id }),
   accountsActive: () => GET<{ account_id: string | null; trd_env: string | null }>("/accounts/active"),
   selectAccount: (account_id: string, trd_env: "SIMULATE" | "REAL") => SEND("/accounts/select", { account_id, trd_env }),
+  unlockTrade: (passcode: string) => SEND("/trade/unlock", { passcode }),
   sessionStatus: () => GET<{ saved: any; connected: boolean; active_account: any }>("/session/status"),
   sessionSave: (host: string, port: number, account_id?: string, trd_env?: string) => SEND("/session/save", { host, port, account_id, trd_env }),
   sessionClear: () => SEND("/session/clear", {}),

@@ -17,6 +17,7 @@ try:
         TrdSide,
         OrderType,
         SubType,
+        TickerHandlerBase,
     )
     try:
         from moomoo import OpenUSTradeContext as TradeContext
@@ -44,6 +45,8 @@ except Exception:
     class TrdSide: BUY="BUY"; SELL="SELL"  # type: ignore
     class OrderType: NORMAL="NORMAL"; MARKET="MARKET"  # type: ignore
     class SubType: QUOTE="QUOTE"; K_1M="K_1M"  # type: ignore
+    class TickerHandlerBase:
+        pass
     RET_OK = 0                                     # type: ignore
 
 
@@ -107,6 +110,9 @@ class MoomooClient:
         # Quote context (optional; best-effort)
         try:
             self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
+            # Start quote context for push data
+            self.quote_ctx.set_handler(TickerHandlerBase())
+            self.quote_ctx.start()
         except Exception:
             self.quote_ctx = None
 
@@ -124,6 +130,11 @@ class MoomooClient:
 
         try:
             if self.quote_ctx is not None:
+                # Stop quote context if active
+                try:
+                    self.quote_ctx.stop()
+                except Exception:
+                    pass
                 self.quote_ctx.close()
         finally:
             self.quote_ctx = None
@@ -179,6 +190,56 @@ class MoomooClient:
         except ValueError:
             raise RuntimeError(f"Invalid account_id: {account_id}")
         self.env = trd_env
+
+    def unlock_trade(self, passcode: str) -> Dict[str, Any]:
+        """Unlock trading via passcode."""
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        if not passcode:
+            raise RuntimeError("passcode empty")
+        acc_records: List[Dict[str, Any]] = []
+        if self.account_id is None:
+            try:
+                ret, df = self.trading_ctx.get_acc_list()
+                if ret == RET_OK:
+                    acc_records = _df_to_records(df)
+                    for r in acc_records:
+                        acc = r.get("acc_id") or r.get("accCode") or r.get("account_id")
+                        env_raw = str(r.get("trd_env") or r.get("env") or "").upper()
+                        if acc is not None:
+                            self.account_id = int(str(acc))
+                            self.env = TrdEnv.SIMULATE if env_raw != "REAL" else TrdEnv.REAL
+                            break
+            except Exception as e:
+                raise RuntimeError(f"get_acc_list failed: {e}")
+            if self.account_id is None:
+                raise RuntimeError("No account available")
+        else:
+            try:
+                ret, df = self.trading_ctx.get_acc_list()
+                if ret == RET_OK:
+                    acc_records = _df_to_records(df)
+            except Exception:
+                pass
+
+        # If no real accounts exist, unlocking is unnecessary.
+        has_real = any(str(r.get("trd_env") or r.get("env") or "").upper() == "REAL" for r in acc_records)
+        if not has_real:
+            return {"detail": "unlock_trade ok"}
+
+        last_err: Any = None
+        for kwargs in ( {"password": passcode}, {"password_md5": passcode} ):
+            try:
+                ret, msg = self.trading_ctx.unlock_trade(**kwargs)  # type: ignore[arg-type]
+            except TypeError as e:
+                last_err = e
+                continue
+            except Exception as e:
+                raise RuntimeError(f"unlock_trade failed: {e}")
+            if ret == RET_OK:
+                return {"detail": msg or "unlock_trade ok"}
+            last_err = msg
+        raise RuntimeError(f"unlock_trade failed: {last_err}")
 
     # -------- read data -------- #
 

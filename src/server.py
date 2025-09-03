@@ -183,6 +183,9 @@ class CancelOrderRequest(BaseModel):
 class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
 
+class UnlockTradeRequest(BaseModel):
+    passcode: str
+
 class FlattenRequest(BaseModel):
     symbols: Optional[List[str]] = None  # optional subset; if omitted, flatten all
 
@@ -535,6 +538,22 @@ def accounts_raw():
     except Exception:
         pass
     return df
+
+
+# --- Trade unlock ---
+
+@app.post("/trade/unlock")
+def trade_unlock(req: UnlockTradeRequest):
+    """Unlock trading with passcode."""
+    c = get_client()
+    if c is None or not c.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return c.unlock_trade(req.passcode)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unlock: {e}")
 
 
 # --- Positions & orders ---
@@ -1486,6 +1505,15 @@ def _summarize_style(text: str) -> str:
     out = _openai_chat(system, user)
     if out and isinstance(out, str):
         return out.strip()[:600]
+    # Fallback summary when model call fails
+    try:
+        import re
+        sents = [s.strip() for s in re.split(r"[\n.;]+", text) if s.strip()]
+        bullets = [f"- {s[:100].strip()}" for s in sents[:6]]
+        if bullets:
+            return "\n".join(bullets)[:600]
+    except Exception:
+        pass
     return text[:600]
 
 def _extract_symbols(text: str) -> list[str]:

@@ -393,6 +393,7 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
       - win_rate (0..1), win_rate_pct (0..100)
       - realized_pnl (sum over all fills)
       - drawdown_pct (current from peak), max_dd (maximum drawdown pct)
+      - avg_rr (avg R multiple), avg_realized_move_pct (avg % move per trade)
     """
     from collections import defaultdict
 
@@ -408,6 +409,20 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
     peak = 0.0
     max_dd = 0.0
 
+    # Track realized move % and R multiple
+    sum_move_pct = 0.0
+    sum_rr = 0.0
+
+    # Use current stop-loss setting for R multiple (best effort)
+    stop_loss_pct = 0.0
+    try:
+        raw = get_setting("autopilot.prefs")
+        if raw:
+            prefs = json.loads(raw)
+            stop_loss_pct = float(prefs.get("stop_loss_pct") or 0.0)
+    except Exception:
+        pass
+
     for r in _iter_fills_ordered():
         sym = r["symbol"]
         side = str(r["side"]).upper()
@@ -420,8 +435,8 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
             pos[sym] = new_pos
             avg[sym] = new_avg
         else:  # SELL
-            # realized vs current avg
-            realized = (px - avg[sym]) * q
+            entry_px = avg[sym]
+            realized = (px - entry_px) * q
             realized_total += realized
             equity += realized  # track cumulative realized equity
             peak = max(peak, equity)
@@ -429,6 +444,11 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
             max_dd = max(max_dd, cur_dd)
 
             trades += 1
+            move_pct = 0.0 if entry_px == 0 else (px - entry_px) / entry_px * 100.0
+            sum_move_pct += move_pct
+            if stop_loss_pct > 0:
+                sum_rr += (move_pct / stop_loss_pct)
+
             if realized > 1e-9:
                 wins += 1
             elif realized < -1e-9:
@@ -440,6 +460,8 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
                 avg[sym] = 0.0
 
     win_rate = (wins / trades) if trades > 0 else 0.0
+    avg_move = sum_move_pct / trades if trades > 0 else 0.0
+    avg_rr = sum_rr / trades if trades > 0 else 0.0
     out = {
         "trades": trades,
         "wins": wins,
@@ -449,6 +471,8 @@ def performance_stats(days: int = 365) -> Dict[str, Any]:
         "realized_pnl": float(realized_total),
         "drawdown_pct": round((0.0 if peak <= 0 else (peak - equity) / peak * 100.0), 2),
         "max_dd": round(max_dd, 2),
+        "avg_rr": round(avg_rr, 2),
+        "avg_realized_move_pct": round(avg_move, 2),
     }
     return out
 
