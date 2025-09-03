@@ -2,7 +2,7 @@
 import sqlite3
 import time
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Iterable, Union
 
 from .base import ExecutionService, ExecutionContext
 from .types import (
@@ -403,15 +403,22 @@ class SimBroker(ExecutionService):
             last = (last_prices or {}).get(r["symbol"])
             self._maybe_fill_now(r, last)
 
-    def list_orders(self, *, symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200):
+    def list_orders(self, *, symbol: Optional[str] = None,
+                    status: Optional[Union[str, Iterable[str]]] = None,
+                    limit: int = 200):
         q = "SELECT * FROM orders"
         clauses, params = [], []
         if symbol:
             clauses.append("symbol = ?")
             params.append(symbol)
         if status:
-            clauses.append("status = ?")
-            params.append(status)
+            if isinstance(status, (list, tuple, set)):
+                placeholders = ",".join(["?"] * len(status))
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(list(status))
+            else:
+                clauses.append("status = ?")
+                params.append(status)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         q += " ORDER BY created_at DESC LIMIT ?"

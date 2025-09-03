@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from execution.container import get_execution
 from execution.base import ExecutionService, ExecutionContext
@@ -9,7 +9,9 @@ router = APIRouter(prefix="/exec", tags=["execution"])
 
 
 @router.get("/orders", response_model=List[PlacedOrder])
-def list_orders(symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200,
+def list_orders(symbol: Optional[str] = None,
+                status: Optional[List[str]] = Query(None),
+                limit: int = 200,
                 exec_service: ExecutionService = Depends(get_execution)):
     return exec_service.list_orders(symbol=symbol, status=status, limit=limit)
 

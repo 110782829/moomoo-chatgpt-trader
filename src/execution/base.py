@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Iterable, Union
 from .types import OrderSpec, PlacedOrder, FillRecord
 
 
@@ -20,7 +20,8 @@ class ExecutionService(ABC):
     @abstractmethod
     def try_fill_resting(self, last_prices: Dict[str, float]) -> None: ...
     @abstractmethod
-    def list_orders(self, *, symbol: Optional[str] = None, status: Optional[str] = None,
+    def list_orders(self, *, symbol: Optional[str] = None,
+                    status: Optional[Union[str, Iterable[str]]] = None,
                     limit: int = 200) -> List[PlacedOrder]: ...
     @abstractmethod
     def list_fills(self, *, symbol: Optional[str] = None, limit: int = 500) -> List[FillRecord]: ...

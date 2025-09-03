@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 import sqlite3
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any, Iterable, Union
 
 from .base import ExecutionService, ExecutionContext
 from .types import OrderSpec, PlacedOrder, FillRecord, OrderStatus, OrderType, OrderSide, TimeInForce
@@ -197,16 +197,26 @@ class MoomooExecutionService(ExecutionService):
                                       (OrderStatus.filled.value, int(r["requested_qty"]), float(lp), ts, r["order_id"]))
                     self.conn.commit()
 
-    def list_orders(self, *, symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200) -> List[PlacedOrder]:
+    def list_orders(self, *, symbol: Optional[str] = None,
+                    status: Optional[Union[str, Iterable[str]]] = None,
+                    limit: int = 200) -> List[PlacedOrder]:
         q = "SELECT * FROM orders"
         clauses, params = [], []
         if symbol:
-            clauses.append("symbol = ?"); params.append(symbol)
+            clauses.append("symbol = ?")
+            params.append(symbol)
         if status:
-            clauses.append("status = ?"); params.append(status)
+            if isinstance(status, (list, tuple, set)):
+                placeholders = ",".join(["?"] * len(status))
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(list(status))
+            else:
+                clauses.append("status = ?")
+                params.append(status)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
-        q += " ORDER BY created_at DESC LIMIT ?"; params.append(limit)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
         cur = self.conn.execute(q, tuple(params))
         return [self._row_to_order(r) for r in cur.fetchall()]
 

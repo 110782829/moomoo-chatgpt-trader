@@ -17,6 +17,7 @@ Core capabilities:
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
 - Sync recent fills via `POST /exec/sync/deals` (requires active broker link, selected account, and a moomoo build with `deal_list_query` or `history_deal_list_query`)
+- `GET /exec/orders` accepts multiple `status` filters
 - Trading API wrapper in `core.moomoo_client.MoomooClient`
 
 ## Prerequisites
