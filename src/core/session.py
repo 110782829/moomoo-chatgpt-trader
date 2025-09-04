@@ -21,13 +21,14 @@ def load_session() -> Optional[Dict[str, Any]]:
     return None
 
 
-def save_session(host: str, port: int, account_id: Optional[str], trd_env: Optional[str]) -> Dict[str, Any]:
+def save_session(host: str, port: int, account_id: Optional[str], trd_env: Optional[str], client_id: Optional[int] = None) -> Dict[str, Any]:
     SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "host": host,
         "port": int(port),
         "account_id": account_id,
         "trd_env": trd_env,
+        "client_id": client_id,
     }
     SESSION_PATH.write_text(json.dumps(payload, indent=2))
     return payload
@@ -48,10 +49,11 @@ def reconnect_from_session() -> Optional[MoomooClient]:
         return None
     host = s.get("host")
     port = s.get("port")
+    client_id = s.get("client_id") or 1
     if not host or not port:
         return None
     try:
-        c = MoomooClient(host, int(port))
+        c = MoomooClient(host, int(port), client_id=int(client_id))
         c.connect()
         acc = s.get("account_id")
         env = s.get("trd_env")

@@ -27,7 +27,7 @@ const api = {
   selectAccount: (account_id: string) => SEND("/accounts/select", { account_id }),
   unlockTrade: (passcode: string) => SEND("/trade/unlock", { passcode }),
   sessionStatus: () => GET<{ saved: any; connected: boolean; active_account: any }>("/session/status"),
-  sessionSave: (host: string, port: number, account_id?: string, trd_env?: string) => SEND("/session/save", { host, port, account_id, trd_env }),
+  sessionSave: (host: string, port: number, client_id?: number, account_id?: string, trd_env?: string) => SEND("/session/save", { host, port, client_id, account_id, trd_env }),
   sessionClear: () => SEND("/session/clear", {}),
   getRiskConfig: () => GET<any>("/risk/config"),
   putRiskConfig: (cfg: any) => SEND<any>("/risk/config", cfg, "PUT"),
@@ -69,7 +69,6 @@ const api = {
   getBotMode: () => GET<{ mode: Mode }>("/bot/mode"),
   setBotMode: (mode: Mode) => SEND<{ mode: Mode }>("/bot/mode", { mode }, "PUT"),
   syncDealsNow: () => SEND("/sync/deals", {}),
-  syncExecDeals: () => SEND("/exec/sync/deals", {}),
   getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
   putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
 };

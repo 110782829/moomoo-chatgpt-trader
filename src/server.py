@@ -30,15 +30,12 @@ try:
     from routers import exec_orders as exec_orders_router
 except Exception:
     exec_orders_router = None  # type: ignore
-try:
-    from routers import exec_sync as exec_sync_router
-except Exception:
-    exec_sync_router = None  # type: ignore
 
 
 # --- Internal modules ---
 from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
+from core.deals import fetch_deals
 from moomoo import TrdEnv
 from core.session import load_session, save_session, clear_session, reconnect_from_session
 from risk.limits import enforce_order_limits
@@ -93,8 +90,6 @@ app = FastAPI(title="Moomoo ChatGPT Trader API")
 init_execution(app)  # ensure SIM tables exist
 if exec_orders_router is not None:
     app.include_router(exec_orders_router.router)
-if exec_sync_router is not None:
-    app.include_router(exec_sync_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -164,7 +159,7 @@ def fetch_yf(symbol: str):
 class ConnectRequest(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
-    client_id: Optional[int] = None  # parity only
+    client_id: Optional[int] = None
 
 class SelectAccountRequest(BaseModel):
     account_id: str
@@ -382,7 +377,7 @@ def connect(req: ConnectRequest):
     """
     host = req.host or os.getenv("MOOMOO_HOST") or "127.0.0.1"
     port_raw = req.port or os.getenv("MOOMOO_PORT") or "11111"
-    _ = req.client_id or int(os.getenv("MOOMOO_CLIENT_ID", "1"))  # parity only
+    client_id = req.client_id or int(os.getenv("MOOMOO_CLIENT_ID", "1"))
 
     if not (host and host.strip()):
         raise HTTPException(status_code=400, detail="host empty")
@@ -392,7 +387,7 @@ def connect(req: ConnectRequest):
         raise HTTPException(status_code=400, detail="port not numeric")
 
     try:
-        c = MoomooClient(host=host, port=port)  # client_id not required by current build
+        c = MoomooClient(host=host, port=port, client_id=client_id)
         c.connect()
         set_client(c)
         try:
@@ -406,10 +401,11 @@ def connect(req: ConnectRequest):
                 port,
                 getattr(c, "account_id", None),
                 getattr(c, "env", None).name if getattr(c, "env", None) else None,
+                client_id,
             )
         except Exception:
             pass
-        return {"status": "connected", "host": host, "port": port}
+        return {"status": "connected", "host": host, "port": port, "client_id": client_id}
     except (RuntimeError, TypeError) as e:
         set_client(None)
         raise HTTPException(status_code=400, detail=f"Failed to connect: {e}")
@@ -452,6 +448,7 @@ def select_account(req: SelectAccountRequest):
                 c.port,
                 c.account_id,
                 c.env.name if c.env else None,
+                getattr(c, "client_id", None),
             )
         except Exception:
             pass
@@ -787,77 +784,26 @@ def exec_mode_put(body: ExecMode):
 
 @app.post("/sync/deals")
 def sync_deals(simulate_if_absent: bool = True):
-    """
-    Pull recent fills from broker and store them locally.
-
-    If the broker (paper trading) does not support deal_list_query, fall back to
-    synthesizing fills from orders:
-      - Use dealt_avg_price when available
-      - Otherwise pull a last close via configured market data and use that
-    This synthetic path is for development/testing only.
-    """
+    """Pull recent fills from broker and store them locally."""
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
-
-    # 1) Try real fills first
     try:
-        recs = c.get_deals()
-        inserted = 0
-        for r in recs:
-            oid = r.get("order_id") or r.get("orderId") or ""
-            code = r.get("code") or r.get("stock_code") or ""
-            side = str(r.get("trd_side") or r.get("side") or "").upper()
-            qty = float(r.get("deal_qty") or r.get("qty") or r.get("fill_qty") or 0)
-            price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
-            ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
-            if not code or not side or qty <= 0 or price <= 0 or not ts:
-                continue
-            record_fill(str(oid), str(code), "BUY" if "BUY" in side else "SELL", qty, price, ts)
-            inserted += 1
-        return {"status": "ok", "inserted": inserted, "source": "broker_deals"}
+        recs, source = fetch_deals(c, simulate_if_absent)
     except RuntimeError as e:
-        msg = str(e)
-
-    # 2) Paper trading fallback (orders → fills)
-    try_fallback = simulate_if_absent or "Simulated trade does not support deal list" in msg or "deal_list_query" in msg
-    if not try_fallback:
-        raise HTTPException(status_code=400, detail=msg)
-
-    try:
-        orders = c.get_orders()
-    except Exception as e2:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch orders for fallback: {e2}")
-
+        raise HTTPException(status_code=400, detail=str(e))
+    exec_service = get_execution()
     inserted = 0
-    for o in orders:
-        status = str(o.get("order_status") or "").upper()
-        code = str(o.get("code") or o.get("stock_code") or "")
-        side = str(o.get("trd_side") or "").upper()
-        oid = str(o.get("order_id") or o.get("orderId") or "")
-        qty = float(o.get("qty") or 0)
-
-        if not code or not side or not oid or qty <= 0:
-            continue
-
-        price = float(o.get("dealt_avg_price") or 0)
-        is_filled = status in {"FILLED", "FILLED_ALL", "DEALT", "SUCCESS"}
-        may_synthesize = simulate_if_absent and status in {"SUBMITTED", "SUBMITTING"} and price <= 0
-
-        if price <= 0 and (is_filled or may_synthesize):
-            try:
-                bars, _source = get_bars_safely(c, code, "K_1M", 1)
-                if bars:
-                    price = float(bars[-1].get("close", 0) or 0)
-            except Exception:
-                price = 0.0
-
-        if (is_filled or may_synthesize) and price > 0:
-            ts = str(o.get("updated_time") or o.get("create_time") or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
-            record_fill(oid, code, "BUY" if "BUY" in side else "SELL", qty, price, ts)
+    if exec_service and hasattr(exec_service, "sync_deals"):
+        try:
+            inserted = exec_service.sync_deals(recs)  # type: ignore[attr-defined]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"deal sync failed: {e}")
+    else:
+        for r in recs:
+            record_fill(r["order_id"], r["symbol"], r["side"], r["qty"], r["price"], r["ts"])
             inserted += 1
-
-    return {"status": "ok", "inserted": inserted, "source": "orders_fallback"}
+    return {"status": "ok", "inserted": inserted, "source": source}
 
 @app.get("/pnl/today")
 def pnl_today_endpoint():
@@ -1215,11 +1161,12 @@ def session_status():
 def session_save_endpoint(body: dict):
     host = body.get("host")
     port = int(body.get("port", 0))
+    client_id = body.get("client_id")
     account_id = body.get("account_id")
     trd_env = body.get("trd_env")
     if not host or not port:
         raise HTTPException(status_code=400, detail="host and port required")
-    return {"ok": True, "saved": save_session(host, port, account_id, trd_env)}
+    return {"ok": True, "saved": save_session(host, port, account_id, trd_env, client_id)}
 
 @app.post("/session/clear")
 def session_clear_endpoint():

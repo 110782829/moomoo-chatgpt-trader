@@ -545,7 +545,7 @@ export default function App() {
           setActiveAccount(st.active_account || null);
         } else if (st.saved?.host && st.saved?.port) {
           try {
-            await api.connect(String(st.saved.host), Number(st.saved.port), Number(clientId));
+            await api.connect(String(st.saved.host), Number(st.saved.port), Number(st.saved?.client_id ?? clientId));
             if (st.saved?.account_id) {
               try { await api.selectAccount(String(st.saved.account_id)); } catch {}
             }
@@ -556,6 +556,7 @@ export default function App() {
         }
         if (st.saved?.host) setHost(String(st.saved.host));
         if (st.saved?.port) setPort(Number(st.saved.port));
+        if (st.saved?.client_id) setClientId(Number(st.saved.client_id));
         if (st.saved?.account_id) setAccountId(String(st.saved.account_id));
       } catch {}
       try { setMode((await api.getBotMode()).mode); } catch {}
@@ -729,7 +730,7 @@ useEffect(() => {
   async function refreshExec(show = true) {
     try {
       setExLoading(true);
-      try { await api.syncExecDeals(); } catch {}
+      try { await api.syncDealsNow(); } catch {}
       const q: any = {};
       if (exSymbol) q.symbol = exSymbol;
       setOrders(await api.listExecOrders(q));

@@ -160,13 +160,13 @@ def get_mode() -> str:
     return _mode
 
 def get_execution():
-    """Return the execution service based on current mode."""
-    if _mode == "moomoo" and _client_accessor is not None:
-        try:
-            from .moomoo_exec import MoomooExecutionService  # type: ignore
-            return MoomooExecutionService(_get_conn(), _client_accessor)
-        except Exception:
-            pass
-    # default: SIM
-    from .sim import SimBroker
-    return SimBroker(_get_conn())
+    """Return execution service per mode."""
+    if _mode == "moomoo":
+        if _client_accessor is None:
+            raise RuntimeError("Moomoo client accessor missing")
+        from .moomoo_exec import MoomooExecutionService  # type: ignore
+        return MoomooExecutionService(_get_conn(), _client_accessor)
+    if _mode == "sim":
+        from .sim import SimBroker
+        return SimBroker(_get_conn())
+    raise RuntimeError(f"unknown execution mode: {_mode}")

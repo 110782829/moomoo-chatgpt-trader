@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 import os
 import pandas as pd
 import logging
+from datetime import datetime, timedelta
 
 MOOMOO_AVAILABLE = False
 
@@ -72,16 +73,11 @@ class MoomooClient:
     MAX_QTY = float(os.getenv("MAX_QTY", "1000"))
     SIM_ONLY = os.getenv("SIM_ONLY", "1") == "1"
 
-    def __init__(self, host: str, port: int) -> None:
-        """
-        Initialize the MoomooClient with the host and port of the OpenD gateway.
-
-        Args:
-            host (str): Hostname or IP address of the OpenD gateway.
-            port (int): Port number of the OpenD gateway.
-        """
+    def __init__(self, host: str, port: int, client_id: int = 1) -> None:
+        """Initialize the client with host/port and optional client_id."""
         self.host = host
         self.port = port
+        self.client_id = int(client_id)
         self.connected: bool = False
         self.account_id: int | None = None
 
@@ -105,11 +101,18 @@ class MoomooClient:
             raise RuntimeError("Trade context class not found in moomoo (USTrade/SecTrade).")
 
         # Trade context
-        self.trading_ctx = TradeContext(host=self.host, port=self.port)
+        try:
+            self.trading_ctx = TradeContext(host=self.host, port=self.port, client_id=self.client_id)
+        except TypeError:
+            # older moomoo builds may not accept client_id
+            self.trading_ctx = TradeContext(host=self.host, port=self.port)
 
         # Quote context (optional; best-effort)
         try:
-            self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
+            try:
+                self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port, client_id=self.client_id)
+            except TypeError:
+                self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
             # Start quote context for push data
             self.quote_ctx.set_handler(TickerHandlerBase())
             self.quote_ctx.start()
@@ -362,24 +365,32 @@ class MoomooClient:
         if not self.account_id:
             raise RuntimeError("No account selected")
 
+        start = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        end = datetime.utcnow().strftime("%Y-%m-%d")
         tried = [
-            {"trd_env": self.env, "acc_id": self.account_id},
-            {"env": self.env, "acc_id": self.account_id},
-            {"acc_id": self.account_id},
+            {"trd_env": self.env, "acc_id": int(self.account_id)},
+            {"env": self.env, "acc_id": int(self.account_id)},
+            {"acc_id": int(self.account_id)},
             {},
         ]
+        funcs = []
         fn = getattr(self.trading_ctx, "deal_list_query", None)
-        if not callable(fn):
-            fn = getattr(self.trading_ctx, "history_deal_list_query", None)
-        if not callable(fn):
+        if callable(fn):
+            funcs.append((fn, {"code": "", "order_id": 0}))
+        fn = getattr(self.trading_ctx, "history_deal_list_query", None)
+        if callable(fn):
+            funcs.append((fn, {"code": "", "start": start, "end": end}))
+        if not funcs:
             raise RuntimeError("deal retrieval not supported")
-        for kwargs in tried:
-            try:
-                ret, df = fn(**kwargs)  # type: ignore[arg-type]
-                if ret == RET_OK:
-                    return _df_to_records(df)
-            except TypeError:
-                continue
+        for fn, base in funcs:
+            for kwargs in tried:
+                params = base | kwargs
+                try:
+                    ret, df = fn(**params)  # type: ignore[arg-type]
+                    if ret == RET_OK:
+                        return _df_to_records(df)
+                except TypeError:
+                    continue
         raise RuntimeError("deal query failed")
 
     # -------- trade ops -------- #

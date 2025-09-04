@@ -233,7 +233,11 @@ class MoomooExecutionService(ExecutionService):
         return out
 
     def sync_deals(self, recs: List[Dict[str, Any]]) -> int:
-        """Insert fills and update orders."""
+        """Insert fills and update orders.
+
+        Raises ValueError if any required field is missing to avoid silently
+        dropping broker fills.
+        """
         inserted = 0
         for r in recs:
             oid = str(r.get("order_id") or r.get("orderId") or "")
@@ -242,7 +246,7 @@ class MoomooExecutionService(ExecutionService):
             price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
             ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
             if not oid or not code or qty <= 0 or price <= 0 or not ts:
-                continue
+                raise ValueError(f"invalid deal record: {r}")
             cur = self.conn.execute(
                 "SELECT 1 FROM fills WHERE order_id=? AND ts=?", (oid, ts)
             ).fetchone()

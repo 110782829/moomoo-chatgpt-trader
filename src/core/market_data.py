@@ -142,7 +142,10 @@ def _data_source() -> str:
     s = get_setting("autopilot.data_source")
     if s:
         return str(s).lower()
-    return os.getenv("AUTOPILOT_DATA_SOURCE", "futu").lower()
+    env = os.getenv("AUTOPILOT_DATA_SOURCE")
+    if env:
+        return env.lower()
+    return "yfinance"
 
 def get_bars_safely(client: MoomooClient, symbol: str, ktype: str, n: int) -> Tuple[List[Dict[str, Any]], str]:
     """

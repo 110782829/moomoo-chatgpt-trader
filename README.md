@@ -16,7 +16,7 @@ Core capabilities:
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
-- Sync recent fills via `POST /exec/sync/deals` (requires active broker link, selected account, and a moomoo build with `deal_list_query` or `history_deal_list_query`)
+- Sync recent fills via `POST /sync/deals`; it uses the execution service when available or falls back to direct storage
 - `GET /exec/orders` accepts multiple `status` filters
 - Trading API wrapper in `core.moomoo_client.MoomooClient`
 
@@ -58,7 +58,7 @@ Core capabilities:
    OPENAI_API_KEY=sk-...
    ```
 
-- `/connect` reads host and port from the request body first, then `MOOMOO_HOST` and `MOOMOO_PORT`, defaulting to `127.0.0.1` and `11111`.
+- `/connect` reads host, port, and client ID from the request body first, then environment variables (`MOOMOO_HOST`, `MOOMOO_PORT`, `MOOMOO_CLIENT_ID`). Defaults to `127.0.0.1`, `11111`, and `1`.
 
 3) Start OpenD (moomoo) with WebSocket enabled and confirm the gateway responds at the configured host and port. WebSocket uses port `33333` by default.
 
@@ -109,12 +109,12 @@ Paper trading requires `TrdEnv.SIMULATE`. Account authority details: [Authoritie
 - SIM execution uses `db/trader.db` by default (auto-created). Strategy/automation storage uses `data/trader.db`.
 - To enable GPT Autopilot set `PLANNER_PROVIDER=gpt` and `OPENAI_API_KEY`.
 - If the GPT call fails, planner can fall back to a stub. Set `PLANNER_FALLBACK_STUB=0` to surface the error instead.
-- Execution mode switches to `moomoo` upon connect or session restore and reverts to `sim` on disconnect.
+- Execution mode switches to `moomoo` upon connect or session restore and reverts to `sim` on disconnect. No automatic fallback to `sim` when in `moomoo` mode.
 - Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.
 - Account assets query falls back to get_accinfo if accinfo_query is missing and logs errors.
 - Account assets sums per-currency rows and adds unsettled cash when present.
 - Broker returns best-effort figures; totals can still differ from paper-trade app.
-- Market data source is selectable (Moomoo or Yahoo Finance) with no automatic fallback.
+- Market data source defaults to Yahoo Finance and can switch to Moomoo without automatic fallback.
 - Yahoo Finance fetches at least five days of intraday bars to avoid empty data on market closures.
 - Quote context starts on connect to enable basic quote subscriptions.
 
