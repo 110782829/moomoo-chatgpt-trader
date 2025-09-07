@@ -5,6 +5,7 @@ export default function SettingsSignals({ toast }: any) {
   const [weights, setWeights] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [autoAssign, setAutoAssign] = useState<boolean>(false);
   // Strategy name map
   const pretty: Record<string, string> = {
     macd_cross: "MACD Cross",
@@ -15,7 +16,7 @@ export default function SettingsSignals({ toast }: any) {
     news: "News",
   };
 
-  useEffect(() => { (async () => { try { const s = await api.getSignalsSettings(); setWeights(s.weights||{}); } catch {} finally { setLoading(false); } })(); }, []);
+  useEffect(() => { (async () => { try { const s = await api.getSignalsSettings(); setWeights(s.weights||{}); setAutoAssign(!!s.auto_weight); } catch {} finally { setLoading(false); } })(); }, []);
 
   function setWeight(name: string, v: number) { setWeights(prev => ({ ...prev, [name]: v })); }
   function normalize() {
@@ -25,6 +26,26 @@ export default function SettingsSignals({ toast }: any) {
     Object.keys(weights).forEach(k=>{ next[k] = Number(((weights[k]||0)/sum).toFixed(2)); });
     setWeights(next);
   }
+  async function toggleAutoAssign() {
+    try {
+      const next = !autoAssign;
+      setAutoAssign(next);
+      await api.putSignalsSettings({ auto_weight: next } as any);
+      // reload weights to reflect any background changes immediately
+      const s = await api.getSignalsSettings();
+      setWeights(s.weights||{});
+      toast?.show?.(next ? "Auto-assign ON" : "Auto-assign OFF");
+    } catch (e:any) { toast?.show?.(String(e)); }
+  }
+
+  // Poll weights when auto-assign is ON so table reflects changes
+  useEffect(() => {
+    if (!autoAssign) return;
+    const id = window.setInterval(async () => {
+      try { const s = await api.getSignalsSettings(); setWeights(s.weights||{}); } catch {}
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [autoAssign]);
   function assignAuto() {
     const n = Object.keys(weights).length;
     if (!n) return;
@@ -53,7 +74,7 @@ export default function SettingsSignals({ toast }: any) {
     <div className="stack" style={{ marginTop: 32 }}>
       <div className="row" style={{marginBottom:8, gap:8}}>
         <button className="btn" onClick={normalize}>Normalize Weights</button>
-        <button className="btn" onClick={assignAuto}>Assign Automatically</button>
+        <button className={`btn ${autoAssign ? 'brand' : ''}`} onClick={toggleAutoAssign}>Assign Automatically</button>
       </div>
       <div className="table-wrap" style={{ overflowY: "visible" }}>
         <table className="table-modern">
@@ -68,7 +89,7 @@ export default function SettingsSignals({ toast }: any) {
           </tbody>
         </table>
       </div>
-      <div className="row" style={{marginTop:8, justifyContent:"flex-end"}}>
+      <div className="row" style={{marginTop:8, justifyContent:"flex-end", alignItems:"center"}}>
         <button className="btn brand" onClick={save} disabled={saving || loading}>{saving?"Saving…":"Save Signals"}</button>
       </div>
     </div>

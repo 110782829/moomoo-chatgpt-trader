@@ -117,6 +117,7 @@ Paper trading requires `TrdEnv.SIMULATE`. Account authority details: [Authoritie
 - Market data source defaults to Yahoo Finance and can switch to Moomoo without automatic fallback.
 - Yahoo Finance fetches at least five days of intraday bars to avoid empty data on market closures.
 - Quote context starts on connect to enable basic quote subscriptions.
+- Market orders log fills immediately using the latest quote when available.
 
 ## Troubleshooting market data
 

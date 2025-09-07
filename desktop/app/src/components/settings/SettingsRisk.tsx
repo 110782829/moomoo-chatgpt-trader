@@ -81,11 +81,10 @@ export default function SettingsRisk({ cfg, setCfg, cfgGet, saveRisk, saving, to
         <div style={{ alignSelf: "end", display: "flex", alignItems: "center", gap: 8 }}>
           <span title={unlocked ? "Unlocked" : "Locked"}>{unlocked ? <UnlockIcon /> : <LockIcon />}</span>
           <button className="btn brand" onClick={unlock}>Unlock</button>
+          <button className="btn brand" onClick={saveRisk} disabled={saving}>{saving ? "Saving…" : "Save Guardrails"}</button>
         </div>
       </div>
-      <div className="row" style={{marginTop:10}}>
-        <button className="btn brand" onClick={saveRisk} disabled={saving}>{saving ? "Saving…" : "Save Guardrails"}</button>
-      </div>
+      
       <div className="help" style={{marginTop:8}}>Risk checks are enforced server-side before any order is sent.</div>
     </>
   );

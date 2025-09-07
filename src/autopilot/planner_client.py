@@ -8,6 +8,12 @@ from .schemas import PlannerOutput, validate_output
 
 # Env
 PROVIDER = os.getenv("PLANNER_PROVIDER", "stub").strip().lower()   # "stub" | "gpt" | "openai"
+# Auto-upgrade to GPT if API key is present and provider left as default 'stub'
+try:
+    if PROVIDER == "stub" and (os.getenv("OPENAI_API_KEY", "").strip()):
+        PROVIDER = "gpt"
+except Exception:
+    pass
 FALLBACK_STUB = os.getenv("PLANNER_FALLBACK_STUB", "1").strip().lower() not in ("0", "false", "no")
 
 # Try both locations for the GPT client

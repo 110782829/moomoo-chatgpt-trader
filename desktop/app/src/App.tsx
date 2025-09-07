@@ -447,7 +447,7 @@ function useToast() {
 }
 
 // ---------- App ----------
-enum Tab { Settings=0, Status=1, Activity=2 }
+enum Tab { Settings=0, Status=1, Activity=2, Reports=3 }
 
 export default function App() {
   const toast = useToast();
@@ -484,6 +484,8 @@ export default function App() {
   const [autoRefresh, setAutoRefresh] = useLocalStorage("status.auto", true);
   const [statusEvery, setStatusEvery] = useLocalStorage("status.ms", 5000);
   const [statusAt, setStatusAt] = useState<string>("—");
+  const [weekly, setWeekly] = useState<any|null>(null);
+  const [lastDiff, setLastDiff] = useState<any|null>(null);
 
   // logs
   const [logs, setLogs] = useState<any[]>([]);
@@ -504,6 +506,7 @@ export default function App() {
   const [orders, setOrders] = useState<any[]>([]);
   const [openOrderCount, setOpenOrderCount] = useState<number | null>(null);
   const [exposureMV, setExposureMV] = useState<number | null>(null);
+  const exReqId = useRef(0);
 
   
   // preference targets (read-only for Current Stats)
@@ -560,8 +563,9 @@ export default function App() {
         if (st.saved?.account_id) setAccountId(String(st.saved.account_id));
       } catch {}
       try { setMode((await api.getBotMode()).mode); } catch {}
-      try { setCfg(await api.getRiskConfig()); } catch {}
+      try { const c = await api.getRiskConfig(); setCfg(c); setRiskEnabled(typeof c?.enabled === 'boolean' ? !!c.enabled : null); } catch {}
       await refreshStatus(false);
+      await refreshAutoStatus();
       await refreshLogs(false);
       await refreshExec(false);
       await refreshPositions(false);
@@ -570,11 +574,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!autoRefresh || tab !== Tab.Status) return;
+    if (!autoRefresh || (tab !== Tab.Status && tab !== Tab.Reports)) return;
     const id = window.setInterval(() => refreshStatus(false), statusEvery);
     const idAuto = window.setInterval(() => refreshAutoStatus(), autoEvery);
     return () => { window.clearInterval(id); window.clearInterval(idAuto); };
   }, [autoRefresh, tab, statusEvery, autoEvery]);
+
+  // Background prefetch for Activity market data even when Activity tab is not open
+  useEffect(() => {
+    let t: any;
+    const load = async () => {
+      try { await GET<any>("/debug/bars", { symbol: "US.AAPL", ktype: "K_1M", n: 3 }); } catch {}
+    };
+    load();
+    t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Background prefetch watchlist/discovery cache
+  useEffect(() => {
+    let t: any;
+    const load = async () => { try { await api.getDiscovery(); } catch {} };
+    load();
+    t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, []);
 
   
   useEffect(() => {
@@ -673,7 +697,7 @@ useEffect(() => {
     try {
       await api.flattenExecPositions([sym]);
       toast.show(`Flatten sent: ${sym}`);
-      await refreshPositions(false);
+      await refreshPositions(true);
       await refreshStatus(false);
       await refreshExec(false);
     } catch (e:any) {
@@ -691,7 +715,7 @@ useEffect(() => {
       if (!symbols.length) { toast.show("No visible positions to flatten."); return; }
       await api.flattenExecPositions(symbols);
       toast.show(`Flatten sent: ${symbols.join(", ")}`);
-      await refreshPositions(false);
+      await refreshPositions(true);
       await refreshStatus(false);
       await refreshExec(false);
     } catch (e:any) {
@@ -727,30 +751,44 @@ useEffect(() => {
     }
   }
 
-  async function refreshExec(show = true) {
+async function refreshExec(show = true) {
+    const reqId = ++exReqId.current;
     try {
       setExLoading(true);
       try { await api.syncDealsNow(); } catch {}
       const q: any = {};
       if (exSymbol) q.symbol = exSymbol;
-      setOrders(await api.listExecOrders(q));
+      const list = await api.listExecOrders(q);
+      if (reqId !== exReqId.current) return;
+      if (Array.isArray(list) && list.length === 0 && (orders?.length || 0) > 0) {
+        setExAt(nowIso());
+        setExLoading(false);
+        return;
+      }
+      setOrders(list);
       setExAt(nowIso());
     } catch (e:any) {
       show && toast.show(`Exec refresh failed: ${brief(e)}`);
     } finally {
-      setExLoading(false);
+      if (reqId === exReqId.current) setExLoading(false);
     }
   }
   
 
-async function refreshPositions(show = true) {
+async function refreshPositions(acceptEmpty = false) {
     const reqId = ++posReqId.current;
     try {
       setPosLoading(true);
-      const data = await api.listExecPositions({});
+      const data = await api.listExecPositions({ fresh: acceptEmpty });
       // Drop stale responses from earlier requests to prevent flicker
       if (reqId !== posReqId.current) return;
       let arr: any[] = data || [];
+      // If not a forced fresh request and API returns an empty list intermittently, keep previous non-empty snapshot
+      if (!acceptEmpty && Array.isArray(arr) && arr.length === 0 && (positions?.length || 0) > 0) {
+        setPosAt(nowIso());
+        setPosLoading(false);
+        return;
+      }
       if (posSymbol) {
         const q = String(posSymbol).toLowerCase();
         arr = arr.filter((r:any) => String(r?.symbol || "").toLowerCase().includes(q));
@@ -759,7 +797,7 @@ async function refreshPositions(show = true) {
       setPosAt(nowIso());
     } catch (e:any) {
       if (reqId === posReqId.current) {
-        show && toast.show(`Positions refresh failed: ${brief(e)}`);
+        toast.show(`Positions refresh failed: ${brief(e)}`);
       }
     } finally {
       if (reqId === posReqId.current) setPosLoading(false);
@@ -773,6 +811,8 @@ async function refreshAutoStatus() {
     const st = await api.autopilotStatus();
     setAutoStatus(st || null);
     setAutoAt(nowIso());
+    try { const wk = await api.autopilotWeekly(); setWeekly(wk || null); } catch {}
+    try { const df = await api.autopilotLastDiff(); setLastDiff(df || null); } catch {}
   } catch (e:any) {
     // silent
   }
@@ -791,16 +831,25 @@ function timeAgo(iso?: string) {
 function shortReason(r:any): string {
   const txt = r?.reason || r?.note || `${r.action||""} ${r.side||""} ${r.symbol||""}`.trim();
   if (!txt) return "";
-  return String(txt).length>120 ? String(txt).slice(0,120)+"…" : String(txt);
+  try {
+    const extra = r?.extra_json ? JSON.parse(r.extra_json) : (r.extra||{});
+    const rationale = extra?.rationale || r?.rationale;
+    const base = rationale ? `${txt} — ${String(rationale)}` : String(txt);
+    return base.length>180 ? base.slice(0,180)+"…" : base;
+  } catch {
+    return String(txt).length>120 ? String(txt).slice(0,120)+"…" : String(txt);
+  }
 }
 async function openExplain(r:any) {
   setExplainRow(r);
   setExplainOpen(true);
   try {
-    const [ctx, last] = await Promise.all([
+    const [ctx, last, diff] = await Promise.all([
       api.autopilotContext?.().catch(()=>null),
       api.autopilotLastOutput?.().catch(()=>null),
+      api.autopilotLastDiff?.().catch(()=>null),
     ]);
+    (window as any).__autopilotLastDiff = diff;
     setExplainData({ ctx, last, row: r });
   } catch {
     setExplainData({ row: r });
@@ -841,7 +890,6 @@ async function openExplain(r:any) {
           <span className="indicator" title="Active account">
             <span>{activeAccount?.account_id || "—"}</span>
             {activeAccount?.trd_env ? <span>• {activeAccount.trd_env}</span> : null}
-            {activeAccount?.account_type ? <span>• {activeAccount.account_type}</span> : null}
           </span>
           <span className="indicator" title="Risk Guardrail">
             <span className={`dot ${riskEnabled ? "green" : "red"}`} />
@@ -852,7 +900,7 @@ async function openExplain(r:any) {
       </header>
 
       <nav className="tabs">
-        {["Settings","Bot Status","Activity Log"].map((t,i)=>(
+        {["Settings","Bot Status","Activity Log","Reports"].map((t,i)=>(
           <button key={t} className={`tab ${tab===i?'active':''}`} onClick={()=>setTab(i as Tab)}>{t}</button>
         ))}
       </nav>
@@ -881,7 +929,8 @@ async function openExplain(r:any) {
             <SettingsRisk cfg={cfg} setCfg={setCfg} cfgGet={cfgGet} saveRisk={saveRisk} saving={saving} toast={toast} />
           </SectionCard>
 
-          <div className="panels2 w23" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
+          {/* Keep original heights; make columns equal width to align vertical seams with Watchlist/Signals below */}
+          <div className="panels2" style={{ gridTemplateRows: "repeat(2,minmax(0,1fr))" }}>
             <SectionCard id="data" title="Data" style={{ gridRow: "span 2" }}>
               <SettingsData toast={toast} />
             </SectionCard>
@@ -976,16 +1025,17 @@ async function openExplain(r:any) {
       <div><div className="help">Orders pending</div><div className="value">{openOrderCount ?? "—"}</div></div>
     </div>
   </div>
-</div>
-<div className="card"><h3>Realized PnL (Today)</h3>
+            </div>
+            <div className="card"><h3>Realized PnL (Today)</h3>
               <div className="value" style={{color: pnl==null ? "inherit" : pnl>=0 ? "var(--green)" : "var(--red)"}}>
-                {pnl ?? "—"}
+                {pnl==null ? "—" : `$${Number(pnl).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`}
               </div>
             </div>
             <div className="card">
               <h3>Exposure (MV)</h3>
               <div className="value">{exposureMV==null ? "—" : (exposureMV?.toFixed ? exposureMV.toFixed(2) : exposureMV)}</div>
             </div>
+            {/* moved Plan Diff and Weekly Report to Reports tab */}
           </div>
           {/* Controls + Autopilot */}
           
@@ -1201,6 +1251,73 @@ async function openExplain(r:any) {
         />
       )}
 
+      {/* Reports tab */}
+      {tab===Tab.Reports && (
+        <section className="stack">
+          <div className="grid-3">
+            <div className="card" style={{gridColumn:"span 3"}}>
+              <h3>Weekly Report</h3>
+              {weekly ? (
+                <div className="row" style={{flexWrap:"wrap", gap:12}}>
+                  <span className="badge">trades {weekly?.performance_7d?.trades ?? "—"}</span>
+                  <span className="badge">win {weekly?.performance_7d?.win_rate_pct ?? "—"}%</span>
+                  <span className="badge">avg R {weekly?.performance_7d?.avg_rr ?? "—"}</span>
+                  <span className="badge">max DD {weekly?.performance_7d?.max_dd ?? "—"}%</span>
+                  <span className="badge">reweights {weekly?.auto_weight_adjustments ?? 0}</span>
+                  <span className="badge">validator drop {weekly?.dropped?.validator_dropped ?? 0}</span>
+                  <span className="badge">evaluator drop {weekly?.dropped?.evaluator_dropped ?? 0}</span>
+                  {(() => {
+                    const at = weekly?.attribution || {}; const keys = Object.keys(at);
+                    if (!keys.length) return null;
+                    return <span className="badge" title="Top strategies">{keys.slice(0,6).map(k=>`${k}:${(at[k]||0).toFixed?.(2) ?? at[k]}`).join(" ")}</span>;
+                  })()}
+                </div>
+              ) : <div className="help">No weekly data</div>}
+            </div>
+
+            <div className="card" style={{gridColumn:"span 3"}}>
+              <h3>Plan Diff (Proposed → Kept → Orders)</h3>
+              {(() => {
+                const prop = (lastDiff?.proposed||[]).map((d:any)=>d.sym).filter(Boolean);
+                const kept = (lastDiff?.kept||[]).map((d:any)=>d.sym).filter(Boolean);
+                const ordSyms = (orders||[]).map((o:any)=>o.symbol).filter(Boolean);
+                return (
+                  <div className="row" style={{gap:8, flexWrap:"wrap"}}>
+                    <span className="badge">proposed {prop.length}</span>
+                    <span className="badge">kept {kept.length}</span>
+                    <span className="badge">orders {ordSyms.length}</span>
+                    {prop.length>0 && <span className="badge" title="proposed syms">{prop.slice(0,8).join(", ")}</span>}
+                    {kept.length>0 && <span className="badge" title="kept syms">{kept.slice(0,8).join(", ")}</span>}
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="card" style={{gridColumn:"span 3"}}>
+              <h3>Proposed vs Executed (7d)</h3>
+              {(() => {
+                const pc = weekly?.proposed_counts || {};
+                const ec = weekly?.executed_counts || {};
+                const syms = Array.from(new Set([...Object.keys(pc), ...Object.keys(ec)])).slice(0,20);
+                if (!syms.length) return <div className="help">No data</div>;
+                return (
+                  <div className="table-wrap">
+                    <table className="table-modern">
+                      <thead><tr><th>Symbol</th><th className="num">Proposed</th><th className="num">Executed</th></tr></thead>
+                      <tbody>
+                        {syms.map(s => (
+                          <tr key={s}><td>{s}</td><td className="num">{pc[s]||0}</td><td className="num">{ec[s]||0}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Backtest tab removed */}
 
       {previewOpen && createPortal(
@@ -1236,17 +1353,60 @@ async function openExplain(r:any) {
                 const sigs:any[] = Array.isArray(extra?.signals_used) ? extra.signals_used : [];
                 const tone = extra?.news_tone;
                 const conf = extra?.conf; const minc = extra?.min_conf;
+                const rationale = extra?.rationale || row?.rationale;
+                // policy from planner context if available in explainData
+                let pol:any = undefined;
+                try { pol = (explainData?.ctx || explainData?.context || {}).policy; } catch {}
+                const rc:any = extra?.rule_checks || null;
+                let polsum:any = undefined;
+                try { polsum = (explainData?.last?.last_output || {}).policy_summary; } catch {}
                 if (!sigs.length && !tone && conf==null) return null;
                 return (
                   <div className="panel compact" style={{background:"#0e1320", marginBottom:8}}>
                     <div className="row" style={{gap:8, flexWrap:"wrap"}}>
+                      {polsum && <span className="badge" title="Policy summary">{String(polsum).slice(0,80)}</span>}
                       {typeof conf === 'number' && typeof minc === 'number' && (
                         <span className="badge" title="Confidence gate">conf {conf.toFixed(2)} ≥ {minc.toFixed(2)}</span>
                       )}
                       {tone && <span className="badge" title="News tone">news {String(tone)}</span>}
+                      {rationale && <span className="badge" title="Rationale">{String(rationale).slice(0,80)}</span>}
+                      {pol && pol.reduce_only && <span className="badge" title="Policy">reduce-only</span>}
+                      {pol && pol.long_only && <span className="badge" title="Policy">long-only</span>}
+                      {pol && pol.short_only && <span className="badge" title="Policy">short-only</span>}
+                      {pol && pol.forbid_new && <span className="badge" title="Policy">no-new</span>}
+                      {rc && <>
+                        {rc.strict_prefs_ok!=null && <span className="badge" title="Strict prefs">prefs {rc.strict_prefs_ok?"ok":"fail"}</span>}
+                        {rc.policy_ok!=null && <span className="badge" title="Policy check">policy {rc.policy_ok?"ok":"fail"}</span>}
+                        {rc.near_earnings!=null && <span className="badge" title="Earnings window">earn {rc.near_earnings?"near":"-"}</span>}
+                        {rc.valuation_ok!=null && <span className="badge" title="Valuation">val {rc.valuation_ok?"ok":"rich"}</span>}
+                        {rc.conflict!=null && <span className="badge" title="Conflict index">conflict {rc.conflict?"hi":"lo"}</span>}
+                      </>}
                       {sigs.slice(0,6).map((s:any, i:number)=> (
                         <span key={i} className="badge" title={`${s.strategy} ${s.signal}`}>{s.strategy}:{s.signal} {Number(s.strength||0).toFixed(2)}</span>
                       ))}
+                    </div>
+                  </div>
+                );
+              } catch { return null; }
+            })()}
+            {(() => {
+              // Proposed vs Kept diff (best-effort)
+              try {
+                const diff:any = (window as any).__autopilotLastDiff || null;
+                if (!diff) return null;
+                const propSyms = (diff.proposed||[]).map((d:any)=>d.sym).filter(Boolean);
+                const keptSyms = (diff.kept||[]).map((d:any)=>d.sym).filter(Boolean);
+                return (
+                  <div className="panel compact" style={{background:"#0e1320", marginBottom:8}}>
+                    <div className="row" style={{gap:8, flexWrap:"wrap"}}>
+                      <span className="badge" title="Proposed count">proposed {propSyms.length}</span>
+                      <span className="badge" title="Kept after evaluator">kept {keptSyms.length}</span>
+                      {propSyms.length>0 && (
+                        <span className="badge" title="Proposed syms">{propSyms.slice(0,6).join(", ")}</span>
+                      )}
+                      {keptSyms.length>0 && (
+                        <span className="badge" title="Kept syms">{keptSyms.slice(0,6).join(", ")}</span>
+                      )}
                     </div>
                   </div>
                 );
@@ -1702,11 +1862,11 @@ function ActivityLog(props: {
               {mdBars.length ? mdBars.map((b:any,i:number)=>(
                 <tr key={i}>
                   <td className="small mono">{b.time}</td>
-                  <td className="num">{b.open}</td>
-                  <td className="num">{b.high}</td>
-                  <td className="num">{b.low}</td>
-                  <td className="num">{b.close}</td>
-                  <td className="num">{b.volume}</td>
+                  <td className="num">{Number(b.open).toFixed ? Number(b.open).toFixed(2) : b.open}</td>
+                  <td className="num">{Number(b.high).toFixed ? Number(b.high).toFixed(2) : b.high}</td>
+                  <td className="num">{Number(b.low).toFixed ? Number(b.low).toFixed(2) : b.low}</td>
+                  <td className="num">{Number(b.close).toFixed ? Number(b.close).toFixed(2) : b.close}</td>
+                  <td className="num">{Number(b.volume).toLocaleString?.() ?? b.volume}</td>
                 </tr>
               )) : <tr><td colSpan={6}>No data.</td></tr>}
             </tbody>

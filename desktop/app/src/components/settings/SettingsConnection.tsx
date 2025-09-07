@@ -13,13 +13,13 @@ export default function SettingsConnection({
   activeAccount,
   toast,
 }: any) {
-  const [execMode, setExecMode] = useState<"sim"|"moomoo">("sim");
+  const [execMode, setExecMode] = useState<"moomoo">("moomoo");
 
   useEffect(() => {
-    api.getExecMode().then(r => setExecMode((r as any)?.mode || "sim")).catch(() => {});
+    api.getExecMode().then(r => setExecMode(((r as any)?.mode || "moomoo") as any)).catch(() => {});
   }, []);
 
-  function changeExec(m: "sim"|"moomoo") {
+  function changeExec(m: "moomoo") {
     api.putExecMode(m)
       .then(() => { setExecMode(m); toast.show("Exec mode saved."); })
       .catch((e: any) => toast.show(String(e)));
@@ -32,7 +32,7 @@ export default function SettingsConnection({
   return (
     <>
       <div className="help" style={{marginBottom:8}}>
-        {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}{activeAccount?.account_type ? ` • ${activeAccount.account_type}` : ""}
+        {connected ? "Connected" : "Not connected"} • {activeAccount?.account_id || "—"} {activeAccount?.trd_env ? `• ${activeAccount.trd_env}` : ""}
       </div>
       <div className="form-row">
         <div><div className="label">Host</div><input className="input" value={host} onChange={e=>setHost(e.target.value)} /></div>
@@ -48,17 +48,16 @@ export default function SettingsConnection({
           <div className="label">Execution</div>
           <NiceSelect
             value={execMode}
-            onChange={(v)=>changeExec(v as "sim"|"moomoo")}
+            onChange={(v)=>changeExec("moomoo")}
             options={[
-              { value: "sim", label: "Sim" },
               { value: "moomoo", label: "Moomoo" },
             ]}
             width="100%"
           />
         </div>
-      </div>
-      <div className="row" style={{marginTop:8}}>
-        <button className="btn brand" onClick={connectAccount}>Connect Account</button>
+        <div style={{ alignSelf: "end" }}>
+          <button className="btn brand" onClick={connectAccount}>Connect Account</button>
+        </div>
       </div>
     </>
   );

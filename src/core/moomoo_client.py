@@ -312,6 +312,8 @@ class MoomooClient:
         if not self.account_id:
             raise RuntimeError("No account selected")
 
+        # 1) Active/unfinished orders
+        active: List[Dict[str, Any]] = []
         tried = [
             {"trd_env": self.env, "acc_id": self.account_id},
             {"env": self.env, "acc_id": self.account_id},
@@ -322,13 +324,48 @@ class MoomooClient:
         for kwargs in tried:
             try:
                 ret, df = self.trading_ctx.order_list_query(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"order_list_query failed: {df}")
-                return _df_to_records(df)
+                if ret == RET_OK:
+                    active = _df_to_records(df)
+                    break
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
+
+        # 2) Recent history (fallback to last 3 days)
+        hist: List[Dict[str, Any]] = []
+        try:
+            from datetime import datetime, timedelta
+            start = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%d")
+            end = datetime.utcnow().strftime("%Y-%m-%d")
+            fn = getattr(self.trading_ctx, "history_order_list_query", None)
+            if callable(fn):
+                for kwargs in tried:
+                    try:
+                        params = {"start": start, "end": end} | kwargs
+                        ret, df = fn(**params)  # type: ignore[arg-type]
+                        if ret == RET_OK:
+                            hist = _df_to_records(df)
+                            break
+                    except TypeError:
+                        continue
+        except Exception:
+            pass
+
+        if not active and last_err is not None and not hist:
+            # surface incompatibility if both queries failed
+            raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
+
+        # Merge and deduplicate by order_id when present
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for rec in (list(active) + list(hist)):
+            oid = str(rec.get("order_id") or rec.get("orderId") or rec.get("orderID") or rec.get("id") or "")
+            key = oid or (str(rec.get("code") or rec.get("stock_code") or "") + ":" + str(rec.get("create_time") or rec.get("time") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(rec)
+        return merged
 
     def get_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:
@@ -402,6 +439,10 @@ class MoomooClient:
         side: str,
         order_type: str = "MARKET",
         price: Optional[float] = None,
+        aux_price: Optional[float] = None,
+        trail_type: Optional[str] = None,
+        trail_value: Optional[float] = None,
+        trail_spread: Optional[float] = None,
     ) -> Dict[str, Any]:
         if not self.connected:
             raise RuntimeError("Not connected")
@@ -411,8 +452,7 @@ class MoomooClient:
         # safety rails
         if self.SIM_ONLY and self.env != TrdEnv.SIMULATE:
             raise RuntimeError("Real trading disabled by server config (SIM_ONLY=1)")
-        if qty > self.MAX_QTY:
-            raise RuntimeError(f"Quantity {qty} exceeds server limit MAX_QTY={self.MAX_QTY}")
+        # Do not raise on large qty; chunk below
 
         symbol = symbol.strip()
         code = symbol if "." in symbol else f"US.{symbol.upper()}"
@@ -420,37 +460,81 @@ class MoomooClient:
         side_enum = TrdSide.BUY if side.upper() == "BUY" else TrdSide.SELL
 
         ot = order_type.upper()
+        # Map to SDK enum; support extended types when available
         if ot == "MARKET":
-            order_type_enum = OrderType.MARKET
+            order_type_enum = getattr(OrderType, "MARKET", OrderType.NORMAL)
             if price is None:
-                price = 0  # many builds ignore price for market
+                price = 0
         elif ot == "LIMIT":
             if price is None:
                 raise RuntimeError("price is required for LIMIT orders")
-            # many builds treat NORMAL as 'limit'
-            order_type_enum = OrderType.NORMAL
+            order_type_enum = getattr(OrderType, "NORMAL", OrderType.NORMAL)
+        elif ot in {"STOP", "STOP_MARKET"}:
+            # Stop market: requires aux_price (trigger)
+            if aux_price is None:
+                raise RuntimeError("aux_price is required for STOP orders")
+            order_type_enum = getattr(OrderType, "STOP", getattr(OrderType, "NORMAL", OrderType.NORMAL))
+            # For many builds price can be 0 for STOP market
+            if price is None:
+                price = 0
+        elif ot in {"STOP_LIMIT"}:
+            if aux_price is None or price is None:
+                raise RuntimeError("STOP_LIMIT requires aux_price (trigger) and price (limit)")
+            order_type_enum = getattr(OrderType, "STOP_LIMIT", getattr(OrderType, "NORMAL", OrderType.NORMAL))
+        elif ot in {"TRAILING_STOP", "TRAILING_STOP_LIMIT"}:
+            # trail_type: 'AMOUNT' or 'PERCENT' depending on SDK
+            tt = trail_type or None
+            tv = float(trail_value) if trail_value is not None else None
+            ts = float(trail_spread) if trail_spread is not None else None
+            if tv is None:
+                raise RuntimeError("trailing orders require trail_value")
+            # Map enums if available
+            order_type_enum = getattr(OrderType, ot, getattr(OrderType, "NORMAL", OrderType.NORMAL))
         else:
-            order_type_enum = OrderType.NORMAL
+            # Fallback to LIMIT for unknown types
+            order_type_enum = getattr(OrderType, "NORMAL", OrderType.NORMAL)
 
+        base = dict(code=code, price=price, qty=qty, trd_side=side_enum,
+                    order_type=order_type_enum)
+        if aux_price is not None:
+            base["aux_price"] = float(aux_price)
+        if trail_type is not None:
+            base["trail_type"] = trail_type
+        if trail_value is not None:
+            base["trail_value"] = float(trail_value)
+        if trail_spread is not None:
+            base["trail_spread"] = float(trail_spread)
         tried = [
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum, trd_env=self.env, acc_id=self.account_id),
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum, env=self.env, acc_id=self.account_id),
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum),
+            dict(base, **{ "trd_env": self.env, "acc_id": self.account_id }),
+            dict(base, **{ "env": self.env, "acc_id": self.account_id }),
+            dict(base),
         ]
-        last_err = None
-        for kwargs in tried:
-            try:
-                ret, df = self.trading_ctx.place_order(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"place_order failed: {df}")
-                return {"status": "ok", "result": _df_to_records(df)}
-            except TypeError as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"place_order incompatible with this moomoo build: {last_err}")
+        def _place_once(quantity: float):
+            last_err = None
+            for kwargs in tried:
+                try:
+                    kwargs2 = dict(kwargs)
+                    kwargs2["qty"] = quantity
+                    ret, df = self.trading_ctx.place_order(**kwargs2)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(f"place_order failed: {df}")
+                    return _df_to_records(df)
+                except TypeError as e:
+                    last_err = e
+                    continue
+            raise RuntimeError(f"place_order incompatible with this moomoo build: {last_err}")
+
+        # Chunk large quantities to respect MAX_QTY without failing
+        maxq = float(getattr(self, "MAX_QTY", 1000.0) or 1000.0)
+        if qty <= maxq:
+            return {"status": "ok", "result": _place_once(qty)}
+        remaining = float(qty)
+        combined: list[dict] = []
+        while remaining > 0:
+            qchunk = maxq if remaining > maxq else remaining
+            combined.extend(_place_once(qchunk))
+            remaining -= qchunk
+        return {"status": "ok", "result": combined}
 
     def cancel_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:

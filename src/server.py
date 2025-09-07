@@ -3,7 +3,7 @@ Start command: uvicorn --app-dir src server:app --reload --port 8000
 '''
 from fastapi import FastAPI, HTTPException, APIRouter
 from pydantic import BaseModel
-from typing import List, Optional, Dict 
+from typing import List, Optional, Dict, Any 
 import os
 import json
 from datetime import datetime
@@ -14,7 +14,15 @@ import yfinance as yf
 
 try:
     from dotenv import load_dotenv
+    # Load default .env from current working directory
     load_dotenv()
+    # Also try project-root .env relative to this file (src/.. /.env)
+    try:
+        ROOT_ENV = Path(__file__).resolve().parent.parent / ".env"
+        if ROOT_ENV.exists():
+            load_dotenv(dotenv_path=str(ROOT_ENV), override=False)
+    except Exception:
+        pass
 except Exception:
     pass
 
@@ -87,7 +95,7 @@ except Exception as _ge:
 # ---------- App + CORS ----------
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
-init_execution(app)  # ensure SIM tables exist
+init_execution(app)  # initialize execution container (broker-backed)
 if exec_orders_router is not None:
     app.include_router(exec_orders_router.router)
 
@@ -502,8 +510,8 @@ def account_info(account_id: str):
 def accounts_assets():
     """
     Best-effort account assets snapshot to help verify the selected account.
-    - In 'moomoo' mode: queries broker via accinfo_query if available.
-    - In 'sim' mode: estimates from SIM positions' market value (no cash tracking).
+    Queries broker via accinfo_query when available; falls back to estimating from
+    broker positions if necessary.
     """
     # Prefer execution mode; if unavailable, infer from client
     try:
@@ -528,7 +536,7 @@ def accounts_assets():
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to fetch broker assets: {e}")
 
-    # SIM fallback: sum MV across positions
+    # Fallback: sum MV across broker-reported positions when asset API not available
     try:
         exec_service = get_execution()
     except Exception:
@@ -1319,8 +1327,12 @@ async def autopilot_enable(body: dict):
 
 @autopilot_router.get("/status")
 async def autopilot_status():
-    mgr = _get_autopilot()
-    st = mgr.status()
+    try:
+        mgr = _get_autopilot()
+        st = mgr.status()
+    except Exception as e:
+        # Return a minimal status payload instead of 500 to aid debugging
+        st = {"on": False, "last_tick": None, "last_decision": None, "stats": {}, "reject_streak": 0, "error": str(e)}
     # Enrich with performance stats and model info (best-effort)
     try:
         from core.storage import performance_stats, exits_coverage  # type: ignore
@@ -1338,9 +1350,10 @@ async def autopilot_status():
     try:
         provider = (os.getenv("PLANNER_PROVIDER", "stub") or "stub").strip().lower()
         has_key = bool((os.getenv("OPENAI_API_KEY", "") or "").strip())
+        effective = ("gpt" if (provider == "stub" and has_key) else provider)
         st["planner_info"] = {
-            "provider": provider,
-            "enabled": (provider == "gpt" and has_key),
+            "provider": effective,
+            "enabled": (effective == "gpt" and has_key),
             "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         }
     except Exception:
@@ -1364,6 +1377,38 @@ async def autopilot_context():
 async def autopilot_last_output():
     mgr = _get_autopilot()
     return {"last_output": mgr.last_output or {}}
+
+@autopilot_router.get("/last_diff")
+async def autopilot_last_diff():
+    try:
+        mgr = _get_autopilot()
+    except Exception:
+        return {"proposed": [], "kept": []}
+    try:
+        proposed = getattr(mgr, "_last_proposed", []) or []
+    except Exception:
+        proposed = []
+    try:
+        kept = getattr(mgr, "_last_evaluated", []) or []
+    except Exception:
+        kept = []
+    return {"proposed": proposed[:12], "kept": kept[:12]}
+
+@autopilot_router.get("/env_debug")
+def autopilot_env_debug():
+    """Return minimal planner-related env info (sanitized) for troubleshooting."""
+    provider = (os.getenv("PLANNER_PROVIDER", "stub") or "stub").strip().lower()
+    has_key = bool((os.getenv("OPENAI_API_KEY", "") or "").strip())
+    model = os.getenv("OPENAI_MODEL", None)
+    effective = ("gpt" if (provider == "stub" and has_key) else provider)
+    return {
+        "provider_env": provider,
+        "has_openai_key": has_key,
+        "effective_provider": effective,
+        "model": model,
+        "json_mode": os.getenv("OPENAI_JSON_MODE", None),
+        "fallback_stub": os.getenv("PLANNER_FALLBACK_STUB", None),
+    }
 
 
 @autopilot_router.get("/logs")
@@ -1837,6 +1882,7 @@ class SignalsSettings(BaseModel):
     enabled: Optional[bool] = None
     strategies: Optional[Dict[str, bool]] = None
     weights: Optional[Dict[str, float]] = None
+    auto_weight: Optional[bool] = None
 
 
 @autopilot_router.get("/signals")
@@ -1881,7 +1927,15 @@ def autopilot_signals_get():
                     continue
     except Exception:
         pass
-    return {"enabled": enabled, "strategies": strategies, "weights": weights}
+    # auto-weight flag
+    auto_weight = False
+    try:
+        raw = _get_json_setting("autopilot.signals.auto_weight", None)
+        if raw is not None:
+            auto_weight = bool(raw)
+    except Exception:
+        pass
+    return {"enabled": enabled, "strategies": strategies, "weights": weights, "auto_weight": auto_weight}
 
 
 @autopilot_router.put("/signals")
@@ -1903,7 +1957,117 @@ def autopilot_signals_put(body: SignalsSettings):
                 continue
         _set_json_setting("autopilot.signals.weights", clean_w)
         insert_action_log("signals_update", mode=_two_mode(), reason="weights", status="ok", extra={"n": len(clean_w)})  # type: ignore[name-defined]
+    # optional auto_weight toggle
+    try:
+        aw = getattr(body, 'auto_weight', None)  # type: ignore
+        if aw is not None:
+            _set_json_setting("autopilot.signals.auto_weight", bool(aw))
+            insert_action_log("signals_update", mode=_two_mode(), reason="auto_weight", status="ok", extra={"enabled": bool(aw)})  # type: ignore[name-defined]
+    except Exception:
+        pass
     return autopilot_signals_get()
 
 # Ensure all /autopilot routes are registered only after definitions
+@autopilot_router.get("/weekly")
+def autopilot_weekly():
+    """
+    Weekly report: realized metrics, per-strategy attribution (from signals_used),
+    auto-weight adjustment summary, missed rules, and % dropped by validator.
+    """
+    try:
+        from core.storage import performance_stats, list_action_logs  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage unavailable: {e}")
+
+    out: Dict[str, Any] = {}
+    # Realized metrics (7d window)
+    try:
+        out["performance_7d"] = performance_stats(days=7)
+    except Exception:
+        out["performance_7d"] = {}
+
+    # Action logs in 7d for attribution + validator/evaluator summaries
+    rows = []
+    try:
+        rows = list_action_logs(limit=2000, symbol=None, since_hours=24*7)
+    except Exception:
+        rows = []
+
+    import json as _json
+    # Per-strategy attribution: count strength weighted appearances in 'autopilot_act' signals_used
+    strat_use: Dict[str, float] = {}
+    reweights: int = 0
+    proposed_total = 0
+    validator_dropped = 0
+    evaluator_dropped = 0
+    missed_rules = {"planner_invalid_json": 0, "guardrails": 0}
+    proposed_counts: Dict[str, int] = {}
+    executed_counts: Dict[str, int] = {}
+    for r in rows:
+        try:
+            act = str(r.get("action") or "")
+            src = str(r.get("source") or "")
+            reason = str(r.get("reason") or "")
+            if act == "autopilot_act":
+                extra = {}
+                try:
+                    extra = _json.loads(r.get("extra_json") or "{}")
+                except Exception:
+                    extra = {}
+                for s in extra.get("signals_used", []) or []:
+                    k = str(s.get("strategy") or "")
+                    if not k:
+                        continue
+                    strat_use[k] = strat_use.get(k, 0.0) + float(s.get("strength") or 0.0)
+                sym = str(r.get("symbol") or "")
+                if sym:
+                    executed_counts[sym] = executed_counts.get(sym, 0) + 1
+            elif act == "autopilot" and reason == "signals_reweighted":
+                reweights += 1
+            elif act == "planner_proposed":
+                extra = {}
+                try:
+                    extra = _json.loads(r.get("extra_json") or "{}")
+                except Exception:
+                    extra = {}
+                proposed_total += int(extra.get("n") or 0)
+                for s in extra.get("syms") or []:
+                    sym = str(s)
+                    if sym:
+                        proposed_counts[sym] = proposed_counts.get(sym, 0) + 1
+            elif act == "validator_result":
+                extra = {}
+                try:
+                    extra = _json.loads(r.get("extra_json") or "{}")
+                except Exception:
+                    extra = {}
+                validator_dropped += int(extra.get("dropped") or 0)
+            elif act == "evaluator_result":
+                extra = {}
+                try:
+                    extra = _json.loads(r.get("extra_json") or "{}")
+                except Exception:
+                    extra = {}
+                evaluator_dropped += int(extra.get("dropped") or 0)
+            elif act == "autopilot" and reason == "planner_invalid_json":
+                missed_rules["planner_invalid_json"] += 1
+            elif act == "autopilot_act" and reason == "guardrail":
+                missed_rules["guardrails"] += 1
+        except Exception:
+            continue
+
+    out["attribution"] = strat_use
+    out["auto_weight_adjustments"] = reweights
+    out["dropped"] = {
+        "proposed_total": proposed_total,
+        "validator_dropped": validator_dropped,
+        "evaluator_dropped": evaluator_dropped,
+        "pct_dropped_validator": (0 if proposed_total==0 else round(validator_dropped / proposed_total * 100.0, 2)),
+    }
+    out["missed_rules"] = missed_rules
+    out["proposed_counts"] = proposed_counts
+    out["executed_counts"] = executed_counts
+    return out
+
+# Ensure router registration happens after all route definitions
 app.include_router(autopilot_router)

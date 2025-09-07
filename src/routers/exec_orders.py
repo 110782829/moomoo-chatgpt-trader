@@ -7,13 +7,42 @@ from execution.types import PlacedOrder, FillRecord, OrderSpec, OrderSide, Order
 
 router = APIRouter(prefix="/exec", tags=["execution"])
 
+# Simple in-process caches to avoid transient empty blinks in UI.
+# These caches are per-worker-process and best-effort only.
+_LAST_ORDERS: List[Dict] = []
+_LAST_ORDERS_TS: float = 0.0
+_LAST_POSITIONS: List[Dict] = []
+_LAST_POSITIONS_TS: float = 0.0
+_CACHE_TTL_SEC: float = 5.0
+
 
 @router.get("/orders", response_model=List[PlacedOrder])
 def list_orders(symbol: Optional[str] = None,
                 status: Optional[List[str]] = Query(None),
                 limit: int = 200,
+                fresh: bool = Query(False),
                 exec_service: ExecutionService = Depends(get_execution)):
-    return exec_service.list_orders(symbol=symbol, status=status, limit=limit)
+    import time
+    global _LAST_ORDERS, _LAST_ORDERS_TS
+    try:
+        full = exec_service.list_orders(symbol=None, status=None, limit=limit)
+        # Only update cache if non-empty or cache is stale or caller requested fresh
+        if fresh or full or (time.time() - _LAST_ORDERS_TS) > _CACHE_TTL_SEC:
+            _LAST_ORDERS = [o.model_dump() if hasattr(o, 'model_dump') else o for o in full]  # type: ignore
+            _LAST_ORDERS_TS = time.time()
+        base = full if (fresh or full) else _LAST_ORDERS
+    except Exception:
+        # On error, use cache if recent
+        base = _LAST_ORDERS if (time.time() - _LAST_ORDERS_TS) <= 30.0 else []
+
+    # Apply filters after choosing base list
+    out = base
+    if symbol:
+        out = [o for o in out if str(o.get('symbol') or '') == symbol]
+    if status:
+        want = set(status)
+        out = [o for o in out if str(o.get('status') or '') in want]
+    return out[:limit]
 
 
 @router.post("/orders/{order_id}/cancel")
@@ -43,9 +72,18 @@ class PositionView(BaseModel):
 
 
 @router.get("/positions", response_model=List[PositionView])
-def list_positions(exec_service: ExecutionService = Depends(get_execution)):
-    # SimBroker returns List[Dict]; response_model coerces/validates
-    return exec_service.list_positions()
+def list_positions(fresh: bool = Query(False), exec_service: ExecutionService = Depends(get_execution)):
+    # Broker-backed: return last non-empty snapshot when broker is momentarily empty
+    import time
+    global _LAST_POSITIONS, _LAST_POSITIONS_TS
+    try:
+        cur = exec_service.list_positions()
+        if fresh or cur or (time.time() - _LAST_POSITIONS_TS) > _CACHE_TTL_SEC:
+            _LAST_POSITIONS = cur
+            _LAST_POSITIONS_TS = time.time()
+        return cur if (fresh or cur) else _LAST_POSITIONS
+    except Exception:
+        return _LAST_POSITIONS if (time.time() - _LAST_POSITIONS_TS) <= 30.0 else []
 
 
 # ---------- PnL (SIM) ----------
@@ -57,13 +95,11 @@ class PnLToday(BaseModel):
 
 @router.get("/pnl/today", response_model=PnLToday)
 def pnl_today(exec_service: ExecutionService = Depends(get_execution)):
-    # Available on SimBroker; for other drivers return zero gracefully
-    if hasattr(exec_service, "pnl_today"):
-        return getattr(exec_service, "pnl_today")()
+    # Not tracked via broker; return zero gracefully
     return {"date": "1970-01-01", "realized_pnl": 0.0}
 
 
-# ---------- Flatten (SIM) ----------
+# ---------- Flatten (Broker) ----------
 
 class FlattenRequest(BaseModel):
     symbols: Optional[List[str]] = None  # if omitted -> flatten ALL non-zero positions
@@ -92,7 +128,7 @@ def flatten(body: FlattenRequest = FlattenRequest(), exec_service: ExecutionServ
             last_prices[sym] = float(p.get("avg_cost") or 0.0)
 
     # Equity isn't required for 'shares' sizing; supply any number
-    ctx = ExecutionContext(account_id="SIM-LOCAL", last_prices=last_prices, equity=0.0, simulate=True)
+    ctx = ExecutionContext(account_id="BROKER", last_prices=last_prices, equity=0.0, simulate=True)
 
     placed = []
     for p in targets:

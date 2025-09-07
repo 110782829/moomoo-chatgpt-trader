@@ -326,6 +326,21 @@ def list_action_logs(
         return [dict(r) for r in cur.fetchall()]
 
 
+# ----- updates for reconciliation -----
+def update_action_status_for_order(order_id: str, status: str) -> int:
+    """Best-effort: mark placement logs as filled when a matching broker order fills.
+    Matches rows with action='autopilot_act' and extra_json containing the order_id string.
+    Returns number of rows updated.
+    """
+    like = f'%"order_id":"{order_id}"%'
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE action_log SET status=? WHERE action='autopilot_act' AND extra_json LIKE ?",
+            (status, like),
+        )
+        return cur.rowcount
+
+
 # ----- PnL (FIFO/avg-cost style, computed from fills) -----
 
 def _iter_fills_ordered() -> List[sqlite3.Row]:

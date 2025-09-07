@@ -153,7 +153,17 @@ def get_bars_safely(client: MoomooClient, symbol: str, ktype: str, n: int) -> Tu
     """
     src = _data_source()
     if src == "yfinance":
-        bars = _bars_from_yf(symbol, ktype, n)
+        # simple retry/backoff for transient Yahoo issues
+        import time as _t
+        bars = []
+        for i in range(3):
+            try:
+                bars = _bars_from_yf(symbol, ktype, n)
+                if bars:
+                    break
+            except Exception:
+                pass
+            _t.sleep(0.3 * (i + 1))
         if not bars:
             raise RuntimeError("yfinance returned no data")
         return bars, "yfinance"

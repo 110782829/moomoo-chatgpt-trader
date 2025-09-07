@@ -65,10 +65,11 @@ class TakeProfitSpec(BaseModel):
 class Decision(BaseModel):
     sym: str
     action: Literal['open','add','trim','close','hold']
-    side: Literal['buy','sell']
+    # side and entry are required for open/add/trim; optional for close/hold
+    side: Optional[Literal['buy','sell']] = None
     size_type: Literal['risk_bps','shares','notional']
     size_value: float
-    entry: Literal['market','limit']
+    entry: Optional[Literal['market','limit']] = 'market'
     limit_price: Optional[float] = None
     stop: Optional[StopSpec] = None
     take_profit: Optional[TakeProfitSpec] = None
@@ -76,10 +77,16 @@ class Decision(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     expires_sec: int = 120
     rationale: str = ""
+    # Planner self-checks and alternatives considered
+    rule_checks: Optional[Dict[str, Any]] = None
+    alternatives_considered: Optional[List[str]] = None
 
 class PlannerOutput(BaseModel):
     decisions: List[Decision] = []
     global_action: Literal['proceed','pause','flatten_if_dd_exceeded'] = 'proceed'
+    policy_summary: Optional[str] = ""
+    # Optional global notes when nothing is actionable or to explain plan-level intent
+    notes: Optional[str] = None
 
 # Helpers
 def validate_output(data: dict) -> PlannerOutput:

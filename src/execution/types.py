@@ -13,7 +13,10 @@ class OrderSide(str, Enum):
 class OrderType(str, Enum):
     market = "market"
     limit = "limit"
-    stop = "stop"  # trigger-only; fills when price crosses threshold
+    stop = "stop"  # stop market: uses stop_trigger as aux
+    stop_limit = "stop_limit"  # stop-limit: stop_trigger + limit_price
+    trailing_stop = "trailing_stop"  # trailing stop market
+    trailing_stop_limit = "trailing_stop_limit"  # trailing stop limit
 
 
 class TimeInForce(str, Enum):
@@ -35,6 +38,11 @@ class OrderSpec(BaseModel):
     side: OrderSide
     order_type: OrderType = OrderType.market
     limit_price: Optional[float] = None
+    # Extended fields for advanced order types
+    stop_trigger: Optional[float] = None  # for stop/stop_limit
+    trail_type: Optional[str] = None      # e.g., 'AMOUNT' | 'PERCENT'
+    trail_value: Optional[float] = None   # amount or percent depending on type
+    trail_spread: Optional[float] = None  # optional limit spread for trailing_stop_limit
     size_type: str = Field(..., description="shares | notional | risk_bps")
     size_value: float
     tif: TimeInForce = TimeInForce.day
