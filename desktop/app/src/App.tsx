@@ -1298,15 +1298,16 @@ async function openExplain(r:any) {
               {(() => {
                 const pc = weekly?.proposed_counts || {};
                 const ec = weekly?.executed_counts || {};
+                const dr = weekly?.decision_reasons || {};
                 const syms = Array.from(new Set([...Object.keys(pc), ...Object.keys(ec)])).slice(0,20);
                 if (!syms.length) return <div className="help">No data</div>;
                 return (
                   <div className="table-wrap">
                     <table className="table-modern">
-                      <thead><tr><th>Symbol</th><th className="num">Proposed</th><th className="num">Executed</th></tr></thead>
+                      <thead><tr><th>Symbol</th><th className="num">Proposed</th><th className="num">Executed</th><th>Reasons</th></tr></thead>
                       <tbody>
                         {syms.map(s => (
-                          <tr key={s}><td>{s}</td><td className="num">{pc[s]||0}</td><td className="num">{ec[s]||0}</td></tr>
+                          <tr key={s}><td>{s}</td><td className="num">{pc[s]||0}</td><td className="num">{ec[s]||0}</td><td>{(dr[s]||[]).slice(0,3).join(', ')}</td></tr>
                         ))}
                       </tbody>
                     </table>

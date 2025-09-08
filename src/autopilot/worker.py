@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import time as _time
 from typing import Any, Dict, List, Optional
 
+# Import yfinance for fetching financial data
+import yfinance as yf
+
 # Optional durable action log + settings + fills
 try:
     from core.storage import insert_action_log, get_setting, record_fill  # type: ignore
@@ -161,6 +164,9 @@ class AutopilotManager:
         self._last_evaluated: List[Dict[str, Any]] = []
         # Breadth AD-line (cumulative adv-decl)
         self._ad_line: float = 0.0
+        # NBBO spread history from push quotes
+        self._nbbo_hist: Dict[str, List[float]] = {}
+        self._quotes_subbed: bool = False
 
     async def start(self) -> None:
         async with self._lock:
@@ -217,7 +223,8 @@ class AutopilotManager:
         return self._logs[offset : offset + limit]
 
     async def preview(self) -> Dict[str, Any]:
-        ctx = await self._sense()
+        # Use fast mode for preview to keep the UI responsive
+        ctx = await self._sense(fast=True)
         out = self._think(ctx)
         ok = True
         err: Optional[str] = None
@@ -230,6 +237,52 @@ class AutopilotManager:
         self.last_input = ctx
         self.last_output = out
         return res
+
+    def _retry(self, fn, name: str, retries: int = 3, delay: float = 0.5):
+        for i in range(retries):
+            try:
+                return fn()
+            except Exception as e:
+                self._log("retry_error", {"name": name, "attempt": i + 1, "error": str(e)})
+                if i < retries - 1:
+                    _time.sleep(delay * (2 ** i))
+        return None
+
+    def _ensure_quote_subs(self, symbols: List[str]) -> None:
+        if self._quotes_subbed:
+            return
+        c = self.get_client()
+        qc = getattr(c, "quote_ctx", None)
+        if qc is None:
+            return
+        try:
+            if hasattr(qc, "subscribe"):
+                try:
+                    qc.subscribe(symbols, ["QUOTE"])
+                except Exception as e:
+                    self._log("quote_sub_error", {"error": str(e)})
+            if hasattr(qc, "set_handler"):
+                def _on_recv(data):
+                    try:
+                        recs = data.to_dict("records") if hasattr(data, "to_dict") else []
+                        for r in recs:
+                            code = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "")
+                            bid = float(r.get("bid_price") or r.get("bid") or 0.0)
+                            ask = float(r.get("ask_price") or r.get("ask") or 0.0)
+                            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+                            if mid > 0:
+                                pct = (ask - bid) / mid * 100.0
+                                hist = self._nbbo_hist.setdefault(code, [])
+                                hist.insert(0, pct)
+                                if len(hist) > 60:
+                                    del hist[60:]
+                    except Exception:
+                        pass
+                handler = type("QuoteHandler", (), {"on_recv_rsp": lambda self, *a, **k: _on_recv(a[1])})
+                qc.set_handler(handler())
+            self._quotes_subbed = True
+        except Exception as e:
+            self._log("quote_sub_error", {"error": str(e)})
 
     async def _run(self) -> None:
         while self._running:
@@ -362,7 +415,7 @@ class AutopilotManager:
         self._log("autopilot_paused", {"reason": reason, "reject_streak": self.reject_streak})
         await self.stop()
 
-    async def _sense(self) -> Dict[str, Any]:
+    async def _sense(self, fast: bool = False) -> Dict[str, Any]:
         c = self.get_client()
         account: Dict[str, float] = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
         positions_raw: List[Dict[str, Any]] = []
@@ -530,6 +583,13 @@ class AutopilotManager:
         if not hasattr(self, "_feat_cache"):
             self._feat_cache = {}
             self._feat_cache_ts = {}
+        # In fast mode, cap the number of symbols we derive features for
+        if fast:
+            try:
+                cap = int(os.getenv("AUTOPILOT_PREVIEW_WATCHLIST_MAX", "12") or "12")
+            except Exception:
+                cap = 12
+            watchlist = [s for s in watchlist if s][:cap]
         # Build indicators per symbol
         for sym in [s.strip() for s in watchlist if s.strip()]:
             highs: List[float] = []
@@ -886,6 +946,12 @@ class AutopilotManager:
             top_n = int(top_n_setting) if top_n_setting is not None else int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
         except Exception:
             top_n = int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+        # In fast/preview mode, keep the candidate set small for responsiveness
+        if fast:
+            try:
+                top_n = min(top_n, int(os.getenv("AUTOPILOT_PREVIEW_TOP_N", "5") or "5"))
+            except Exception:
+                top_n = min(top_n, 5)
         universe_sorted = sorted(universe, key=lambda x: float(x.get("interest") or 0.0), reverse=True)
         for idx, u in enumerate(universe_sorted):
             u["rank"] = idx + 1
@@ -1031,6 +1097,13 @@ class AutopilotManager:
         except Exception:
             pass
 
+        if not self._quotes_subbed:
+            try:
+                codes = [str(u.get("sym") or "") for u in universe if u.get("sym")]
+                self._ensure_quote_subs(codes)
+            except Exception:
+                pass
+
         # NBBO snapshot via moomoo (best-effort)
         try:
             c = self.get_client()
@@ -1039,7 +1112,10 @@ class AutopilotManager:
                 codes = [str(u.get('sym') or '') for u in universe_trimmed if u.get('sym')]
                 if codes:
                     try:
-                        ret, df = qc.get_stock_quote(codes)
+                        res = self._retry(lambda: qc.get_stock_quote(codes), 'get_stock_quote')
+                        if not res:
+                            raise RuntimeError('get_stock_quote failed')
+                        ret, df = res
                         if ret == 0 and df is not None:
                             try:
                                 import pandas as _pd
@@ -1050,13 +1126,6 @@ class AutopilotManager:
                             except Exception:
                                 recs = []
                             mp = {}
-                            # optional persistence for medians
-                            try:
-                                from core.storage import get_setting, set_setting  # type: ignore
-                                import json as _json
-                            except Exception:
-                                get_setting = None  # type: ignore
-                                set_setting = None  # type: ignore
                             for r in recs or []:
                                 code = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
                                 bid = float(r.get('bid_price') or r.get('bid') or 0.0)
@@ -1068,28 +1137,26 @@ class AutopilotManager:
                                     halted = bool(r.get('suspension') or r.get('halt') or False)
                                 except Exception:
                                     halted = False
+                                broker_risk = False
+                                try:
+                                    broker_risk = bool(r.get('broker_risk') or r.get('brokerRisk') or False)
+                                except Exception:
+                                    broker_risk = False
                                 if code:
+                                    hist = self._nbbo_hist.setdefault(code, [])
+                                    if spread_pct is not None:
+                                        hist.insert(0, float(spread_pct))
+                                        if len(hist) > 60:
+                                            del hist[60:]
                                     nbbo_med = None; nbbo_n = 0
-                                    if get_setting and set_setting and spread_pct is not None:
-                                        try:
-                                            key = f"nbbo_hist:{code}"
-                                            raw = get_setting(key)
-                                            hist = []
-                                            try:
-                                                hist = _json.loads(raw) if raw else []
-                                            except Exception:
-                                                hist = []
-                                            import time as _t, statistics as _stat
-                                            hist.insert(0, [int(_t.time()), float(spread_pct)])
-                                            hist = hist[:60]
-                                            set_setting(key, hist)
-                                            vals = [float(x[1]) for x in hist if isinstance(x, (list, tuple)) and len(x)>=2]
-                                            if vals:
-                                                nbbo_med = float(_stat.median(vals))
-                                                nbbo_n = len(vals)
-                                        except Exception:
-                                            pass
-                                    mp[code] = {'nbbo_spread_pct': spread_pct, 'halted': halted, 'nbbo_spread_med': nbbo_med, 'nbbo_samples': nbbo_n}
+                                    try:
+                                        import statistics as _stat
+                                        if hist:
+                                            nbbo_med = float(_stat.median(hist))
+                                            nbbo_n = len(hist)
+                                    except Exception:
+                                        pass
+                                    mp[code] = {'nbbo_spread_pct': spread_pct, 'halted': halted, 'nbbo_spread_med': nbbo_med, 'nbbo_samples': nbbo_n, 'broker_risk': broker_risk}
                             for u in universe_trimmed:
                                 sym = str(u.get('sym') or '')
                                 if sym in mp:
@@ -1098,6 +1165,7 @@ class AutopilotManager:
                                         u['nbbo_spread_med'] = mp[sym]['nbbo_spread_med']
                                         u['nbbo_samples'] = mp[sym]['nbbo_samples']
                                         u['halted'] = mp[sym]['halted']
+                                        u['broker_risk'] = mp[sym]['broker_risk']
                                     except Exception:
                                         pass
                     except Exception:
@@ -1108,328 +1176,424 @@ class AutopilotManager:
         # Fundamentals + events for trimmed universe (best-effort via yfinance)
         fundamentals: Dict[str, Dict[str, float | str]] = {}
         events: Dict[str, Dict[str, str]] = {}
-        try:
-            import yfinance as _yf  # type: ignore
-            for u in universe_trimmed:
-                try:
-                    sym = str(u.get("sym") or ""); tid = sym.split(".",1)[-1] if "." in sym else sym
-                    tk = _yf.Ticker(tid)
-                    info = getattr(tk, "fast_info", None)
-                    pe = None; mcap = None
+        if fast:
+            try:
+                import yfinance as _yf  # type: ignore
+                for u in universe_trimmed:
                     try:
-                        pe = float(getattr(info, "pe", None) or 0.0) or None
-                        mcap = float(getattr(info, "market_cap", None) or 0.0) or None
-                    except Exception:
-                        pass
-                    # extend fundamentals with growth/margins/leverage/quality (best-effort)
-                    rev_g = None; gp_margin = None; op_margin = None; dte = None; fcf_margin = None; sector = None
-                    # ownership/float/short interest (best-effort via get_info)
-                    float_shares = None; shares_out = None; inst_own = None; insider_own = None; short_pct_float = None
-                    # analyst/estimates (best-effort)
-                    eps_next = None; eps_surprise_avg = None; analyst_cov = None; analyst_rec = None; pt_mean = None
-                    # options/iv proxy (best-effort)
-                    iv_atm = None; iv_days = None; iv_skew = None
-                    try:
-                        # sector and ownership via get_info when available
+                        sym = str(u.get("sym") or ""); tid = sym.split(".",1)[-1] if "." in sym else sym
+                        tk = _yf.Ticker(tid)
+                        info = getattr(tk, "fast_info", None)
+                        pe = None; mcap = None; sector = None
                         try:
-                            info2 = tk.get_info()
-                            if isinstance(info2, dict):
-                                sector = info2.get("sector")
-                                try:
-                                    float_shares = float(info2.get("floatShares") or 0) or None
-                                except Exception:
-                                    pass
-                                try:
-                                    shares_out = float(info2.get("sharesOutstanding") or 0) or None
-                                except Exception:
-                                    pass
-                                try:
-                                    inst_own = float(info2.get("heldPercentInstitutions") or 0.0) or None
-                                except Exception:
-                                    pass
-                                try:
-                                    insider_own = float(info2.get("heldPercentInsiders") or 0.0) or None
-                                except Exception:
-                                    pass
-                                try:
-                                    short_pct_float = float(info2.get("shortPercentOfFloat") or 0.0) or None
-                                except Exception:
-                                    pass
-                                # analyst coverage and price target (when present)
-                                try:
-                                    analyst_cov = int(info2.get("numberOfAnalystOpinions") or 0) or None
-                                except Exception:
-                                    pass
-                                try:
-                                    analyst_rec = str(info2.get("recommendationKey") or "") or None
-                                except Exception:
-                                    pass
-                                try:
-                                    pt_mean = float(info2.get("targetMeanPrice") or 0.0) or None
-                                except Exception:
-                                    pass
-                                # valuation bands (best-effort)
-                                try:
-                                    ev = float(info2.get("enterpriseValue") or 0.0) or None
-                                    ebitda = float(info2.get("ebitda") or 0.0) or None
-                                    if ev and ebitda and ebitda != 0:
-                                        fundamentals.setdefault(sym, {})["ev_ebitda"] = ev / ebitda
-                                except Exception:
-                                    pass
-                                try:
-                                    ttm_rev = float(info2.get("totalRevenue") or 0.0) or None
-                                    if mcap and ttm_rev and ttm_rev != 0:
-                                        fundamentals.setdefault(sym, {})["ps_ttm"] = mcap / ttm_rev
-                                except Exception:
-                                    pass
-                                try:
-                                    roic = float(info2.get("returnOnCapital") or 0.0) or None
-                                    if roic is not None:
-                                        fundamentals.setdefault(sym, {})["roic"] = roic
-                                except Exception:
-                                    pass
+                            pe = float(getattr(info, "pe", None) or 0.0) or None
+                            mcap = float(getattr(info, "market_cap", None) or 0.0) or None
                         except Exception:
-                            sector = None
-                        import pandas as _pd
-                        fin = getattr(tk, 'financials', None)
-                        bs = getattr(tk, 'balance_sheet', None)
-                        cfs = getattr(tk, 'cashflow', None)
-                        def _val(df, row, idx=0):
+                            pass
+                        fundamentals[sym] = {k: v for k, v in {
+                            "pe": pe,
+                            "market_cap": mcap,
+                            "sector": sector,
+                            "vol_proxy_atr_pct": float(u.get("atr_pct") or 0.0),
+                        }.items() if v is not None}
+                        # Skip heavy calendar fetch in fast mode
+                        events[sym] = {}
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        else:
+            try:
+                import yfinance as _yf  # type: ignore
+                for u in universe_trimmed:
+                    try:
+                        sym = str(u.get("sym") or ""); tid = sym.split(".",1)[-1] if "." in sym else sym
+                        tk = _yf.Ticker(tid)
+                        info = getattr(tk, "fast_info", None)
+                        pe = None; mcap = None
+                        try:
+                            pe = float(getattr(info, "pe", None) or 0.0) or None
+                            mcap = float(getattr(info, "market_cap", None) or 0.0) or None
+                        except Exception:
+                            pass
+                        # extend fundamentals with growth/margins/leverage/quality (best-effort)
+                        rev_g = None; gp_margin = None; op_margin = None; dte = None; fcf_margin = None; sector = None
+                        # ownership/float/short interest (best-effort via get_info)
+                        float_shares = None; shares_out = None; inst_own = None; insider_own = None; short_pct_float = None
+                        # analyst/estimates (best-effort)
+                        eps_next = None; eps_surprise_avg = None; analyst_cov = None; analyst_rec = None; pt_mean = None
+                        # options/iv proxy (best-effort)
+                        iv_atm = None; iv_days = None; iv_skew = None
+                        try:
+                            # sector and ownership via get_info when available
                             try:
-                                return float(df.loc[row].iloc[idx])
+                                info2 = tk.get_info()
+                                if isinstance(info2, dict):
+                                    sector = info2.get("sector")
+                                    try:
+                                        float_shares = float(info2.get("floatShares") or 0) or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        shares_out = float(info2.get("sharesOutstanding") or 0) or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        inst_own = float(info2.get("heldPercentInstitutions") or 0.0) or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        insider_own = float(info2.get("heldPercentInsiders") or 0.0) or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        short_pct_float = float(info2.get("shortPercentOfFloat") or 0.0) or None
+                                    except Exception:
+                                        pass
+                                    # analyst coverage and price target (when present)
+                                    try:
+                                        analyst_cov = int(info2.get("numberOfAnalystOpinions") or 0) or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        analyst_rec = str(info2.get("recommendationKey") or "") or None
+                                    except Exception:
+                                        pass
+                                    try:
+                                        pt_mean = float(info2.get("targetMeanPrice") or 0.0) or None
+                                    except Exception:
+                                        pass
+                                    # valuation bands (best-effort)
+                                    try:
+                                        ev = float(info2.get("enterpriseValue") or 0.0) or None
+                                        ebitda = float(info2.get("ebitda") or 0.0) or None
+                                        if ev and ebitda and ebitda != 0:
+                                            fundamentals.setdefault(sym, {})["ev_ebitda"] = ev / ebitda
+                                    except Exception:
+                                        pass
+                                    try:
+                                        ttm_rev = float(info2.get("totalRevenue") or 0.0) or None
+                                        if mcap and ttm_rev and ttm_rev != 0:
+                                            fundamentals.setdefault(sym, {})["ps_ttm"] = mcap / ttm_rev
+                                    except Exception:
+                                        pass
+                                    try:
+                                        roic = float(info2.get("returnOnCapital") or 0.0) or None
+                                        if roic is not None:
+                                            fundamentals.setdefault(sym, {})["roic"] = roic
+                                    except Exception:
+                                        pass
                             except Exception:
-                                return None
-                        if isinstance(fin, _pd.DataFrame) and fin.shape[1] >= 2:
-                            rev0 = _val(fin, 'Total Revenue', 0); rev1 = _val(fin, 'Total Revenue', 1)
-                            gp = _val(fin, 'Gross Profit', 0); opi = _val(fin, 'Operating Income', 0)
-                            if rev0 and rev1 and rev1 != 0:
-                                rev_g = (rev0 - rev1) / abs(rev1)
-                            if rev0 and gp:
-                                gp_margin = gp / rev0
-                            if rev0 and opi:
-                                op_margin = opi / rev0
-                        if isinstance(bs, _pd.DataFrame):
-                            debt = _val(bs, 'Total Debt', 0); equity = _val(bs, "Total Stockholder Equity", 0)
-                            if debt is not None and equity:
-                                dte = (debt / equity) if equity else None
-                        if isinstance(cfs, _pd.DataFrame) and isinstance(fin, _pd.DataFrame):
-                            fcf = _val(cfs, 'Free Cash Flow', 0); rev0b = _val(fin, 'Total Revenue', 0)
-                            if fcf and rev0b:
-                                fcf_margin = fcf / rev0b
-                        # analyst: earnings dates with estimates → surprise history; revisions (best-effort)
-                        try:
-                            edf = tk.get_earnings_dates(limit=8)
-                            if edf is not None and hasattr(edf, 'shape') and edf.shape[0] > 0:
+                                sector = None
+                            import pandas as _pd
+                            fin = getattr(tk, 'financials', None)
+                            bs = getattr(tk, 'balance_sheet', None)
+                            cfs = getattr(tk, 'cashflow', None)
+                            def _val(df, row, idx=0):
                                 try:
-                                    # pandas import local to avoid hard dep if yfinance older
-                                    import pandas as _pd
-                                    df_ed = edf if isinstance(edf, _pd.DataFrame) else None
+                                    return float(df.loc[row].iloc[idx])
                                 except Exception:
-                                    df_ed = None
-                                if df_ed is not None:
-                                    # last row surprise mean
+                                    return None
+                            if isinstance(fin, _pd.DataFrame) and fin.shape[1] >= 2:
+                                rev0 = _val(fin, 'Total Revenue', 0); rev1 = _val(fin, 'Total Revenue', 1)
+                                gp = _val(fin, 'Gross Profit', 0); opi = _val(fin, 'Operating Income', 0)
+                                if rev0 and rev1 and rev1 != 0:
+                                    rev_g = (rev0 - rev1) / abs(rev1)
+                                if rev0 and gp:
+                                    gp_margin = gp / rev0
+                                if rev0 and opi:
+                                    op_margin = opi / rev0
+                            if isinstance(bs, _pd.DataFrame):
+                                debt = _val(bs, 'Total Debt', 0); equity = _val(bs, "Total Stockholder Equity", 0)
+                                if debt is not None and equity:
+                                    dte = (debt / equity) if equity else None
+                            if isinstance(cfs, _pd.DataFrame) and isinstance(fin, _pd.DataFrame):
+                                fcf = _val(cfs, 'Free Cash Flow', 0); rev0b = _val(fin, 'Total Revenue', 0)
+                                if fcf and rev0b:
+                                    fcf_margin = fcf / rev0b
+                            # Piotroski F-Score (best-effort, last vs prior period)
+                            try:
+                                ni_t = _val(fin, 'Net Income', 0); ni_p = _val(fin, 'Net Income', 1)
+                                ta_t = _val(bs, 'Total Assets', 0); ta_p = _val(bs, 'Total Assets', 1)
+                                # CFO naming varies
+                                cfo_t = _val(cfs, 'Operating Cash Flow', 0)
+                                if cfo_t is None:
+                                    cfo_t = _val(cfs, 'Total Cash From Operating Activities', 0)
+                                ltd_t = _val(bs, 'Long Term Debt', 0) or _val(bs, 'Long-Term Debt', 0) or _val(bs, 'Total Debt', 0)
+                                ltd_p = _val(bs, 'Long Term Debt', 1) or _val(bs, 'Long-Term Debt', 1) or _val(bs, 'Total Debt', 1)
+                                ca_t = _val(bs, 'Total Current Assets', 0); cl_t = _val(bs, 'Total Current Liabilities', 0)
+                                ca_p = _val(bs, 'Total Current Assets', 1); cl_p = _val(bs, 'Total Current Liabilities', 1)
+                                gp_t = _val(fin, 'Gross Profit', 0); rev_t = _val(fin, 'Total Revenue', 0)
+                                gp_p = _val(fin, 'Gross Profit', 1); rev_p = _val(fin, 'Total Revenue', 1)
+                                fscore = 0
+                                # F1: ROA > 0
+                                if ni_t is not None and ta_t and ta_t != 0 and (ni_t/ta_t) > 0:
+                                    fscore += 1
+                                # F2: CFO > 0
+                                if cfo_t is not None and cfo_t > 0:
+                                    fscore += 1
+                                # F3: ROA increasing
+                                if ni_t is not None and ta_t and ni_p is not None and ta_p and ta_t != 0 and ta_p != 0:
+                                    if (ni_t/ta_t) > (ni_p/ta_p):
+                                        fscore += 1
+                                # F4: Accruals (CFO > NI)
+                                if cfo_t is not None and ni_t is not None and (cfo_t > ni_t):
+                                    fscore += 1
+                                # F5: Leverage decreasing
+                                if ltd_t is not None and ltd_p is not None and (float(ltd_t) <= float(ltd_p)):
+                                    fscore += 1
+                                # F6: Liquidity increasing
+                                if ca_t is not None and cl_t and ca_p is not None and cl_p and cl_t != 0 and cl_p != 0:
+                                    if (ca_t/cl_t) >= (ca_p/cl_p):
+                                        fscore += 1
+                                # F7: No dilution (skip if unavailable)
+                                # F8: Gross margin increasing
+                                if gp_t is not None and rev_t and gp_p is not None and rev_p and rev_t != 0 and rev_p != 0:
+                                    if (gp_t/rev_t) >= (gp_p/rev_p):
+                                        fscore += 1
+                                # F9: Asset turnover increasing
+                                if rev_t and ta_t and rev_p and ta_p and ta_t != 0 and ta_p != 0:
+                                    if (rev_t/ta_t) >= (rev_p/ta_p):
+                                        fscore += 1
+                                fundamentals.setdefault(sym, {})['piotroski_f'] = int(fscore)
+                            except Exception:
+                                pass
+                            # analyst: earnings dates with estimates → surprise history; revisions (best-effort)
+                            try:
+                                edf = tk.get_earnings_dates(limit=8)
+                                if edf is not None and hasattr(edf, 'shape') and edf.shape[0] > 0:
                                     try:
-                                        col = 'Surprise(%)' if 'Surprise(%)' in df_ed.columns else 'Surprise %'
-                                        sv = [float(x) for x in (df_ed[col].dropna().tolist() or []) if x is not None]
-                                        if sv:
-                                            eps_surprise_avg = sum(sv) / len(sv)
-                                    except Exception:
-                                        pass
-                                    # next EPS estimate from first upcoming row
-                                    try:
-                                        col_e = 'EPS Estimate' if 'EPS Estimate' in df_ed.columns else None
-                                        if col_e:
-                                            eps_vals = [float(x) for x in (df_ed[col_e].dropna().tolist() or []) if x is not None]
-                                            if eps_vals:
-                                                eps_next = eps_vals[0]
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                        try:
-                            et = getattr(tk, 'earnings_trend', None)
-                            if et is not None:
-                                import pandas as _pd
-                                df = et if isinstance(et, _pd.DataFrame) else None
-                                if df is not None and not df.empty:
-                                    # Use first row as current horizon
-                                    row = df.iloc[0]
-                                    # epsRevisions may be a dict-like or nested mapping; try a few shapes
-                                    try:
-                                        revs = row.get('epsRevisions')
-                                        if isinstance(revs, dict):
-                                            up90 = float(revs.get('upLast90days') or revs.get('upLast60days') or 0)
-                                            down90 = float(revs.get('downLast90days') or revs.get('downLast60days') or 0)
-                                            fundamentals.setdefault(sym, {})['eps_rev_up_90d'] = up90
-                                            fundamentals.setdefault(sym, {})['eps_rev_down_90d'] = down90
-                                    except Exception:
-                                        pass
-                                    # revenueEstimate nested
-                                    try:
-                                        revEst = row.get('revenueEstimate')
-                                        if isinstance(revEst, dict):
-                                            rev_next = float(revEst.get('avg') or 0.0) or None
-                                            if rev_next is not None:
-                                                fundamentals.setdefault(sym, {})['rev_next_est'] = rev_next
-                                            # revisions
-                                            try:
-                                                rrevs = revEst.get('revisions') if isinstance(revEst.get('revisions'), dict) else None
-                                                if isinstance(rrevs, dict):
-                                                    up90 = float(rrevs.get('upLast90days') or rrevs.get('upLast60days') or 0)
-                                                    down90 = float(rrevs.get('downLast90days') or rrevs.get('downLast60days') or 0)
-                                                    fundamentals.setdefault(sym, {})['rev_est_rev_up_90d'] = up90
-                                                    fundamentals.setdefault(sym, {})['rev_est_rev_down_90d'] = down90
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                        # options chain: multi-delta skew + term structure (best-effort)
-                        try:
-                            opts = getattr(tk, 'options', []) or []
-                            if isinstance(opts, (list, tuple)) and opts:
-                                # choose short (~30D) and long (>=60D) expiries for term structure
-                                import datetime as _dt
-                                def _days(ex: str) -> int:
-                                    try:
-                                        d = _dt.datetime.fromisoformat(str(ex))
-                                        return int((d - _dt.datetime.now()).days)
-                                    except Exception:
-                                        return 9999
-                                expiries_sorted = sorted(list(opts), key=lambda x: _days(x))
-                                expiry_short = sorted(expiries_sorted, key=lambda x: abs(_days(x) - 30))[0]
-                                long_candidates = [e for e in expiries_sorted if _days(e) >= 60]
-                                expiry_long = long_candidates[0] if long_candidates else expiries_sorted[-1]
-                                px_last = float(u.get('px') or 0.0)
-                                def _chain_features(exp: str):
-                                    out = {"atm": None, "rr25": None, "rr10": None}
-                                    try:
-                                        ch = tk.option_chain(exp)
+                                        # pandas import local to avoid hard dep if yfinance older
                                         import pandas as _pd
-                                        calls = ch.calls if hasattr(ch, 'calls') else None
-                                        puts = ch.puts if hasattr(ch, 'puts') else None
-                                        if not (isinstance(calls, _pd.DataFrame) and isinstance(puts, _pd.DataFrame) and px_last>0):
-                                            return out
-                                        # ATM IV
-                                        calls['dist_abs'] = (calls['strike'] - px_last).abs()
-                                        row = calls.sort_values('dist_abs').head(1)
-                                        if len(row)>0:
-                                            out['atm'] = float(row['impliedVolatility'].values[0])
-                                        # 25% moneyness proxy
-                                        def _iv_at(df, target):
-                                            df['km'] = (df['strike'] - target).abs()
-                                            r = df.sort_values('km').head(1)
-                                            return float(r['impliedVolatility'].values[0]) if len(r)>0 else None
-                                        c25 = _iv_at(calls, px_last*1.25)
-                                        p25 = _iv_at(puts, px_last*0.75)
-                                        if c25 is not None and p25 is not None:
-                                            out['rr25'] = float(p25 - c25)
-                                        c10 = _iv_at(calls, px_last*1.10)
-                                        p10 = _iv_at(puts, px_last*0.90)
-                                        if c10 is not None and p10 is not None:
-                                            out['rr10'] = float(p10 - c10)
-                                        return out
+                                        df_ed = edf if isinstance(edf, _pd.DataFrame) else None
                                     except Exception:
-                                        return out
-                                f_short = _chain_features(expiry_short)
-                                f_long = _chain_features(expiry_long)
-                                if f_short.get('atm'):
-                                    iv_atm = float(f_short['atm'])
-                                    iv_days = _days(expiry_short)
-                                if f_short.get('rr25') is not None:
-                                    fundamentals.setdefault(sym, {})['iv_rr25_short'] = float(f_short['rr25'])
-                                if f_short.get('rr10') is not None:
-                                    fundamentals.setdefault(sym, {})['iv_rr10_short'] = float(f_short['rr10'])
-                                if f_long.get('rr25') is not None:
-                                    fundamentals.setdefault(sym, {})['iv_rr25_long'] = float(f_long['rr25'])
-                                if f_long.get('atm') and f_short.get('atm'):
-                                    fundamentals.setdefault(sym, {})['iv_term_slope'] = float(f_long['atm'] - f_short['atm'])
+                                        df_ed = None
+                                    if df_ed is not None:
+                                        # last row surprise mean
+                                        try:
+                                            col = 'Surprise(%)' if 'Surprise(%)' in df_ed.columns else 'Surprise %'
+                                            sv = [float(x) for x in (df_ed[col].dropna().tolist() or []) if x is not None]
+                                            if sv:
+                                                eps_surprise_avg = sum(sv) / len(sv)
+                                        except Exception:
+                                            pass
+                                        # next EPS estimate from first upcoming row
+                                        try:
+                                            col_e = 'EPS Estimate' if 'EPS Estimate' in df_ed.columns else None
+                                            if col_e:
+                                                eps_vals = [float(x) for x in (df_ed[col_e].dropna().tolist() or []) if x is not None]
+                                                if eps_vals:
+                                                    eps_next = eps_vals[0]
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            try:
+                                et = getattr(tk, 'earnings_trend', None)
+                                if et is not None:
+                                    import pandas as _pd
+                                    df = et if isinstance(et, _pd.DataFrame) else None
+                                    if df is not None and not df.empty:
+                                        # Use first row as current horizon
+                                        row = df.iloc[0]
+                                        # epsRevisions may be a dict-like or nested mapping; try a few shapes
+                                        try:
+                                            revs = row.get('epsRevisions')
+                                            if isinstance(revs, dict):
+                                                f = fundamentals.setdefault(sym, {})
+                                                # Store revision counts for 7/30/90 days
+                                                for d in (7, 30, 90):
+                                                    up = int(revs.get(f'upLast{d}days') or 0)
+                                                    down = int(revs.get(f'downLast{d}days') or 0)
+                                                    f[f'eps_rev_up_{d}d'] = up
+                                                    f[f'eps_rev_down_{d}d'] = down
+                                        except Exception:
+                                            pass
+                                        # revenueEstimate nested
+                                        try:
+                                            revEst = row.get('revenueEstimate')
+                                            if isinstance(revEst, dict):
+                                                rev_next = float(revEst.get('avg') or 0.0) or None
+                                                if rev_next is not None:
+                                                    fundamentals.setdefault(sym, {})['rev_next_est'] = rev_next
+                                                # revisions
+                                                try:
+                                                    rrevs = revEst.get('revisions') if isinstance(revEst.get('revisions'), dict) else None
+                                                    if isinstance(rrevs, dict):
+                                                        f = fundamentals.setdefault(sym, {})
+                                                        # Store revision counts for 7/30/90 days
+                                                        for d in (7, 30, 90):
+                                                            up = int(rrevs.get(f'upLast{d}days') or 0)
+                                                            down = int(rrevs.get(f'downLast{d}days') or 0)
+                                                            f[f'rev_est_rev_up_{d}d'] = up
+                                                            f[f'rev_est_rev_down_{d}d'] = down
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            # options chain: delta-based skew + richer term structure (best-effort)
+                            try:
+                                opts = getattr(tk, 'options', []) or []
+                                if isinstance(opts, (list, tuple)) and opts:
+                                    import datetime as _dt
+                                    def _days(ex: str) -> int:
+                                        try:
+                                            d = _dt.datetime.fromisoformat(str(ex))
+                                            return int((d - _dt.datetime.now()).days)
+                                        except Exception:
+                                            return 9999
+                                    expiries_sorted = sorted(list(opts), key=lambda x: _days(x))
+                                    px_last = float(u.get('px') or 0.0)
+                                    def _chain_features(exp: str, days: int):
+                                        out = {"atm": None, "rr25d": None}
+                                        try:
+                                            ch = tk.option_chain(exp)
+                                            import pandas as _pd, math
+                                            calls = ch.calls if hasattr(ch, 'calls') else None
+                                            puts = ch.puts if hasattr(ch, 'puts') else None
+                                            if not (isinstance(calls, _pd.DataFrame) and isinstance(puts, _pd.DataFrame) and px_last>0 and days>0):
+                                                return out
+                                            t = max(days,1) / 365.0
+                                            def _norm_cdf(x: float) -> float:
+                                                return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+                                            def _bs_delta(is_call: bool, s: float, k: float, t: float, sigma: float) -> Optional[float]:
+                                                try:
+                                                    if sigma <= 0 or t <= 0:
+                                                        return None
+                                                    d1 = (math.log(s / k) + 0.5 * sigma * sigma * t) / (sigma * math.sqrt(t))
+                                                    nd1 = _norm_cdf(d1)
+                                                    return nd1 if is_call else nd1 - 1.0
+                                                except Exception:
+                                                    return None
+                                            calls['delta_est'] = calls.apply(lambda r: _bs_delta(True, px_last, float(r['strike']), t, float(r['impliedVolatility'])), axis=1)
+                                            puts['delta_est'] = puts.apply(lambda r: _bs_delta(False, px_last, float(r['strike']), t, float(r['impliedVolatility'])), axis=1)
+                                            calls_valid = calls.dropna(subset=['delta_est'])
+                                            puts_valid = puts.dropna(subset=['delta_est'])
+                                            if len(calls_valid)==0 or len(puts_valid)==0:
+                                                return out
+                                            # ATM IV
+                                            calls_valid['dist_abs'] = (calls_valid['strike'] - px_last).abs()
+                                            row = calls_valid.sort_values('dist_abs').head(1)
+                                            if len(row)>0:
+                                                out['atm'] = float(row['impliedVolatility'].values[0])
+                                            c25 = calls_valid.iloc[(calls_valid['delta_est'] - 0.25).abs().argsort()].head(1)
+                                            p25 = puts_valid.iloc[(puts_valid['delta_est'] + 0.25).abs().argsort()].head(1)
+                                            if len(c25)>0 and len(p25)>0:
+                                                out['rr25d'] = float(p25['impliedVolatility'].values[0]) - float(c25['impliedVolatility'].values[0])
+                                            return out
+                                        except Exception:
+                                            return out
+                                    iv_terms = []
+                                    for exp in expiries_sorted[:4]:
+                                        days = _days(exp)
+                                        feat = _chain_features(exp, days)
+                                        if feat.get('atm') is not None:
+                                            term = {"days": days, "atm": float(feat['atm'])}
+                                            if feat.get('rr25d') is not None:
+                                                term['rr25d'] = float(feat['rr25d'])
+                                            iv_terms.append(term)
+                                    if iv_terms:
+                                        iv_atm = iv_terms[0].get('atm')
+                                        iv_days = iv_terms[0].get('days')
+                                        fundamentals.setdefault(sym, {})['iv_terms'] = iv_terms
+                                        if len(iv_terms) > 1 and iv_terms[0].get('atm') is not None and iv_terms[-1].get('atm') is not None:
+                                            fundamentals.setdefault(sym, {})['iv_term_slope'] = float(iv_terms[-1]['atm'] - iv_terms[0]['atm'])
+                                        if iv_terms[0].get('rr25d') is not None:
+                                            fundamentals.setdefault(sym, {})['iv_rr25d_short'] = float(iv_terms[0]['rr25d'])
+                                            iv_skew = float(iv_terms[0]['rr25d'])
+                                        if iv_terms[-1].get('rr25d') is not None:
+                                            fundamentals.setdefault(sym, {})['iv_rr25d_long'] = float(iv_terms[-1]['rr25d'])
+                            except Exception:
+                                pass
+                            # insider transactions (best-effort)
+                            try:
+                                trans = getattr(tk, 'insider_transactions', None)
+                                if trans is not None:
+                                    import pandas as _pd
+                                    df_it = trans if isinstance(trans, _pd.DataFrame) else None
+                                    if df_it is not None and {'Type','Value','Shares'} <= set(df_it.columns):
+                                        # net shares over ~90d
+                                        df_recent = df_it.head(50)  # yfinance returns newest first
+                                        net_shares = 0.0
+                                        for _, r in df_recent.iterrows():
+                                            t = str(r.get('Type') or '').lower()
+                                            sh = float(r.get('Shares') or 0.0)
+                                            if 'buy' in t:
+                                                net_shares += sh
+                                            elif 'sell' in t:
+                                                net_shares -= sh
+                                        fundamentals.setdefault(sym, {})['insider_net_shares_90d'] = net_shares
+                            except Exception:
+                                pass
                         except Exception:
                             pass
-                        # insider transactions (best-effort)
+                        # IV rank proxy (ATR% percentile over last 90 bars)
                         try:
-                            trans = getattr(tk, 'insider_transactions', None)
-                            if trans is not None:
-                                import pandas as _pd
-                                df_it = trans if isinstance(trans, _pd.DataFrame) else None
-                                if df_it is not None and {'Type','Value','Shares'} <= set(df_it.columns):
-                                    # net shares over ~90d
-                                    df_recent = df_it.head(50)  # yfinance returns newest first
-                                    net_shares = 0.0
-                                    for _, r in df_recent.iterrows():
-                                        t = str(r.get('Type') or '').lower()
-                                        sh = float(r.get('Shares') or 0.0)
-                                        if 'buy' in t:
-                                            net_shares += sh
-                                        elif 'sell' in t:
-                                            net_shares -= sh
-                                    fundamentals.setdefault(sym, {})['insider_net_shares_90d'] = net_shares
+                            highs = u.get('_highs') or []
+                            lows = u.get('_lows') or []
+                            closes = u.get('_closes') or []
+                            ivr = None
+                            if isinstance(highs, list) and len(highs) >= 90 and isinstance(closes, list):
+                                # simple ATR(14) EMA series and percentile rank of last vs 90
+                                import math
+                                tr = []
+                                for i in range(len(closes)):
+                                    if i == 0:
+                                        tr.append(float(highs[i]) - float(lows[i]))
+                                    else:
+                                        h = float(highs[i]); l = float(lows[i]); pc = float(closes[i-1])
+                                        tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+                                p = 14
+                                atr = []
+                                alpha = 2.0 / (p + 1.0)
+                                a = None
+                                for i, v in enumerate(tr):
+                                    a = v if a is None else (1-alpha)*a + alpha*v
+                                    atr.append(a)
+                                atr_pct_series = [(atr[i] / float(closes[i]) * 100.0) if float(closes[i])>0 else 0.0 for i in range(len(atr))]
+                                window = atr_pct_series[-90:]
+                                last = window[-1]
+                                less = sum(1 for x in window if x <= last)
+                                ivr = (less / float(len(window))) * 100.0 if window else None
+                            if ivr is not None:
+                                fundamentals.setdefault(sym, {})['ivr_proxy_90'] = ivr
                         except Exception:
                             pass
-                    # IV rank proxy (ATR% percentile over last 90 bars)
-                    try:
-                        highs = u.get('_highs') or []
-                        lows = u.get('_lows') or []
-                        closes = u.get('_closes') or []
-                        ivr = None
-                        if isinstance(highs, list) and len(highs) >= 90 and isinstance(closes, list):
-                            # simple ATR(14) EMA series and percentile rank of last vs 90
-                            import math
-                            tr = []
-                            for i in range(len(closes)):
-                                if i == 0:
-                                    tr.append(float(highs[i]) - float(lows[i]))
-                                else:
-                                    h = float(highs[i]); l = float(lows[i]); pc = float(closes[i-1])
-                                    tr.append(max(h - l, abs(h - pc), abs(l - pc)))
-                            p = 14
-                            atr = []
-                            alpha = 2.0 / (p + 1.0)
-                            a = None
-                            for i, v in enumerate(tr):
-                                a = v if a is None else (1-alpha)*a + alpha*v
-                                atr.append(a)
-                            atr_pct_series = [(atr[i] / float(closes[i]) * 100.0) if float(closes[i])>0 else 0.0 for i in range(len(atr))]
-                            window = atr_pct_series[-90:]
-                            last = window[-1]
-                            less = sum(1 for x in window if x <= last)
-                            ivr = (less / float(len(window))) * 100.0 if window else None
-                        if ivr is not None:
-                            fundamentals.setdefault(sym, {})['ivr_proxy_90'] = ivr
-                    except Exception:
-                        pass
 
-                    fundamentals[sym] = {k: v for k, v in {
-                        "pe": pe, "market_cap": mcap,
-                        "rev_g_yoy": rev_g, "gross_margin": gp_margin, "op_margin": op_margin,
-                        "debt_to_equity": dte, "fcf_margin": fcf_margin, "sector": sector,
-                        # ownership & short/float
-                        "float_shares": float_shares, "shares_out": shares_out,
-                        "inst_own_pct": inst_own, "insider_own_pct": insider_own,
-                        "short_pct_float": short_pct_float,
-                        # analysts
-                        "eps_next": eps_next, "eps_surprise_avg_pct": eps_surprise_avg,
-                        "analyst_cov": analyst_cov, "analyst_rec": analyst_rec, "pt_mean": pt_mean,
-                        # options/volatility snapshot
-                        "iv_atm_approx": iv_atm, "iv_days": iv_days, "iv_skew": iv_skew,
-                        # volatility proxy from price (fallback)
-                        "vol_proxy_atr_pct": float(u.get("atr_pct") or 0.0),
-                        # valuation extras inlined earlier (ev_ebitda, ps_ttm, roic) and ivr_proxy_90/insider_net_shares_90d may be preset in dict
-                    }.items() if v is not None}
-                    # earnings & ex-div dates
-                    ed = None; exd = None
-                    try:
-                        cal = tk.calendar
-                        if hasattr(cal, 'index') and 'Earnings Date' in set(getattr(cal,'index',[])):
-                            ed = str(cal.loc['Earnings Date'][0])
-                        if hasattr(cal, 'index') and 'Ex-Dividend Date' in set(getattr(cal,'index',[])):
-                            exd = str(cal.loc['Ex-Dividend Date'][0])
+                        fundamentals[sym] = {k: v for k, v in {
+                            "pe": pe, "market_cap": mcap,
+                            "rev_g_yoy": rev_g, "gross_margin": gp_margin, "op_margin": op_margin,
+                            "debt_to_equity": dte, "fcf_margin": fcf_margin, "sector": sector,
+                            # ownership & short/float
+                            "float_shares": float_shares, "shares_out": shares_out,
+                            "inst_own_pct": inst_own, "insider_own_pct": insider_own,
+                            "short_pct_float": short_pct_float,
+                            # analysts
+                            "eps_next": eps_next, "eps_surprise_avg_pct": eps_surprise_avg,
+                            "analyst_cov": analyst_cov, "analyst_rec": analyst_rec, "pt_mean": pt_mean,
+                            # options/volatility snapshot
+                            "iv_atm_approx": iv_atm, "iv_days": iv_days, "iv_skew": iv_skew,
+                            # volatility proxy from price (fallback)
+                            "vol_proxy_atr_pct": float(u.get("atr_pct") or 0.0),
+                            # valuation extras inlined earlier (ev_ebitda, ps_ttm, roic) and ivr_proxy_90/insider_net_shares_90d may be preset in dict
+                        }.items() if v is not None}
+                        # earnings & ex-div dates
+                        ed = None; exd = None
+                        try:
+                            cal = tk.calendar
+                            if hasattr(cal, 'index') and 'Earnings Date' in set(getattr(cal,'index',[])):
+                                ed = str(cal.loc['Earnings Date'][0])
+                            if hasattr(cal, 'index') and 'Ex-Dividend Date' in set(getattr(cal,'index',[])):
+                                exd = str(cal.loc['Ex-Dividend Date'][0])
+                        except Exception:
+                            pass
+                        events[sym] = {k: v for k, v in {"earnings": ed, "ex_div": exd}.items() if v}
                     except Exception:
-                        pass
-                    events[sym] = {k: v for k, v in {"earnings": ed, "ex_div": exd}.items() if v}
-                except Exception:
-                    continue
+                        continue
+            except Exception:
+                pass
         # Sector/peer RS-comp (rank 20d return within sector across trimmed set)
         try:
             # build sector mapping
@@ -1465,7 +1629,7 @@ class AutopilotManager:
         except Exception:
             pass
 
-        # Update IV history for IVR true percentile (cached in settings, per tenor)
+        # Update IV history per tenor with smoothing and IVR true percentile
         ivr_map: Dict[str, float] = {}
         if _HAS_STORAGE:
             try:
@@ -1476,47 +1640,48 @@ class AutopilotManager:
                     sym = str(u.get('sym') or '')
                     if not sym:
                         continue
-                    iv = None
-                    try:
-                        iv = float((fundamentals.get(sym) or {}).get('iv_atm_approx') or 0.0) or None
-                    except Exception:
-                        iv = None
-                    if iv is None or iv <= 0:
+                    terms = (fundamentals.get(sym) or {}).get('iv_terms') or []
+                    if not isinstance(terms, list):
                         continue
-                    # bucket by tenor
-                    days = None
-                    try:
-                        days = int((fundamentals.get(sym) or {}).get('iv_days') or 0)
-                    except Exception:
-                        days = 0
-                    label = '30D'
-                    if days >= 76 and days <= 120:
-                        label = '90D'
-                    elif days >= 46 and days <= 75:
-                        label = '60D'
-                    elif days >= 121:
-                        label = '180D'
-                    key = f"iv_hist:{sym}:{label}"
-                    raw = get_setting(key)
-                    try:
-                        hist = _json.loads(raw) if raw else []
-                    except Exception:
-                        hist = []
-                    # Append sample
-                    try:
-                        hist.insert(0, [int(_t.time()), float(iv)])
+                    for term in terms:
+                        try:
+                            days = int(term.get('days') or 0)
+                            atm = float(term.get('atm') or 0.0)
+                        except Exception:
+                            continue
+                        if atm <= 0 or days <= 0:
+                            continue
+                        label = '30D'
+                        if 46 <= days <= 75:
+                            label = '60D'
+                        elif 76 <= days <= 120:
+                            label = '90D'
+                        elif days >= 121:
+                            label = '180D'
+                        key = f"iv_hist:{sym}:{label}"
+                        raw = get_setting(key)
+                        try:
+                            hist = _json.loads(raw) if raw else []
+                        except Exception:
+                            hist = []
+                        rec = {"ts": int(_t.time()), "atm": atm}
+                        if term.get('rr25d') is not None:
+                            rec['rr25d'] = float(term['rr25d'])
+                        hist.insert(0, rec)
                         hist = hist[:240]
                         set_setting(key, hist)
-                    except Exception:
-                        pass
-                    try:
-                        vals = [float(x[1]) for x in hist if isinstance(x, (list, tuple)) and len(x)>=2]
+                        vals = [float(x.get('atm')) for x in hist if isinstance(x, dict) and x.get('atm') is not None]
                         if len(vals) >= 10:
-                            cur = float(iv)
+                            cur = float(atm)
                             less = sum(1 for v in vals if v <= cur)
                             ivr_map[sym] = round(less / float(len(vals)) * 100.0, 2)
-                    except Exception:
-                        continue
+                        try:
+                            sm_vals = vals[:5]
+                            if sm_vals:
+                                sm = _stat.mean(sm_vals)
+                                fundamentals.setdefault(sym, {}).setdefault('iv_terms_smoothed', {})[label] = float(sm)
+                        except Exception:
+                            pass
             except Exception:
                 ivr_map = {}
 
@@ -1531,31 +1696,35 @@ class AutopilotManager:
             now = _time.time()
             if not hasattr(self, "_macro_cache"):
                 self._macro_cache = {"ts": 0.0, "data": {}}
-            if float(self._macro_cache.get("ts") or 0.0) + ttl < now:
-                try:
-                    import yfinance as _yf  # type: ignore
-                    def last_close(sym: str) -> float:
-                        try:
-                            df = _yf.download(sym, period="5d", interval="1d", progress=False, threads=False)
-                            if df is None or df.empty:
-                                return 0.0
-                            import pandas as _pd
-                            if isinstance(df.columns, _pd.MultiIndex):
-                                df.columns = [c[0] for c in df.columns]
-                            return float(df['Close'].iloc[-1])
-                        except Exception:
-                            return 0.0
-                    macro = {
-                        "vix_close": last_close("^VIX"),
-                        "dxy_close": last_close("DX-Y.NYB"),  # DXY proxy on Yahoo
-                        "us10y_yield": last_close("^TNX") / 10.0 if last_close("^TNX")>0 else 0.0,
-                        "spy_close": last_close("SPY"),
-                    }
-                except Exception:
-                    macro = {}
-                self._macro_cache = {"ts": now, "data": macro}
-            else:
+            if fast:
+                # Fast mode: only use cache; don't fetch
                 macro = dict(self._macro_cache.get("data") or {})
+            else:
+                if float(self._macro_cache.get("ts") or 0.0) + ttl < now:
+                    try:
+                        import yfinance as _yf  # type: ignore
+                        def last_close(sym: str) -> float:
+                            try:
+                                df = _yf.download(sym, period="5d", interval="1d", progress=False, threads=False)
+                                if df is None or df.empty:
+                                    return 0.0
+                                import pandas as _pd
+                                if isinstance(df.columns, _pd.MultiIndex):
+                                    df.columns = [c[0] for c in df.columns]
+                                return float(df['Close'].iloc[-1])
+                            except Exception:
+                                return 0.0
+                        macro = {
+                            "vix_close": last_close("^VIX"),
+                            "dxy_close": last_close("DX-Y.NYB"),  # DXY proxy on Yahoo
+                            "us10y_yield": last_close("^TNX") / 10.0 if last_close("^TNX")>0 else 0.0,
+                            "spy_close": last_close("SPY"),
+                        }
+                    except Exception:
+                        macro = {}
+                    self._macro_cache = {"ts": now, "data": macro}
+                else:
+                    macro = dict(self._macro_cache.get("data") or {})
         except Exception:
             macro = {}
 
@@ -1564,23 +1733,23 @@ class AutopilotManager:
             px_map: Dict[str, float] = {str(u.get("sym")): float(u.get("px") or 0.0) for u in universe if u.get("sym")}
             total_mv = 0.0
             sector_mv: Dict[str, float] = {}
-            # Build returns series for correlation (last 60 closes)
+            # Build returns series for correlation (last 120 closes)
             ret_series: Dict[str, List[float]] = {}
             try:
                 for u in universe:
                     symu = str(u.get('sym') or '')
                     closes = u.get('_closes') or []
-                    if symu and isinstance(closes, list) and len(closes) >= 61:
-                        rs60: List[float] = []
-                        for i in range(-60, 0):
+                    if symu and isinstance(closes, list) and len(closes) >= 121:
+                        rs120: List[float] = []
+                        for i in range(-120, 0):
                             try:
                                 prev = float(closes[i-1]); cur = float(closes[i])
-                                rs60.append((cur/prev - 1.0) if prev>0 else 0.0)
+                                rs120.append((cur/prev - 1.0) if prev>0 else 0.0)
                             except Exception:
-                                rs60.append(0.0)
-                        # keep also 20-bar
+                                rs120.append(0.0)
+                        rs60 = rs120[-60:]
                         rs20 = rs60[-20:]
-                        ret_series[symu] = [*rs20, *rs60]  # store both windows concatenated
+                        ret_series[symu] = [*rs20, *rs60, *rs120]
             except Exception:
                 ret_series = {}
             for p in pos_norm:
@@ -1610,22 +1779,36 @@ class AutopilotManager:
         except Exception:
             portfolio = {"total_positions": 0, "open_slots": None, "exposure_est": 0.0, "sector_exposure": {}, "concentration_top": None}
 
-        # Correlation of each trimmed symbol vs portfolio synthetic return (MV-weighted)
+        # Correlation of each trimmed symbol vs portfolio synthetic return
         corr_portfolio: Dict[str, float] = {}
         corr_portfolio_w20: Dict[str, float] = {}
+        corr_portfolio_w120: Dict[str, float] = {}
+        corr_portfolio_risk: Dict[str, float] = {}
+        corr_portfolio_risk_20: Dict[str, float] = {}
+        corr_portfolio_risk_120: Dict[str, float] = {}
         try:
-            # Build portfolio returns as equal-weight of holdings that have series
             holds = [(str(p.get('sym')), abs(float(p.get('qty') or 0.0)) * float(px_map.get(str(p.get('sym')), 0.0) or 0.0)) for p in pos_norm if abs(float(p.get('qty') or 0.0))>0.0]
             holds = [(s, w) for (s,w) in holds if s in ret_series and w>0]
             if len(holds) >= 1:
-                series_w = [(ret_series[s], w) for (s,w) in holds]
-                # derive MV weights
-                wsum = sum(w for (_,w) in series_w) or 1.0
-                weights = [(s, w/wsum) for (s,w) in holds]
-                # build weighted portfolio returns for 60 and 20 windows
-                L60 = min(len(ret_series[s]) for (s,_) in holds)
-                def _port_ret(window: int):
-                    # ret_series stored [last20, last60], re-slice
+                # MV weights
+                wsum = sum(w for (_,w) in holds) or 1.0
+                weights_mv = [(s, w/wsum) for (s,w) in holds]
+                # risk weights: inverse vol on 60-bar returns
+                import statistics as _stat
+                vols = {}
+                for s,_ in holds:
+                    rs = ret_series.get(s, [])
+                    try:
+                        vols[s] = _stat.pstdev(rs[-60:]) or 1e-6
+                    except Exception:
+                        vols[s] = 1e-6
+                weights_r = []
+                for s,w in holds:
+                    v = vols.get(s,1e-6)
+                    weights_r.append((s, w/max(v,1e-6)))
+                wsum_r = sum(w for (_,w) in weights_r) or 1.0
+                weights_risk = [(s, w/wsum_r) for (s,w) in weights_r]
+                def _port_ret(window: int, weights: List[tuple[str,float]]):
                     pr = []
                     for i in range(window):
                         idx = -window + i
@@ -1638,11 +1821,15 @@ class AutopilotManager:
                                 pass
                         pr.append(val)
                     return pr
-                prt20 = _port_ret(20)
-                prt60 = _port_ret(60)
+                prt20 = _port_ret(20, weights_mv)
+                prt60 = _port_ret(60, weights_mv)
+                prt120 = _port_ret(120, weights_mv)
+                prt20_r = _port_ret(20, weights_risk)
+                prt60_r = _port_ret(60, weights_risk)
+                prt120_r = _port_ret(120, weights_risk)
                 import math
                 def corr(a: List[float], b: List[float]) -> float:
-                    n = min(len(a), len(b));
+                    n = min(len(a), len(b))
                     if n <= 1:
                         return 0.0
                     ma = sum(a[-n:])/n; mb = sum(b[-n:])/n
@@ -1651,18 +1838,24 @@ class AutopilotManager:
                     vb = sum((b[-n:][i]-mb)**2 for i in range(n))
                     if va<=0 or vb<=0:
                         return 0.0
-                    return max(-1.0, min(1.0, cov / ( (va**0.5)*(vb**0.5) )))
+                    return max(-1.0, min(1.0, cov / ((va**0.5)*(vb**0.5))))
                 for u in universe_trimmed:
                     sym = str(u.get('sym') or '')
                     rs = ret_series.get(sym)
-                    if rs and len(rs) >= 60:
-                        c60 = corr(rs[-60:], prt60)
-                        c20 = corr(rs[-20:], prt20)
-                        corr_portfolio[sym] = round(float(c60), 3)
-                        corr_portfolio_w20[sym] = round(float(c20), 3)
+                    if rs and len(rs) >= 120:
+                        corr_portfolio[sym] = round(float(corr(rs[-60:], prt60)), 3)
+                        corr_portfolio_w20[sym] = round(float(corr(rs[-20:], prt20)), 3)
+                        corr_portfolio_w120[sym] = round(float(corr(rs[-120:], prt120)), 3)
+                        corr_portfolio_risk[sym] = round(float(corr(rs[-60:], prt60_r)), 3)
+                        corr_portfolio_risk_20[sym] = round(float(corr(rs[-20:], prt20_r)), 3)
+                        corr_portfolio_risk_120[sym] = round(float(corr(rs[-120:], prt120_r)), 3)
         except Exception:
             corr_portfolio = {}
             corr_portfolio_w20 = {}
+            corr_portfolio_w120 = {}
+            corr_portfolio_risk = {}
+            corr_portfolio_risk_20 = {}
+            corr_portfolio_risk_120 = {}
 
         # Lightweight per-symbol conflict index (0..1): combine signal-news disagreement and event proximity
         conflict_index: Dict[str, float] = {}
@@ -1726,24 +1919,42 @@ class AutopilotManager:
             except Exception:
                 history = {}
 
-        # Market breadth (adv/decl ratio) across current universe (not trimmed)
+        # Market breadth via NYSE advance/decline; fallback to universe
         breadth: Dict[str, Any] = {}
-        try:
-            adv = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) > 0)
-            dec = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) < 0)
-            tot = max(1, adv + dec)
-            # update cumulative AD-line
+        if fast:
             try:
+                adv = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) > 0)
+                dec = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) < 0)
+                tot = max(1, adv + dec)
                 self._ad_line += float(adv - dec)
+                breadth = {"adv": adv, "dec": dec, "adv_decl_ratio": round(adv/float(tot), 3), "ad_line": round(float(getattr(self, "_ad_line", 0.0)), 2)}
             except Exception:
-                pass
-            breadth = {"adv": adv, "dec": dec, "adv_decl_ratio": round(adv/float(tot), 3), "ad_line": round(float(getattr(self, "_ad_line", 0.0)), 2)}
-        except Exception:
-            breadth = {}
+                breadth = {}
+        else:
+            try:
+                import yfinance as _yf  # type: ignore
+                df_a = _yf.download("^ADVN", period="5d", interval="1d", progress=False, threads=False)
+                df_d = _yf.download("^DECL", period="5d", interval="1d", progress=False, threads=False)
+                adv = int(df_a['Close'].iloc[-1]) if not df_a.empty else 0
+                dec = int(df_d['Close'].iloc[-1]) if not df_d.empty else 0
+                tot = max(1, adv + dec)
+                self._ad_line += float(adv - dec)
+                breadth = {"adv": adv, "dec": dec, "adv_decl_ratio": round(adv/float(tot), 3), "ad_line": round(float(getattr(self, "_ad_line", 0.0)), 2)}
+            except Exception:
+                try:
+                    adv = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) > 0)
+                    dec = sum(1 for u in universe if float(u.get("change_1d_pct") or 0.0) < 0)
+                    tot = max(1, adv + dec)
+                    self._ad_line += float(adv - dec)
+                    breadth = {"adv": adv, "dec": dec, "adv_decl_ratio": round(adv/float(tot), 3), "ad_line": round(float(getattr(self, "_ad_line", 0.0)), 2)}
+                except Exception:
+                    breadth = {}
 
         # Derive policy from NL prefs/style for planner awareness
-
-
+        try:
+            policy = self._derive_policy(style_summary, prefs)
+        except Exception:
+            policy = {"reduce_only": False, "long_only": False, "short_only": False, "forbid_new": False}
         ctx: Dict[str, Any] = {
             "timestamp": _utcnow_iso(),
             "mode": "auto",
@@ -1769,6 +1980,10 @@ class AutopilotManager:
             "ivr_map": ivr_map,
             "corr_portfolio_map": corr_portfolio,
             "corr_portfolio_w20": corr_portfolio_w20,
+            "corr_portfolio_w120": corr_portfolio_w120,
+            "corr_portfolio_risk": corr_portfolio_risk,
+            "corr_portfolio_risk_20": corr_portfolio_risk_20,
+            "corr_portfolio_risk_120": corr_portfolio_risk_120,
             "portfolio": portfolio,
             "history": history,
             # expose signal weights for explainability
@@ -1861,6 +2076,10 @@ class AutopilotManager:
         ivr_map = ctx.get("ivr_map") or {}
         corrp_map = ctx.get("corr_portfolio_map") or {}
         corrp_w20 = ctx.get("corr_portfolio_w20") or {}
+        corrp_w120 = ctx.get("corr_portfolio_w120") or {}
+        corrp_risk = ctx.get("corr_portfolio_risk") or {}
+        corrp_risk_20 = ctx.get("corr_portfolio_risk_20") or {}
+        corrp_risk_120 = ctx.get("corr_portfolio_risk_120") or {}
         try:
             conc_cap = float(os.getenv("AUTOPILOT_SECTOR_CONC_CAP_PCT", "45") or 45.0)
         except Exception:
@@ -1953,32 +2172,42 @@ class AutopilotManager:
                     pass
                 # liquidity guardrails
                 # hard gate: halted
+                gate_reasons = []
                 halted = False
                 try:
                     halted = bool(next((u.get('halted') for u in (ctx.get('universe') or []) if u.get('sym')==sym), False))
                 except Exception:
                     halted = False
                 if halted:
+                    gate_reasons.append("halted")
                     keep = False
-                    details.append({"sym": sym, "score": -1.0, "keep": False})
+                    details.append({"sym": sym, "score": -1.0, "keep": False, "reasons": gate_reasons})
                     dropped += 1
                     continue
                 if min_adv_env > 0 and adv > 0 and adv < min_adv_env:
                     score -= 0.25
+                    gate_reasons.append("low_adv")
                 if spread is not None and spread > max_spread_env:
                     score -= 0.2
+                    gate_reasons.append("wide_spread")
                 # portfolio concentration: penalize adds to top sector when above cap
                 if sec and concentration_top and sec == concentration_top and float(concentration_pct) >= conc_cap and d.get("action") in ("open","add"):
                     score -= 0.25
-                # correlation penalty: avoid adding highly correlated names
+                # correlation penalty: avoid adds highly aligned with portfolio
                 try:
                     cp = float(corrp_map.get(sym) or 0.0)
                     cp20 = float(corrp_w20.get(sym) or 0.0)
+                    cp120 = float(corrp_w120.get(sym) or 0.0)
+                    cpr = float(corrp_risk.get(sym) or 0.0)
                     if d.get("action") in ("open","add"):
-                        if cp >= 0.8:
+                        if cp >= 0.75:
                             score -= 0.15
-                        if cp20 >= 0.9:
+                        if cp20 >= 0.85:
                             score -= 0.1
+                        if cpr >= 0.75:
+                            score -= 0.1
+                        if cp120 >= 0.7:
+                            score -= 0.05
                 except Exception:
                     pass
                 # conflict index penalty
@@ -2008,7 +2237,7 @@ class AutopilotManager:
                 except Exception:
                     pass
                 keep = score >= threshold
-                details.append({"sym": sym, "score": round(score,2), "keep": keep})
+                details.append({"sym": sym, "score": round(score,2), "keep": keep, "reasons": gate_reasons})
                 if keep:
                     d2 = dict(d)
                     d2.setdefault("rule_checks", {})
@@ -2053,8 +2282,20 @@ class AutopilotManager:
                             pass
                         # portfolio correlation
                         try:
-                            d2["rule_checks"]["corr_portfolio"] = float(corrp_map.get(sym) or 0.0)
-                            d2["rule_checks"]["corr_portfolio_20"] = float(corrp_w20.get(sym) or 0.0)
+                            c60 = float(corrp_map.get(sym) or 0.0)
+                            c20 = float(corrp_w20.get(sym) or 0.0)
+                            c120 = float(corrp_w120.get(sym) or 0.0)
+                            cr60 = float(corrp_risk.get(sym) or 0.0)
+                            cr20 = float(corrp_risk_20.get(sym) or 0.0)
+                            cr120 = float(corrp_risk_120.get(sym) or 0.0)
+                            d2["rule_checks"]["corr_portfolio"] = c60
+                            d2["rule_checks"]["corr_portfolio_20"] = c20
+                            d2["rule_checks"]["corr_portfolio_120"] = c120
+                            d2["rule_checks"]["corr_portfolio_risk"] = cr60
+                            d2["rule_checks"]["corr_portfolio_risk_20"] = cr20
+                            d2["rule_checks"]["corr_portfolio_risk_120"] = cr120
+                            high_c = any(abs(x) >= 0.75 for x in (c60, c20, c120, cr60, cr20, cr120))
+                            d2["rule_checks"]["high_corr"] = bool(high_c)
                         except Exception:
                             pass
                     except Exception:

@@ -2003,6 +2003,7 @@ def autopilot_weekly():
     missed_rules = {"planner_invalid_json": 0, "guardrails": 0}
     proposed_counts: Dict[str, int] = {}
     executed_counts: Dict[str, int] = {}
+    decision_reasons: Dict[str, List[str]] = {}
     for r in rows:
         try:
             act = str(r.get("action") or "")
@@ -2022,6 +2023,13 @@ def autopilot_weekly():
                 sym = str(r.get("symbol") or "")
                 if sym:
                     executed_counts[sym] = executed_counts.get(sym, 0) + 1
+                    rc = extra.get("rule_checks") or {}
+                    try:
+                        bad = [k for k, v in rc.items() if v is False]
+                        if bad:
+                            decision_reasons.setdefault(sym, []).extend(bad)
+                    except Exception:
+                        pass
             elif act == "autopilot" and reason == "signals_reweighted":
                 reweights += 1
             elif act == "planner_proposed":
@@ -2067,6 +2075,7 @@ def autopilot_weekly():
     out["missed_rules"] = missed_rules
     out["proposed_counts"] = proposed_counts
     out["executed_counts"] = executed_counts
+    out["decision_reasons"] = decision_reasons
     return out
 
 # Ensure router registration happens after all route definitions

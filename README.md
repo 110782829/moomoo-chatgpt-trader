@@ -16,6 +16,15 @@ Core capabilities:
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
+- Tracks analyst EPS and revenue revisions over 7/30/90 days
+- Calculates delta-based 25D risk reversals with multi-expiry IV term structure
+- Logs liquidity gate reasons for dropped symbols
+- Flags high portfolio correlation using MV- and risk-weighted returns over 20/60/120 days
+- Stores IV history per tenor with metadata and short-window smoothing
+- Maintains sliding-window NBBO medians from quote push with broker risk flags
+- Market breadth uses NYSE advance/decline series beyond the watchlist
+- Weekly report lists per-symbol decision reasons
+- Quote subscriptions retry with backoff and log failures
 - Sync recent fills via `POST /sync/deals`; it uses the execution service when available or falls back to direct storage
 - `GET /exec/orders` accepts multiple `status` filters
 - Trading API wrapper in `core.moomoo_client.MoomooClient`
