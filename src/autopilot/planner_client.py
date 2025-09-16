@@ -54,11 +54,64 @@ def _universe_syms(inp: Dict[str, Any]) -> List[str]:
 # -------- open-only stub (no ping-pong) --------
 class OpenOnlyStubPlanner:
     """
-    Opens 1 share of the first universe symbol that is not long yet.
-    Never auto-closes. Once all symbols are >= 1 share, returns no decisions.
+    Minimal fallback planner.
+    Prefers closing high-risk positions using exit hints when GPT is unavailable,
+    otherwise opens 1 share of the first universe symbol that is not long yet.
     """
     def plan(self, planner_input: Dict[str, Any]) -> PlannerOutput:
         pos = _pos_map(planner_input)
+        exits = planner_input.get("positions_exit_candidates") or []
+        if exits and isinstance(exits, list):
+            for cand in exits:
+                try:
+                    sym = str(cand.get("sym") or "")
+                    if not sym:
+                        continue
+                    qty_live = float(pos.get(sym) or 0.0)
+                    if qty_live == 0.0:
+                        continue
+                    exit_bias = str(cand.get("exit_bias") or "")
+                    score = float(cand.get("exit_score") or 0.0)
+                    if exit_bias == "close" or score >= 0.6:
+                        side = "sell" if qty_live > 0 else "buy"
+                        size_val = abs(int(qty_live)) or 1
+                        return validate_output({
+                            "decisions": [{
+                                "sym": sym,
+                                "action": "close",
+                                "side": side,
+                                "entry": "market",
+                                "size_type": "shares",
+                                "size_value": float(size_val),
+                                "limit_price": None,
+                                "time_in_force": "day",
+                                "confidence": max(0.3, min(0.9, score or 0.6)),
+                                "expires_sec": 180,
+                                "rationale": "stub_close_exit_signal",
+                            }],
+                            "global_action": "proceed",
+                        })
+                    if exit_bias == "trim" and abs(qty_live) > 1:
+                        side = "sell" if qty_live > 0 else "buy"
+                        trim_size = max(1, abs(int(qty_live)) // 2)
+                        return validate_output({
+                            "decisions": [{
+                                "sym": sym,
+                                "action": "trim",
+                                "side": side,
+                                "entry": "market",
+                                "size_type": "shares",
+                                "size_value": float(trim_size),
+                                "limit_price": None,
+                                "time_in_force": "day",
+                                "confidence": max(0.2, min(0.7, score or 0.4)),
+                                "expires_sec": 180,
+                                "rationale": "stub_trim_exit_signal",
+                            }],
+                            "global_action": "proceed",
+                        })
+                except Exception:
+                    continue
         for s in _universe_syms(planner_input):
             if pos.get(s, 0.0) <= 0.0:
                 return validate_output({
@@ -71,6 +124,9 @@ class OpenOnlyStubPlanner:
                         "size_value": 1.0,
                         "limit_price": None,
                         "time_in_force": "day",
+                        "confidence": 0.4,
+                        "expires_sec": 180,
+                        "rationale": "stub_open_first_available",
                     }],
                     "global_action": "proceed"
                 })

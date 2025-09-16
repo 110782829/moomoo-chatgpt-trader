@@ -13,17 +13,23 @@ Core capabilities:
 - Signal card adjusts weights for six built-in strategies (MACD Cross, Bollinger Breakout, Stochastic RSI Extreme, MA Trend, RSI Extreme, News)
 - Watchlist card lists up to six symbols with scroll
 - Activity tab shows recent market data with its provider
+- Activity tab shows diff table of planner proposals versus executed orders
 - Live account card with equity, cash, buying power, and leverage
 - Local SQLite persistence for orders, fills, and bot action logs
+- Tracks last action and realized R per symbol for planner memory
 - Uses Yahoo Finance for recent bars when broker quotes are unavailable
-- Tracks analyst EPS and revenue revisions over 7/30/90 days
+- Tracks analyst EPS and revenue revisions over 7/30/90 days; fundamentals include `eps_rev_pct_*` and `rev_est_rev_pct_*`
+- Computes EV/EBITDA, P/S, and ROIC fundamentals when data is available
 - Calculates delta-based 25D risk reversals with multi-expiry IV term structure
 - Logs liquidity gate reasons for dropped symbols
 - Flags high portfolio correlation using MV- and risk-weighted returns over 20/60/120 days
+- Detects highest-volume option open-interest changes or large trades per symbol with `unusual_flow` strength
 - Stores IV history per tenor with metadata and short-window smoothing
 - Maintains sliding-window NBBO medians from quote push with broker risk flags
 - Market breadth uses NYSE advance/decline series beyond the watchlist
+- Macro surprises such as the Citi Economic Surprise Index feed planner input
 - Weekly report lists per-symbol decision reasons
+- Planner notes clarify why no trades; shown in the UI when all decisions are gated
 - Quote subscriptions retry with backoff and log failures
 - Sync recent fills via `POST /sync/deals`; it uses the execution service when available or falls back to direct storage
 - `GET /exec/orders` accepts multiple `status` filters
@@ -118,6 +124,10 @@ Paper trading requires `TrdEnv.SIMULATE`. Account authority details: [Authoritie
 - SIM execution uses `db/trader.db` by default (auto-created). Strategy/automation storage uses `data/trader.db`.
 - To enable GPT Autopilot set `PLANNER_PROVIDER=gpt` and `OPENAI_API_KEY`.
 - If the GPT call fails, planner can fall back to a stub. Set `PLANNER_FALLBACK_STUB=0` to surface the error instead.
+- The planner context now surfaces `positions_exit_candidates` and a `positions_summary` section so the UI and fallback logic can
+  highlight close/trim opportunities.
+- When the GPT planner is unavailable, the stub evaluates those exit candidates first and can close or trim active positions
+  before attempting any new opens.
 - Execution mode switches to `moomoo` upon connect or session restore and reverts to `sim` on disconnect. No automatic fallback to `sim` when in `moomoo` mode.
 - Account card fetches equity, cash, and buying power when a broker link is active, even without the execution container.
 - Account assets query falls back to get_accinfo if accinfo_query is missing and logs errors.
@@ -141,3 +151,4 @@ If you see `bars_unavailable: yfinance fetch failed`:
 4. Use the `/debug/bars` endpoint to test fetching bars:
    `GET /debug/bars?symbol=US.AAPL&ktype=K_1M&n=3`
 5. If "The truth value of a Series is ambiguous" appears, upgrade to a recent build.
+6. EV/EBITDA, P/S, and ROIC come from yfinance fundamentals; missing data leaves ratios blank.

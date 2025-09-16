@@ -97,6 +97,18 @@ def init_db() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_symbol ON action_log(symbol)")
 
+        # per-symbol stats
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS symbol_stats (
+            symbol TEXT PRIMARY KEY,
+            last_action TEXT,
+            realized_r REAL DEFAULT 0.0
+        )""")
+
+    try:
+        recalc_symbol_realized_r()
+    except Exception:
+        pass
 
 # ----- strategies & runs (existing API) -----
 
@@ -232,6 +244,75 @@ def all_settings() -> Dict[str, Any]:
         return out
 
 
+# ----- per-symbol stats -----
+
+def update_symbol_last_action(symbol: str, action: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO symbol_stats(symbol, last_action) VALUES(?, ?) "
+            "ON CONFLICT(symbol) DO UPDATE SET last_action=excluded.last_action",
+            (symbol, action),
+        )
+
+
+def realized_r_per_symbol() -> Dict[str, float]:
+    from collections import defaultdict
+
+    pos = defaultdict(float)
+    avg = defaultdict(float)
+    out = defaultdict(float)
+    stop_loss_pct = 0.0
+    try:
+        raw = get_setting("autopilot.prefs")
+        if raw:
+            prefs = json.loads(raw)
+            stop_loss_pct = float(prefs.get("stop_loss_pct") or 0.0)
+    except Exception:
+        stop_loss_pct = 0.0
+    for r in _iter_fills_ordered():
+        sym = str(r["symbol"])
+        side = str(r["side"]).upper()
+        q = float(r["qty"])
+        px = float(r["price"])
+        if side == "BUY":
+            new_pos = pos[sym] + q
+            avg[sym] = ((avg[sym] * pos[sym]) + (px * q)) / new_pos if new_pos > 0 else 0.0
+            pos[sym] = new_pos
+        else:
+            move_pct = 0.0 if avg[sym] == 0 else (px - avg[sym]) / avg[sym] * 100.0
+            if stop_loss_pct > 0:
+                out[sym] += move_pct / stop_loss_pct
+            pos[sym] = max(0.0, pos[sym] - q)
+            if pos[sym] <= 0:
+                pos[sym] = 0.0
+                avg[sym] = 0.0
+    return {s: float(v) for s, v in out.items()}
+
+
+def recalc_symbol_realized_r() -> None:
+    rr_map = realized_r_per_symbol()
+    with _conn() as c:
+        for sym, val in rr_map.items():
+            c.execute(
+                "INSERT INTO symbol_stats(symbol, realized_r) VALUES(?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET realized_r=excluded.realized_r",
+                (sym, float(val)),
+            )
+
+
+def get_symbol_stats() -> Dict[str, Dict[str, Any]]:
+    with _conn() as c:
+        cur = c.execute("SELECT symbol, last_action, realized_r FROM symbol_stats")
+        rows = cur.fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            out[str(r["symbol"])] = {
+                "last_action": r["last_action"],
+                "realized_r": float(r["realized_r"] or 0.0),
+            }
+        return out
+
+
 # ----- orders/fills recording -----
 
 def record_order(
@@ -277,6 +358,10 @@ def record_fill(
              symbol, side, float(qty), float(price), ts_str),
         )
 
+    try:
+        recalc_symbol_realized_r()
+    except Exception:
+        pass
 
 # ----- NEW: Action log helpers -----
 

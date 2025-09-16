@@ -12,7 +12,13 @@ import yfinance as yf
 
 # Optional durable action log + settings + fills
 try:
-    from core.storage import insert_action_log, get_setting, record_fill  # type: ignore
+    from core.storage import (
+        insert_action_log,
+        get_setting,
+        record_fill,
+        update_symbol_last_action,
+        get_symbol_stats,
+    )  # type: ignore
     _HAS_STORAGE = True
 except Exception:  # pragma: no cover
     _HAS_STORAGE = False
@@ -55,10 +61,24 @@ except Exception:  # pragma: no cover
 
 # Guardrails
 try:
-    from risk.limits import enforce_order_limits  # type: ignore
+    from risk.limits import enforce_order_limits, load_risk_cfg  # type: ignore
+    try:
+        # Internal helpers for consistent trading-hours logic
+        from risk.limits import _is_outside_trading_hours, _within_flatten_window  # type: ignore
+    except Exception:  # pragma: no cover
+        def _is_outside_trading_hours(cfg):  # type: ignore
+            return False
+        def _within_flatten_window(cfg):  # type: ignore
+            return False
 except Exception:  # pragma: no cover
     def enforce_order_limits(**kwargs):  # type: ignore
         return None
+    def load_risk_cfg():  # type: ignore
+        return {}
+    def _is_outside_trading_hours(cfg):  # type: ignore
+        return False
+    def _within_flatten_window(cfg):  # type: ignore
+        return False
 
 
 REJECT_PAUSE_THRESHOLD = 2  # pause Autopilot when continuous rejects reach this
@@ -123,7 +143,10 @@ class AutopilotManager:
         self._task: Optional[asyncio.Task] = None
         self._running: bool = False
         self._lock: asyncio.Lock = asyncio.Lock()
-        self.tick_sec: int = 15
+        try:
+            self.tick_sec: int = int(os.getenv("AUTOPILOT_TICK_SEC", "15") or "15")
+        except Exception:
+            self.tick_sec = 15
         # Adaptive re-weight cadence (sec)
         try:
             self._retune_sec = int(os.getenv("AUTOPILOT_REWEIGHT_SEC", "1800") or "1800")
@@ -133,6 +156,7 @@ class AutopilotManager:
 
         self.last_input: Optional[Dict[str, Any]] = None
         self.last_output: Optional[Dict[str, Any]] = None
+        self.last_notes: Optional[str] = None  # planner notes
         self.last_tick_ts: Optional[str] = None
 
         self.stats: Dict[str, int] = {"ticks": 0, "accepted": 0, "rejected": 0}
@@ -152,6 +176,9 @@ class AutopilotManager:
         self._live_decisions: Dict[str, float] = {}
         # Light memory of recent decisions per symbol for the planner
         self._decision_history: Dict[str, List[Dict[str, Any]]] = {}
+        self._recent_guardrails: List[Dict[str, Any]] = []
+        self._eval_feedback: List[Dict[str, Any]] = []
+        self._last_score_map: Dict[str, Dict[str, Any]] = {}
 
         # Periodic broker deal sync (to keep local mirror authoritative)
         self.deal_sync_sec: int = int(os.getenv("AUTOPILOT_DEALS_SYNC_SEC", "180") or "180")
@@ -162,11 +189,92 @@ class AutopilotManager:
         # Last planner stages for UI diffs
         self._last_proposed: List[Dict[str, Any]] = []
         self._last_evaluated: List[Dict[str, Any]] = []
+        self._last_executed: List[Dict[str, Any]] = []
         # Breadth AD-line (cumulative adv-decl)
         self._ad_line: float = 0.0
         # NBBO spread history from push quotes
         self._nbbo_hist: Dict[str, List[float]] = {}
         self._quotes_subbed: bool = False
+
+        # Preview throttling/cache to avoid spamming GPT on UI refresh
+        self._last_preview_ts: float = 0.0
+        self._last_preview: Optional[Dict[str, Any]] = None
+
+        # Optional fast mode for the continuous loop to reduce load
+        try:
+            self._fast_mode = str(os.getenv("AUTOPILOT_FAST_MODE", "0")).strip().lower() not in ("0","false","no")
+        except Exception:
+            self._fast_mode = False
+
+    def _record_decision(
+        self,
+        sym: str,
+        action: str,
+        side: str,
+        status: str,
+        ts: Optional[str] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        """Store a compact decision event for planner memory/diagnostics."""
+        if not sym:
+            return {}
+        entry_ts = ts or _utcnow_iso()
+        payload: Dict[str, Any] = {
+            "ts": entry_ts,
+            "action": action or "",
+            "side": side or "",
+            "status": status,
+        }
+        for key, val in extra.items():
+            if val is not None:
+                payload[key] = val
+        hist = self._decision_history.setdefault(sym, [])
+        hist.insert(0, payload)
+        if len(hist) > 12:
+            del hist[12:]
+        return payload
+
+    def _record_guardrail(
+        self,
+        sym: str,
+        action: str,
+        side: str,
+        reason: str,
+        **extra: Any,
+    ) -> None:
+        entry = self._record_decision(sym, action, side, "guardrail", reason=reason, **extra)
+        row = dict(entry)
+        row["sym"] = sym
+        self._recent_guardrails.insert(0, row)
+        if len(self._recent_guardrails) > 12:
+            del self._recent_guardrails[12:]
+
+    def _decision_snapshot(self, limit: int = 6) -> Dict[str, List[Dict[str, Any]]]:
+        snap: Dict[str, List[Dict[str, Any]]] = {}
+        for sym, rows in self._decision_history.items():
+            if not rows:
+                continue
+            trimmed: List[Dict[str, Any]] = []
+            for row in rows[:limit]:
+                item: Dict[str, Any] = {"ts": row.get("ts"), "action": row.get("action"), "side": row.get("side"), "status": row.get("status")}
+                for key in ("score", "keep", "threshold", "reason", "reasons", "order_id"):
+                    if key in row and row[key] is not None:
+                        item[key] = row[key]
+                trimmed.append(item)
+            if trimmed:
+                snap[sym] = trimmed
+        return snap
+
+    def _lookup_score(self, sym: str, action: str, side: str) -> Dict[str, Any]:
+        key = f"{sym}|{action}|{side}"
+        alt_key = f"{sym}|{action}|"
+        if key in self._last_score_map:
+            return self._last_score_map[key]
+        if alt_key in self._last_score_map:
+            return self._last_score_map[alt_key]
+        # Fallback: try ignoring side entirely if stored that way
+        base_key = f"{sym}|{action}"
+        return self._last_score_map.get(base_key, {})
 
     async def start(self) -> None:
         async with self._lock:
@@ -211,31 +319,76 @@ class AutopilotManager:
         stats = dict(self.stats)
         stats["uptime"] = _fmt_uptime(up)
         stats["avg_think_ms"] = int(round(self._think_avg_ms))
+        try:
+            recent_snapshot = self._decision_snapshot()
+        except Exception:
+            recent_snapshot = {}
+        try:
+            eval_snapshot = [dict(row) for row in (self._eval_feedback[:12] or [])]
+        except Exception:
+            eval_snapshot = []
+        guardrails_snapshot = list(self._recent_guardrails[:6])
+        try:
+            last_proposed = list(self._last_proposed[:6])
+        except Exception:
+            last_proposed = []
+        try:
+            last_kept = list(self._last_evaluated[:6])
+        except Exception:
+            last_kept = []
         return {
             "on": self._running and self._task is not None and not self._task.done(),
             "last_tick": self.last_tick_ts,
             "last_decision": (self.last_output or {}).get("decisions", [])[:3] if isinstance(self.last_output, dict) else None,
             "stats": stats,
             "reject_streak": self.reject_streak,
+            "recent_decisions_map": recent_snapshot,
+            "eval_feedback": eval_snapshot,
+            "recent_guardrails": guardrails_snapshot,
+            "last_proposed": last_proposed,
+            "last_kept": last_kept,
         }
 
     def get_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         return self._logs[offset : offset + limit]
 
     async def preview(self) -> Dict[str, Any]:
+        """Run a single Sense→Think (no Act) for UI preview with caching and error capture."""
+        # Basic throttle to avoid hitting API rate limits on fast UI refreshes
+        try:
+            min_sec = float(os.getenv("AUTOPILOT_PREVIEW_MIN_SEC", "2.0") or 2.0)
+        except Exception:
+            min_sec = 2.0
+        now = _time.time()
+        if self._last_preview and (now - self._last_preview_ts) < min_sec:
+            return dict(self._last_preview)
+
         # Use fast mode for preview to keep the UI responsive
         ctx = await self._sense(fast=True)
-        out = self._think(ctx)
         ok = True
         err: Optional[str] = None
+        out: Dict[str, Any] | Any = {}
         try:
-            validate_output(out)
+            out = self._think(ctx)
+            try:
+                validate_output(out)
+                self.last_notes = out.get("notes") if isinstance(out, dict) else None
+            except Exception as ve:
+                ok = False
+                err = str(ve)
+                self.last_notes = None
         except Exception as e:
+            # Capture planner exceptions (e.g., rate limit) and return structured error instead of 500
             ok = False
             err = str(e)
+            out = {}
+
         res = {"input": ctx, "raw_output": out, "validation": {"ok": ok, "error": err}}
         self.last_input = ctx
         self.last_output = out
+        # Cache last preview
+        self._last_preview = dict(res)
+        self._last_preview_ts = now
         return res
 
     def _retry(self, fn, name: str, retries: int = 3, delay: float = 0.5):
@@ -287,7 +440,7 @@ class AutopilotManager:
     async def _run(self) -> None:
         while self._running:
             try:
-                ctx = await self._sense()
+                ctx = await self._sense(fast=self._fast_mode)
                 t0 = _time.perf_counter()
                 out = self._think(ctx)
                 dt_ms = ( _time.perf_counter() - t0 ) * 1000.0
@@ -300,6 +453,7 @@ class AutopilotManager:
                     validated: PlannerOutput = validate_output(out)
                     self.stats["accepted"] += 1
                     self.reject_streak = 0
+                    self.last_notes = getattr(validated, "notes", None)
                     # decisions/day counter
                     try:
                         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -335,6 +489,35 @@ class AutopilotManager:
                     except Exception:
                         pass
                     pol = self._derive_policy((ctx.get('style_summary') or ''), (ctx.get('prefs') or {}))
+                    pos_map_now = self._pos_map(ctx)
+
+                    def _infer_side_local(sym: str, action: str, raw_side: Any) -> str:
+                        if raw_side not in (None, ""):
+                            return str(raw_side)
+                        try:
+                            qty_live = float(pos_map_now.get(sym) or 0.0)
+                        except Exception:
+                            qty_live = 0.0
+                        if action in ("close", "trim"):
+                            return "sell" if qty_live > 0 else "buy"
+                        if action == "add":
+                            if qty_live < 0:
+                                return "sell"
+                            if qty_live > 0:
+                                return "buy"
+                        return "buy" if action not in ("close", "trim") else ("sell" if qty_live >= 0 else "buy")
+
+                    for row in proposed:
+                        try:
+                            sym = str(row.get("sym") or "")
+                            if not sym:
+                                continue
+                            action = str(row.get("action") or "open")
+                            side = _infer_side_local(sym, action, row.get("side"))
+                            self._record_decision(sym, action, side, "proposed")
+                        except Exception:
+                            continue
+
                     self._log("planner_proposed", {"n": len(proposed), "policy": pol, "decisions": proposed[:6], "syms": [d.get('sym') for d in proposed]})
                     if _HAS_STORAGE:
                         try:
@@ -343,15 +526,31 @@ class AutopilotManager:
                             pass
 
                     # --- validator: enforce policy ---
-                    pos_map_now = self._pos_map(ctx)
                     vres = self._validate_and_transform(proposed, pol, pos_map_now)
                     final_list = vres.get("decisions") or []
+                    final_list, merge_stats = self._merge_scale_decisions(final_list)
+                    if merge_stats.get("merged"):
+                        self._log("validator_merged", merge_stats)
                     self._log("validator_result", {"n": len(final_list), "transformed": vres.get("transformed",0), "dropped": vres.get("dropped",0)})
                     if _HAS_STORAGE:
                         try:
                             insert_action_log("validator_result", mode="auto", reason="ok", status="ok", extra={"n": len(final_list), "transformed": vres.get("transformed",0), "dropped": vres.get("dropped",0)})
                         except Exception:
                             pass
+
+                    for audit in (vres.get("audit") or []):
+                        try:
+                            sym = str(audit.get("sym") or "")
+                            if not sym:
+                                continue
+                            action = str(audit.get("action") or "")
+                            status = str(audit.get("status") or "")
+                            if not status or status == "kept":
+                                continue
+                            side = _infer_side_local(sym, action, audit.get("side"))
+                            self._record_decision(sym, action, side, status, reason=audit.get("reason"), next_action=audit.get("next_action"))
+                        except Exception:
+                            continue
 
                     # --- evaluator: score and gate low-quality decisions ---
                     eres = self._evaluate(final_list, ctx)
@@ -360,11 +559,42 @@ class AutopilotManager:
                         self._last_evaluated = list(eval_list)
                     except Exception:
                         pass
+                    scores_raw = eres.get("scores") or []
+                    eval_ts = _utcnow_iso()
+                    feedback_rows: List[Dict[str, Any]] = []
+                    score_map: Dict[str, Dict[str, Any]] = {}
+                    for row in scores_raw:
+                        try:
+                            entry = dict(row)
+                            entry.setdefault("ts", eval_ts)
+                            entry.setdefault("threshold", eres.get("threshold"))
+                            sym = str(entry.get("sym") or "")
+                            action = str(entry.get("action") or "")
+                            side = _infer_side_local(sym, action, entry.get("side"))
+                            entry["side"] = side
+                            feedback_rows.append(entry)
+                            if sym:
+                                info = {
+                                    "score": entry.get("score"),
+                                    "keep": entry.get("keep"),
+                                    "threshold": entry.get("threshold"),
+                                    "reasons": entry.get("reasons"),
+                                    "ts": entry.get("ts"),
+                                }
+                                score_map[f"{sym}|{action}|{side}"] = info
+                                score_map.setdefault(f"{sym}|{action}|", info)
+                                score_map.setdefault(f"{sym}|{action}", info)
+                                status = "kept" if entry.get("keep") else "evaluator_dropped"
+                                self._record_decision(sym, action, side, status, ts=entry.get("ts"), score=entry.get("score"), keep=entry.get("keep"), threshold=entry.get("threshold"), reasons=entry.get("reasons"))
+                        except Exception:
+                            continue
+                    self._eval_feedback = feedback_rows[:24]
+                    self._last_score_map = score_map
                     self._log("evaluator_result", {
                         "n": len(eval_list),
                         "dropped": eres.get("dropped",0),
                         "threshold": eres.get("threshold"),
-                        "scores": eres.get("scores",[])[:6],
+                        "scores": feedback_rows[:6],
                         "kept_syms": [d.get('sym') for d in eval_list],
                     })
                     if _HAS_STORAGE:
@@ -393,7 +623,7 @@ class AutopilotManager:
                     pass
 
                 self.last_input = ctx
-                self.last_output = out
+                self.last_output = validated.dict()
                 self.last_tick_ts = _utcnow_iso()
                 self.stats["ticks"] += 1
             except asyncio.CancelledError:
@@ -415,7 +645,7 @@ class AutopilotManager:
         self._log("autopilot_paused", {"reason": reason, "reject_streak": self.reject_streak})
         await self.stop()
 
-    async def _sense(self, fast: bool = False) -> Dict[str, Any]:
+    def _sense_impl(self, fast: bool = False) -> Dict[str, Any]:
         c = self.get_client()
         account: Dict[str, float] = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
         positions_raw: List[Dict[str, Any]] = []
@@ -443,16 +673,25 @@ class AutopilotManager:
                 account = {
                     "equity": float(info.get("equity") or 0.0),
                     "bp": float(info.get("bp") or info.get("buying_power") or 0.0),
+                    "cash": float(info.get("cash") or 0.0),
+                    "unsettled_cash": float(info.get("unsettled_cash") or 0.0),
                     "pnl_today": float(info.get("pnl_day") or info.get("pnl_today") or 0.0),
                 }
             except Exception:
-                account = {"equity": 0.0, "bp": 0.0, "pnl_today": 0.0}
+                account = {"equity": 0.0, "bp": 0.0, "cash": 0.0, "unsettled_cash": 0.0, "pnl_today": 0.0}
             try:
                 broker_positions = c.get_positions() or []
                 if broker_positions:
                     positions_raw = broker_positions
             except Exception:
                 pass
+            # Open orders snapshot (simplified for planner)
+            try:
+                orders_raw = c.get_orders()  # type: ignore[attr-defined]
+            except Exception:
+                orders_raw = []
+        else:
+            orders_raw = []
 
         # Normalize positions
         pos_norm: List[Dict[str, Any]] = []
@@ -463,13 +702,57 @@ class AutopilotManager:
             if sym:
                 pos_norm.append({"sym": sym, "qty": qty, "avg": avg})
 
+        # Normalize open orders (only keep relevant fields)
+        orders_norm: List[Dict[str, Any]] = []
+        pending_summary: Dict[str, Dict[str, float]] = {}
+        bp_reserved_est = 0.0
+        try:
+            for r in orders_raw or []:
+                sym = r.get("code") or r.get("stock_code") or r.get("symbol") or ""
+                if not sym:
+                    continue
+                side = str(r.get("trd_side") or r.get("side") or r.get("order_side") or "").upper()
+                qty = float(r.get("qty") or r.get("order_qty") or r.get("initial_qty") or 0.0)
+                filled = float(r.get("dealt_qty") or r.get("fill_qty") or r.get("filled_qty") or 0.0)
+                price = float(r.get("price") or r.get("order_price") or 0.0)
+                status = str(r.get("order_status") or r.get("status") or "").lower()
+                otype = str(r.get("order_type") or r.get("type") or "").lower()
+                tif = str(r.get("time_in_force") or r.get("tif") or "day").lower()
+                remaining = max(0.0, qty - filled)
+                side_norm = "buy" if "BUY" in side else "sell" if "SELL" in side else None
+                orders_norm.append({
+                    "sym": sym,
+                    "side": side_norm,
+                    "qty": qty,
+                    "filled": filled,
+                    "remaining": remaining,
+                    "price": price,
+                    "status": status,
+                    "order_type": otype,
+                    "tif": tif,
+                })
+                try:
+                    if side_norm and remaining > 0:
+                        entry = pending_summary.setdefault(sym, {})
+                        entry[side_norm] = entry.get(side_norm, 0.0) + remaining
+                    if (side_norm == "buy") and (status in ("open","pending","working","new","accepted")):
+                        if remaining > 0 and price > 0:
+                            bp_reserved_est += remaining * price
+                except Exception:
+                    pass
+        except Exception:
+            orders_norm = []
+            pending_summary = {}
+
         # Risk snapshot
         risk_cfg = self.risk_loader() or {}
         risk: Dict[str, Any] = {
+            "enabled": bool(risk_cfg.get("enabled", True)),
             "max_positions": int(risk_cfg.get("max_open_positions") or 0),
             "max_risk_bps": int(risk_cfg.get("per_trade_max_bps") or 0),
             "max_day_dd_bps": int(risk_cfg.get("max_day_drawdown_bps") or 0),
             "per_symbol_max_bps": int(risk_cfg.get("per_symbol_max_bps") or 0),
+            "max_usd_per_trade": float(risk_cfg.get("max_usd_per_trade") or 0.0),
             "symbol_blocklist": list(risk_cfg.get("symbol_blocklist") or []),
         }
 
@@ -959,10 +1242,11 @@ class AutopilotManager:
             try:
                 sug: Dict[str, Any] = {}
                 if isinstance(prefs, dict):
+                    # Interpret UI values as percentages already (e.g., 0.25 => 0.25%)
                     if float(prefs.get("stop_loss_pct") or 0) > 0:
-                        sug["stop_pct"] = float(prefs.get("stop_loss_pct")) * 100.0
+                        sug["stop_pct"] = float(prefs.get("stop_loss_pct"))
                     if float(prefs.get("take_profit_pct") or 0) > 0:
-                        sug["take_pct"] = float(prefs.get("take_profit_pct")) * 100.0
+                        sug["take_pct"] = float(prefs.get("take_profit_pct"))
                     mm = float(prefs.get("measured_move_atr_mult") or 0)
                     if mm > 0:
                         sug["take_atr_mult"] = mm
@@ -1035,7 +1319,144 @@ class AutopilotManager:
         except Exception:
             pass
 
-        universe_trimmed = universe_sorted[:top_n]
+        # Ensure a minimum share of down-side candidates make it into the GPT set
+        try:
+            short_quota_env = os.getenv("AUTOPILOT_SHORT_QUOTA", None)
+            short_quota = float(short_quota_env) if short_quota_env is not None else 0.33
+            short_quota = max(0.0, min(0.9, short_quota))
+        except Exception:
+            short_quota = 0.33
+
+        def _neg_score(u: Dict[str, Any]) -> float:
+            try:
+                sym = str(u.get("sym") or "")
+                neg_mag = 0.0
+                try:
+                    neg_mag = max(0.0, -float(sig_dir.get(sym) or 0.0))
+                except Exception:
+                    neg_mag = 0.0
+                s = neg_mag * 3.0
+                if str(u.get("trend") or "") == "down":
+                    s += 1.5
+                rsi = float(u.get("rsi") or 50.0)
+                if rsi >= 60:
+                    s += min(1.0, (rsi - 60.0) / 20.0)
+                s += min(1.0, abs(float(u.get("dist_ma50_pct") or 0.0)) / 5.0)
+                return s
+            except Exception:
+                return 0.0
+
+        neg_sorted = sorted(list(universe_sorted), key=_neg_score, reverse=True)
+        k_neg = int(round(top_n * short_quota))
+        k_neg = max(0, min(top_n, k_neg))
+        chosen: list[Dict[str, Any]] = []
+        # take some short candidates first (if available)
+        for u in neg_sorted[:k_neg]:
+            if u not in chosen:
+                chosen.append(u)
+        # fill the rest by overall score
+        for u in universe_sorted:
+            if len(chosen) >= top_n:
+                break
+            if u not in chosen:
+                chosen.append(u)
+        universe_trimmed = chosen[:top_n]
+
+        # Ensure live positions stay in view for lifecycle decisions
+        try:
+            held_syms = {
+                str(p.get("sym") or "")
+                for p in pos_norm
+                if p.get("sym") and abs(float(p.get("qty") or 0.0)) > 0.0
+            }
+        except Exception:
+            held_syms = set()
+        trimmed_syms = {str(u.get("sym") or "") for u in universe_trimmed if u.get("sym")}
+        try:
+            universe_map = {str(u.get("sym") or ""): dict(u) for u in universe if u.get("sym")}
+        except Exception:
+            universe_map = {}
+        for sym in held_syms:
+            if not sym or sym in trimmed_syms:
+                continue
+            base = dict(universe_map.get(sym, {"sym": sym}))
+            base.setdefault("sym", sym)
+            if "px" not in base or not base.get("px"):
+                try:
+                    base["px"] = next(
+                        float(p.get("avg") or 0.0)
+                        for p in pos_norm
+                        if str(p.get("sym") or "") == sym
+                    )
+                except Exception:
+                    base["px"] = 0.0
+            base.setdefault("interest", 0.0)
+            base.setdefault("trend", "unknown")
+            base.setdefault("rank", len(universe_trimmed) + 1)
+            universe_trimmed.append(base)
+            trimmed_syms.add(sym)
+
+        # Keep recently closed symbols visible for potential re-entries
+        recently_closed_entries: List[Dict[str, Any]] = []
+        revisit_syms: set[str] = set()
+        revisit_info: Dict[str, str] = {}
+        try:
+            lookback_min = int(os.getenv("AUTOPILOT_RECENT_CLOSE_MIN", "90") or 90)
+        except Exception:
+            lookback_min = 90
+        lookback_sec = max(900, lookback_min * 60)
+        try:
+            now_utc = datetime.now(timezone.utc)
+            for sym, rows in list(self._decision_history.items()):
+                if not sym or sym in held_syms:
+                    continue
+                for row in rows:
+                    if str(row.get("action") or "") != "close":
+                        continue
+                    status_val = str(row.get("status") or "")
+                    if status_val not in ("executed",):
+                        continue
+                    ts_raw = row.get("ts")
+                    if not ts_raw:
+                        continue
+                    try:
+                        dt_close = datetime.fromisoformat(str(ts_raw))
+                    except Exception:
+                        continue
+                    age_sec = (now_utc - dt_close).total_seconds()
+                    if age_sec <= lookback_sec:
+                        revisit_syms.add(sym)
+                        revisit_info[sym] = str(ts_raw)
+                        break
+        except Exception:
+            revisit_syms = set()
+            revisit_info = {}
+
+        if revisit_syms:
+            for sym in sorted(revisit_syms):
+                if not sym or sym in trimmed_syms:
+                    continue
+                base = dict(universe_map.get(sym, {"sym": sym}))
+                base.setdefault("sym", sym)
+                if "px" not in base or not base.get("px"):
+                    try:
+                        _, _, closes = _fetch_bars(sym, n=5, interval="1d")
+                        if closes:
+                            base["px"] = float(closes[-1])
+                    except Exception:
+                        pass
+                base.setdefault("interest", 0.0)
+                base.setdefault("trend", "unknown")
+                base.setdefault("rank", len(universe_trimmed) + 1)
+                base["_recent_close"] = True
+                universe_trimmed.append(base)
+                trimmed_syms.add(sym)
+        if revisit_info:
+            recently_closed_entries = [
+                {"sym": sym, "closed_at": revisit_info[sym]}
+                for sym in sorted(revisit_info)
+                if revisit_info.get(sym)
+            ]
 
         # ---------- Stage‑1 ranker (deterministic) ----------
         def _near_earn(sym: str) -> bool:
@@ -1061,10 +1482,18 @@ class AutopilotManager:
             try:
                 sym = str(u.get("sym") or "")
                 s += float(u.get("interest") or 0.0) * 0.5
-                s += (2.0 if str(u.get("trend") or "") == "up" else 0.0)
+                # Favor strong trends in either direction to surface short candidates as well
+                tr = str(u.get("trend") or "")
+                if tr in ("up", "down"):
+                    s += 2.0
                 rsi = float(u.get("rsi") or 50.0)
                 s += max(0.0, 20.0 - abs(rsi - 50.0)) / 20.0
-                s += min(2.0, float(sig_strength.get(sym) or 0.0))
+                # Use directional signal magnitude (absolute), not just aggregate strength
+                try:
+                    dir_mag = abs(float(sig_dir.get(sym) or 0.0))
+                except Exception:
+                    dir_mag = float(sig_strength.get(sym) or 0.0)
+                s += min(2.0, dir_mag)
                 if _near_earn(sym):
                     s -= 1.0
                 if not _valuation_ok(sym):
@@ -1401,12 +1830,26 @@ class AutopilotManager:
                                             revs = row.get('epsRevisions')
                                             if isinstance(revs, dict):
                                                 f = fundamentals.setdefault(sym, {})
-                                                # Store revision counts for 7/30/90 days
                                                 for d in (7, 30, 90):
                                                     up = int(revs.get(f'upLast{d}days') or 0)
                                                     down = int(revs.get(f'downLast{d}days') or 0)
                                                     f[f'eps_rev_up_{d}d'] = up
                                                     f[f'eps_rev_down_{d}d'] = down
+                                        except Exception:
+                                            pass
+                                        try:
+                                            trend = row.get('epsTrend')  # pct change
+                                            if isinstance(trend, dict):
+                                                f = fundamentals.setdefault(sym, {})
+                                                curr = float(trend.get('current') or 0.0) or None
+                                                if curr:
+                                                    for d, lbl in ((7, '7daysAgo'), (30, '30daysAgo'), (90, '90daysAgo')):
+                                                        try:
+                                                            prev = float(trend.get(lbl) or 0.0) or None
+                                                        except Exception:
+                                                            prev = None
+                                                        if prev:
+                                                            f[f'eps_rev_pct_{d}d'] = (curr - prev) / abs(prev) * 100.0
                                         except Exception:
                                             pass
                                         # revenueEstimate nested
@@ -1421,12 +1864,24 @@ class AutopilotManager:
                                                     rrevs = revEst.get('revisions') if isinstance(revEst.get('revisions'), dict) else None
                                                     if isinstance(rrevs, dict):
                                                         f = fundamentals.setdefault(sym, {})
-                                                        # Store revision counts for 7/30/90 days
                                                         for d in (7, 30, 90):
                                                             up = int(rrevs.get(f'upLast{d}days') or 0)
                                                             down = int(rrevs.get(f'downLast{d}days') or 0)
                                                             f[f'rev_est_rev_up_{d}d'] = up
                                                             f[f'rev_est_rev_down_{d}d'] = down
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    f = fundamentals.setdefault(sym, {})
+                                                    curr = float(revEst.get('current') or revEst.get('avg') or 0.0) or None  # pct change
+                                                    if curr:
+                                                        for d, lbl in ((7, '7daysAgo'), (30, '30daysAgo'), (90, '90daysAgo')):
+                                                            try:
+                                                                prev = float(revEst.get(lbl) or 0.0) or None
+                                                            except Exception:
+                                                                prev = None
+                                                            if prev:
+                                                                f[f'rev_est_rev_pct_{d}d'] = (curr - prev) / abs(prev) * 100.0
                                                 except Exception:
                                                     pass
                                         except Exception:
@@ -1562,6 +2017,7 @@ class AutopilotManager:
                         except Exception:
                             pass
 
+                        prev = fundamentals.get(sym, {})
                         fundamentals[sym] = {k: v for k, v in {
                             "pe": pe, "market_cap": mcap,
                             "rev_g_yoy": rev_g, "gross_margin": gp_margin, "op_margin": op_margin,
@@ -1577,7 +2033,10 @@ class AutopilotManager:
                             "iv_atm_approx": iv_atm, "iv_days": iv_days, "iv_skew": iv_skew,
                             # volatility proxy from price (fallback)
                             "vol_proxy_atr_pct": float(u.get("atr_pct") or 0.0),
-                            # valuation extras inlined earlier (ev_ebitda, ps_ttm, roic) and ivr_proxy_90/insider_net_shares_90d may be preset in dict
+                            # valuation ratios
+                            "ev_ebitda": prev.get("ev_ebitda"),
+                            "ps_ttm": prev.get("ps_ttm"),
+                            "roic": prev.get("roic"),
                         }.items() if v is not None}
                         # earnings & ex-div dates
                         ed = None; exd = None
@@ -1714,11 +2173,29 @@ class AutopilotManager:
                                 return float(df['Close'].iloc[-1])
                             except Exception:
                                 return 0.0
+                        def cesi(sym: str) -> float:
+                            try:
+                                import requests as _rq, csv as _csv, io as _io
+                                url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+                                r = _rq.get(url, timeout=10)
+                                if r.status_code != 200:
+                                    return 0.0
+                                rows = list(_csv.DictReader(_io.StringIO(r.text)))
+                                if not rows:
+                                    return 0.0
+                                return float(rows[-1].get("Close") or 0.0)
+                            except Exception:
+                                return 0.0
                         macro = {
                             "vix_close": last_close("^VIX"),
                             "dxy_close": last_close("DX-Y.NYB"),  # DXY proxy on Yahoo
                             "us10y_yield": last_close("^TNX") / 10.0 if last_close("^TNX")>0 else 0.0,
                             "spy_close": last_close("SPY"),
+                        }
+                        # Surprise indexes from Stooq
+                        macro["surprise"] = {
+                            "cesi_usd": cesi("cesi.usd"),
+                            "cesi_eur": cesi("cesi.eur"),
                         }
                     except Exception:
                         macro = {}
@@ -1729,8 +2206,9 @@ class AutopilotManager:
             macro = {}
 
         # Build simple portfolio snapshot (exposure & sector concentration)
+        px_map: Dict[str, float] = {}
         try:
-            px_map: Dict[str, float] = {str(u.get("sym")): float(u.get("px") or 0.0) for u in universe if u.get("sym")}
+            px_map = {str(u.get("sym")): float(u.get("px") or 0.0) for u in universe if u.get("sym")}
             total_mv = 0.0
             sector_mv: Dict[str, float] = {}
             # Build returns series for correlation (last 120 closes)
@@ -1887,35 +2365,43 @@ class AutopilotManager:
             conflict_index = {}
             corr_proxy = {}
 
-        # Minimal per-symbol history (last actions) for GPT memory (best-effort)
-        history: Dict[str, list] = {}
+        # Highest-volume option flow per symbol
+        unusual_flow: Dict[str, bool] = {}
+        unusual_strength: Dict[str, float] = {}
+        try:
+            import yfinance as _yf  # type: ignore
+            import pandas as _pd
+            for u in universe_trimmed:
+                sym = str(u.get("sym") or "")
+                if not sym:
+                    continue
+                base = sym.split(".")[-1]
+                try:
+                    tk = _yf.Ticker(base)
+                    exps = tk.options
+                    if not exps:
+                        continue
+                    oc = tk.option_chain(exps[0])
+                    df = _pd.concat([oc.calls[["volume","openInterest"]], oc.puts[["volume","openInterest"]]], ignore_index=True)
+                    df = df.fillna(0)
+                    if df.empty:
+                        continue
+                    df["ratio"] = df["volume"] / df["openInterest"].replace(0, 1)
+                    strength = float(df["ratio"].max())
+                    flag = bool(df["volume"].max() > 5000 or strength >= 5)
+                    unusual_flow[sym] = flag
+                    unusual_strength[sym] = round(strength, 3)
+                except Exception:
+                    continue
+        except Exception:
+            unusual_flow = {}
+            unusual_strength = {}
+
+        # History summary per symbol
+        history: Dict[str, Dict[str, Any]] = {}
         if _HAS_STORAGE:
             try:
-                from core.storage import list_action_logs  # type: ignore
-                rows = list_action_logs(limit=200, symbol=None, since_hours=168)  # last 7 days
-                for r in rows:
-                    try:
-                        sym = str(r.get("symbol") or "")
-                        if not sym:
-                            continue
-                        if str(r.get("action") or "").startswith("autopilot"):
-                            extra = {}
-                            try:
-                                import json as _json
-                                extra = _json.loads(r.get("extra_json") or "{}")
-                            except Exception:
-                                extra = {}
-                            history.setdefault(sym, []).append({
-                                "ts": r.get("ts"),
-                                "reason": r.get("reason"),
-                                "status": r.get("status"),
-                                "extra": {k: extra.get(k) for k in ("conf", "min_conf", "rationale", "rule_checks") if k in extra},
-                            })
-                    except Exception:
-                        continue
-                # trim per-symbol length
-                for k in list(history.keys()):
-                    history[k] = history[k][:8]
+                history = get_symbol_stats()
             except Exception:
                 history = {}
 
@@ -1955,16 +2441,210 @@ class AutopilotManager:
             policy = self._derive_policy(style_summary, prefs)
         except Exception:
             policy = {"reduce_only": False, "long_only": False, "short_only": False, "forbid_new": False}
+        # Market flags from risk config to help GPT avoid impossible opens
+        try:
+            _rcfg = load_risk_cfg()
+        except Exception:
+            _rcfg = {}
+        try:
+            within_hours = not bool(_is_outside_trading_hours(_rcfg))
+        except Exception:
+            within_hours = True
+        try:
+            near_close = bool(_within_flatten_window(_rcfg))
+        except Exception:
+            near_close = False
+        market_flags = {"within_hours": within_hours, "flatten_window": near_close}
+        # Dynamic policy gates: forbid new entries when out of hours, near close, or no open slots
+        try:
+            open_slots = portfolio.get("open_slots")
+        except Exception:
+            open_slots = None
+        try:
+            if (not within_hours) or bool(near_close) or (isinstance(open_slots, int) and open_slots <= 0):
+                policy["forbid_new"] = True
+        except Exception:
+            pass
+        # NL style hints
+        try:
+            style_hints = self._derive_style_hints(style_summary)
+        except Exception:
+            style_hints = {"side_bias": 0}
+        # Side hint per symbol (helps GPT choose SELL vs BUY when signals conflict)
+        side_hint: Dict[str, str] = {}
+        try:
+            for u in universe_trimmed:
+                sym = str(u.get("sym") or "")
+                if not sym:
+                    continue
+                tr = str(u.get("trend") or "")
+                rsi = float(u.get("rsi") or 50.0)
+                dval = float(sig_dir.get(sym) or 0.0)
+                hint = "none"
+                if dval <= -0.2 or (tr == "down" and rsi >= 60):
+                    hint = "sell"
+                elif dval >= 0.2 or (tr == "up" and rsi <= 40):
+                    hint = "buy"
+                side_hint[sym] = hint
+        except Exception:
+            side_hint = {}
+
+        try:
+            px_trim_map = {str(u.get("sym")): float(u.get("px") or 0.0) for u in universe_trimmed if u.get("sym")}
+        except Exception:
+            px_trim_map = {}
+        try:
+            recent_map = self._decision_snapshot()
+        except Exception:
+            recent_map = {}
+        try:
+            eval_feedback_snapshot = [dict(row) for row in (self._eval_feedback[:24] or [])]
+        except Exception:
+            eval_feedback_snapshot = []
+
+        positions_enriched: List[Dict[str, Any]] = []
+        exit_candidates: List[Dict[str, Any]] = []
+        long_count = 0
+        short_count = 0
+        for pos in pos_norm:
+            try:
+                entry = dict(pos)
+                sym = str(entry.get("sym") or "")
+                if not sym:
+                    positions_enriched.append(entry)
+                    continue
+                last_px = 0.0
+                try:
+                    last_px = float(px_trim_map.get(sym) or px_map.get(sym) or 0.0)
+                except Exception:
+                    last_px = 0.0
+                avg_px = float(entry.get("avg") or 0.0)
+                qty_val = float(entry.get("qty") or 0.0)
+                if qty_val > 0:
+                    long_count += 1
+                elif qty_val < 0:
+                    short_count += 1
+                upl = None
+                upl_pct = None
+                if avg_px and last_px and qty_val:
+                    upl = (last_px - avg_px) * qty_val
+                    direction = 1.0 if qty_val > 0 else -1.0
+                    upl_pct = (last_px / avg_px - 1.0) * 100.0 * direction
+                entry["last_px"] = last_px if last_px else None
+                entry["upl"] = round(upl, 2) if upl is not None else 0.0
+                entry["upl_pct"] = round(upl_pct, 2) if upl_pct is not None else 0.0
+                entry["signal_strength"] = float(sig_strength.get(sym) or 0.0)
+                entry["signal_net"] = float(sig_dir.get(sym) or 0.0)
+                entry["conflict_index"] = float(conflict_index.get(sym) or 0.0)
+                entry["news_tone"] = news_tone.get(sym)
+                entry["recent_decisions"] = recent_map.get(sym, [])
+                try:
+                    entry["history"] = (history.get(sym) or {}) if isinstance(history, dict) else {}
+                except Exception:
+                    entry["history"] = {}
+
+                exit_score = 0.0
+                exit_reasons: List[str] = []
+                net_dir = float(sig_dir.get(sym) or 0.0)
+                tone = news_tone.get(sym)
+                cidx = float(conflict_index.get(sym) or 0.0)
+                try:
+                    ev = (events.get(sym) or {}) if isinstance(events, dict) else {}
+                except Exception:
+                    ev = {}
+                near_event = False
+                try:
+                    earn = ev.get("earnings")
+                    if earn:
+                        dt = datetime.fromisoformat(str(earn).split()[0])
+                        near_event = abs((dt - datetime.now()).days) <= 3
+                except Exception:
+                    near_event = False
+                try:
+                    exd = ev.get("ex_div") if isinstance(ev, dict) else None
+                    if exd and not near_event:
+                        dt = datetime.fromisoformat(str(exd).split()[0])
+                        near_event = abs((dt - datetime.now()).days) <= 3
+                except Exception:
+                    pass
+
+                if qty_val > 0 and net_dir < -0.2:
+                    exit_score += min(0.4, abs(net_dir))
+                    exit_reasons.append("signals_bearish")
+                if qty_val < 0 and net_dir > 0.2:
+                    exit_score += min(0.4, abs(net_dir))
+                    exit_reasons.append("signals_bullish")
+                if tone == "bearish" and qty_val > 0:
+                    exit_score += 0.2
+                    exit_reasons.append("bearish_news")
+                if tone == "bullish" and qty_val < 0:
+                    exit_score += 0.2
+                    exit_reasons.append("bullish_news")
+                if cidx >= 0.5:
+                    exit_score += min(0.3, cidx)
+                    exit_reasons.append("conflict_risk")
+                if near_event:
+                    exit_score += 0.2
+                    exit_reasons.append("event_near")
+                if upl_pct is not None:
+                    if upl_pct < -1.5:
+                        exit_score += 0.2
+                        exit_reasons.append("loss_widening")
+                    elif upl_pct > 6.0:
+                        exit_score += 0.1
+                        exit_reasons.append("lock_in_gains")
+
+                exit_score = max(0.0, min(1.0, exit_score))
+                exit_bias = None
+                if exit_score >= 0.6:
+                    exit_bias = "close"
+                elif exit_score >= 0.3:
+                    exit_bias = "trim"
+
+                entry["exit_score"] = round(exit_score, 3)
+                entry["exit_bias"] = exit_bias
+                entry["exit_reasons"] = exit_reasons
+
+                if exit_score >= 0.3:
+                    exit_candidates.append({
+                        "sym": sym,
+                        "exit_score": round(exit_score, 3),
+                        "exit_bias": exit_bias,
+                        "upl_pct": entry.get("upl_pct"),
+                        "signal_net": entry.get("signal_net"),
+                        "reasons": exit_reasons[:3],
+                    })
+                positions_enriched.append(entry)
+            except Exception:
+                positions_enriched.append(pos)
+
+        if exit_candidates:
+            try:
+                exit_candidates.sort(key=lambda x: float(x.get("exit_score") or 0.0), reverse=True)
+            except Exception:
+                pass
+        positions_summary = {
+            "longs": long_count,
+            "shorts": short_count,
+            "needs_attention": sum(1 for c in exit_candidates if c.get("exit_bias") == "close"),
+        }
+
         ctx: Dict[str, Any] = {
             "timestamp": _utcnow_iso(),
             "mode": "auto",
-            "account": account,
+            "account": ({**account, "bp_reserved_est": float(bp_reserved_est)}) if isinstance(account, dict) else account,
             "risk": risk,
-            "positions": pos_norm,
+            "positions": positions_enriched,
+            # Only active orders (open/pending/working) — helps planner avoid duplicates/reserved BP
+            "orders": [o for o in orders_norm if isinstance(o.get("status"), str) and any(k in o["status"] for k in ("open","pending","working","new","accepted"))],
+            "pending_orders_map": pending_summary,
             "universe": universe_trimmed,
             "universe_total": len(universe),
             "style_summary": style_summary,
             "prefs": prefs,
+            "style_hints": style_hints,
+            "market": market_flags,
+            # Planner config: include target horizon if mentioned in NL style summary
             "planner": {"min_confidence": min_conf, "top_n": top_n, "strict_prefs": strict_prefs},
             "strategy_signals": signals[:24],  # cap list length
             "news": news_items,
@@ -1975,6 +2655,7 @@ class AutopilotManager:
             "policy": policy,
             "sig_strength_map": sig_strength,
             "sig_dir_map": sig_dir,
+            "side_hint_map": side_hint,
             "conflict_index": conflict_index,
             "corr_proxy_map": corr_proxy,
             "ivr_map": ivr_map,
@@ -1984,12 +2665,43 @@ class AutopilotManager:
             "corr_portfolio_risk": corr_portfolio_risk,
             "corr_portfolio_risk_20": corr_portfolio_risk_20,
             "corr_portfolio_risk_120": corr_portfolio_risk_120,
+            "unusual_flow_map": unusual_flow,
+            "unusual_flow_strength_map": unusual_strength,
             "portfolio": portfolio,
             "history": history,
             # expose signal weights for explainability
             "signal_weights": signals_weights,
+            "recent_decisions_map": recent_map,
+            "eval_feedback": eval_feedback_snapshot,
+            "recently_closed": recently_closed_entries,
+            "positions_exit_candidates": exit_candidates[:6],
+            "positions_summary": positions_summary,
         }
+        # Parse a simple time-horizon hint from style_summary (e.g., "< 1 hour", "45 minutes")
+        try:
+            import re as _re
+            txt = (style_summary or "").lower()
+            horizon_min = None
+            m = _re.search(r"(\d+(?:\.\d+)?)\s*(?:min|mins|minutes)", txt)
+            if m:
+                horizon_min = float(m.group(1))
+            if horizon_min is None:
+                h = _re.search(r"(\d+(?:\.\d+)?)\s*(?:h|hr|hour|hours)", txt)
+                if h:
+                    horizon_min = float(h.group(1)) * 60.0
+            if horizon_min is None and ("scalp" in txt or "short time" in txt or "short-term" in txt):
+                horizon_min = 60.0
+            if horizon_min is not None:
+                try:
+                    ctx.setdefault("planner", {})["target_horizon_min"] = int(horizon_min)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return ctx
+
+    async def _sense(self, fast: bool = False) -> Dict[str, Any]:
+        return await asyncio.to_thread(self._sense_impl, fast)
 
     def _think(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         out_model = self._planner.plan(ctx)
@@ -2015,38 +2727,222 @@ class AutopilotManager:
             "forbid_new": bool(forbid_new),
         }
 
+    # --- style hints from NL style_summary for GPT ---
+    @staticmethod
+    def _derive_style_hints(style_summary: str) -> Dict[str, Any]:
+        txt = (style_summary or "").lower()
+        def has(*phrases: str) -> bool:
+            return any(p in txt for p in phrases)
+        side_bias = 0
+        if has("prefer sell", "more sells", "short bias", "favor shorts", "sell more"):
+            side_bias = -1
+        elif has("prefer buy", "more buys", "long bias", "favor longs", "buy more"):
+            side_bias = 1
+        approach = None
+        if has("al brooks", "price action", "pa only", "pa-first"):
+            approach = "al_brooks"
+        elif has("trend follow", "trend-follow", "momentum"):
+            approach = "trend_follow"
+        elif has("mean revert", "reversion"):
+            approach = "mean_revert"
+        # simple horizon extraction
+        try:
+            import re as _re
+            horizon_min = None
+            m = _re.search(r"(\d+(?:\.\d+)?)\s*(?:min|mins|minutes)", txt)
+            if m:
+                horizon_min = int(float(m.group(1)))
+            if horizon_min is None:
+                h = _re.search(r"(\d+(?:\.\d+)?)\s*(?:h|hr|hour|hours)", txt)
+                if h:
+                    horizon_min = int(float(h.group(1)) * 60.0)
+        except Exception:
+            horizon_min = None
+        out: Dict[str, Any] = {"side_bias": side_bias}
+        if approach:
+            out["approach"] = approach
+        if horizon_min is not None:
+            out["horizon_min"] = horizon_min
+        return out
+
     # --- validator: enforce policy; transform/drop with audit ---
     @staticmethod
     def _validate_and_transform(decisions: List[Dict[str, Any]], policy: Dict[str, Any], pos_map: Dict[str, float]) -> Dict[str, Any]:
         out: List[Dict[str, Any]] = []
         transformed = 0; dropped = 0
+        audit: List[Dict[str, Any]] = []
+        try:
+            pos_live: Dict[str, float] = {str(k): float(v) for k, v in (pos_map or {}).items()}
+        except Exception:
+            pos_live = {}
+
+        def _virtual_adjust(sym: str, action: str, side: str, node: Dict[str, Any]) -> None:
+            try:
+                size_type = str(node.get("size_type") or "shares")
+                size_value = float(node.get("size_value") or 0.0)
+            except Exception:
+                return
+            if size_type != "shares" or size_value <= 0:
+                return
+            delta = size_value if side == "buy" else -size_value
+            if action in ("close", "trim"):
+                delta = -delta
+            if delta:
+                pos_live[sym] = float(pos_live.get(sym) or 0.0) + float(delta)
+
         for d in decisions:
             try:
                 sym = str(d.get("sym") or d.get("symbol") or "").strip()
                 action = str(d.get("action") or "open")
                 side = str(d.get("side") or ("buy" if action!="close" else "sell"))
+                qty_live = float(pos_live.get(sym) or 0.0)
+                same_dir = (qty_live > 0 and side == "buy") or (qty_live < 0 and side == "sell")
+                if action == "open" and same_dir:
+                    d2 = dict(d)
+                    d2.update({"action": "add"})
+                    rationale = str(d2.get("rationale") or "")
+                    note = "converted_to_add_existing"
+                    if note not in rationale:
+                        d2["rationale"] = f"{rationale} | {note}".strip().strip("|").strip()
+                    out.append(d2)
+                    transformed += 1
+                    audit.append({
+                        "sym": sym,
+                        "action": action,
+                        "side": side,
+                        "status": "validator_transformed",
+                        "reason": "open_to_add_existing",
+                        "next_action": "add",
+                    })
+                    _virtual_adjust(sym, "add", side, d2)
+                    continue
                 entry = str(d.get("entry") or "market")
                 # Policy: reduce-only/forbid-new
                 if policy.get("reduce_only") or policy.get("forbid_new"):
                     if action in ("open","add"):
                         d2 = dict(d); d2.update({"action": "hold", "rationale": (d.get("rationale") or "") + " | policy_reduce_only"})
-                        out.append(d2); transformed += 1; continue
+                        out.append(d2); transformed += 1
+                        audit.append({"sym": sym, "action": action, "side": side, "status": "validator_transformed", "reason": "policy_reduce_only", "next_action": "hold"})
+                        continue
                 # Policy: long-only / short-only for opens
                 if action in ("open","add"):
                     if policy.get("long_only") and side == "sell":
                         d2 = dict(d); d2.update({"action": "hold", "rationale": (d.get("rationale") or "") + " | policy_long_only"})
-                        out.append(d2); transformed += 1; continue
+                        out.append(d2); transformed += 1
+                        audit.append({"sym": sym, "action": action, "side": side, "status": "validator_transformed", "reason": "policy_long_only", "next_action": "hold"})
+                        continue
                     if policy.get("short_only") and side == "buy":
                         d2 = dict(d); d2.update({"action": "hold", "rationale": (d.get("rationale") or "") + " | policy_short_only"})
-                        out.append(d2); transformed += 1; continue
+                        out.append(d2); transformed += 1
+                        audit.append({"sym": sym, "action": action, "side": side, "status": "validator_transformed", "reason": "policy_short_only", "next_action": "hold"})
+                        continue
                 # Close with no position -> drop
                 if action == "close" and abs(float(pos_map.get(sym) or 0.0)) <= 0.0:
-                    dropped += 1; continue
+                    dropped += 1
+                    audit.append({"sym": sym, "action": action, "side": side, "status": "validator_dropped", "reason": "no_position"})
+                    continue
                 # Otherwise accept
                 out.append(d)
+                audit.append({"sym": sym, "action": action, "side": side, "status": "kept"})
+                _virtual_adjust(sym, action, side, d)
             except Exception:
                 out.append(d)
-        return {"decisions": out, "transformed": transformed, "dropped": dropped}
+        return {"decisions": out, "transformed": transformed, "dropped": dropped, "audit": audit}
+
+    @staticmethod
+    def _merge_scale_decisions(decisions: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        index: Dict[tuple, int] = {}
+        merged_count = 0
+        merged_syms: set[str] = set()
+        for d in decisions:
+            if not isinstance(d, dict):
+                merged.append(d)
+                continue
+            try:
+                sym = str(d.get("sym") or "")
+                action = str(d.get("action") or "")
+                side = str(d.get("side") or "")
+                if not sym or action not in ("open", "add") or side not in ("buy", "sell"):
+                    merged.append(d)
+                    continue
+                size_type = str(d.get("size_type") or "shares")
+                entry = str(d.get("entry") or "market")
+                limit_price = d.get("limit_price")
+                tif = str(d.get("time_in_force") or "day")
+                import json as _json
+                stop_key = _json.dumps(d.get("stop"), sort_keys=True) if d.get("stop") else ""
+                take_key = _json.dumps(d.get("take_profit"), sort_keys=True) if d.get("take_profit") else ""
+                key = (
+                    sym,
+                    action,
+                    side,
+                    size_type,
+                    entry,
+                    float(limit_price) if limit_price not in (None, "") else None,
+                    tif,
+                    stop_key,
+                    take_key,
+                )
+                idx = index.get(key)
+                if idx is None:
+                    index[key] = len(merged)
+                    merged.append(dict(d))
+                else:
+                    base = merged[idx]
+                    try:
+                        base["size_value"] = float(base.get("size_value") or 0.0) + float(d.get("size_value") or 0.0)
+                    except Exception:
+                        pass
+                    base_rat = str(base.get("rationale") or "")
+                    new_rat = str(d.get("rationale") or "")
+                    if new_rat:
+                        if base_rat:
+                            if new_rat not in base_rat:
+                                base["rationale"] = f"{base_rat}; {new_rat}"[:480]
+                        else:
+                            base["rationale"] = new_rat
+                    base_alt = list(base.get("alternatives_considered") or [])
+                    for alt in (d.get("alternatives_considered") or []):
+                        if alt and alt not in base_alt:
+                            base_alt.append(alt)
+                    if base_alt:
+                        base["alternatives_considered"] = base_alt[:5]
+                    try:
+                        base_conf = float(base.get("confidence") or 0.0)
+                        new_conf = float(d.get("confidence") or 0.0)
+                        base["confidence"] = max(base_conf, new_conf)
+                    except Exception:
+                        pass
+                    try:
+                        base_exp = float(base.get("expires_sec") or 0.0)
+                        new_exp = float(d.get("expires_sec") or 0.0)
+                        base["expires_sec"] = max(base_exp, new_exp)
+                    except Exception:
+                        pass
+                    base["_merged_count"] = int(base.get("_merged_count") or 1) + 1
+                    merged_count += 1
+                    merged_syms.add(sym)
+            except Exception:
+                merged.append(d)
+                continue
+
+        for row in merged:
+            if isinstance(row, dict) and row.get("_merged_count"):
+                try:
+                    count_val = int(row.pop("_merged_count"))
+                except Exception:
+                    count_val = 2
+                if count_val > 1:
+                    try:
+                        rc = row.setdefault("rule_checks", {})
+                        if isinstance(rc, dict):
+                            rc["merged_decisions"] = count_val
+                    except Exception:
+                        pass
+
+        stats = {"merged": merged_count, "symbols": sorted(merged_syms)}
+        return merged, stats
 
 
     @staticmethod
@@ -2070,6 +2966,14 @@ class AutopilotManager:
         events = ctx.get("events") or {}
         conflict_map = ctx.get("conflict_index") or {}
         portfolio = ctx.get("portfolio") or {}
+        style_hints = ctx.get("style_hints") or {}
+        try:
+            side_bias = int(style_hints.get("side_bias") or 0)
+        except Exception:
+            side_bias = 0
+        market_flags = ctx.get("market") or {}
+        within_hours_flag = bool((market_flags.get("within_hours") if isinstance(market_flags, dict) else False) or False)
+        flatten_window_flag = bool((market_flags.get("flatten_window") if isinstance(market_flags, dict) else False) or False)
         concentration_top = (portfolio.get("concentration_top") or [None, None])[0]
         concentration_pct = float((portfolio.get("concentration_top") or [None, 0])[1] or 0.0)
         open_slots = portfolio.get("open_slots")
@@ -2080,6 +2984,8 @@ class AutopilotManager:
         corrp_risk = ctx.get("corr_portfolio_risk") or {}
         corrp_risk_20 = ctx.get("corr_portfolio_risk_20") or {}
         corrp_risk_120 = ctx.get("corr_portfolio_risk_120") or {}
+        uf_map = ctx.get("unusual_flow_map") or {}
+        uf_strength_map = ctx.get("unusual_flow_strength_map") or {}
         try:
             conc_cap = float(os.getenv("AUTOPILOT_SECTOR_CONC_CAP_PCT", "45") or 45.0)
         except Exception:
@@ -2100,6 +3006,55 @@ class AutopilotManager:
                 pos_map[str(p.get("sym"))] = {"qty": float(p.get("qty") or 0.0), "avg": float(p.get("avg") or 0.0)}
         except Exception:
             pos_map = {}
+        try:
+            pos_meta = {str(p.get("sym")): p for p in (ctx.get("positions") or []) if p.get("sym")}
+        except Exception:
+            pos_meta = {}
+        try:
+            recent_map = ctx.get("recent_decisions_map") or {}
+        except Exception:
+            recent_map = {}
+        eval_prev_map: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            for row in ctx.get("eval_feedback") or []:
+                sym_row = str(row.get("sym") or "")
+                if not sym_row:
+                    continue
+                eval_prev_map.setdefault(sym_row, []).append(row)
+        except Exception:
+            eval_prev_map = {}
+        try:
+            pending_map = ctx.get("pending_orders_map") or {}
+            if pending_map is None:
+                pending_map = {}
+        except Exception:
+            pending_map = {}
+        if not pending_map:
+            try:
+                for order in ctx.get("orders") or []:
+                    sym_o = str(order.get("sym") or "")
+                    side_o = str(order.get("side") or "")
+                    if not sym_o or not side_o:
+                        continue
+                    rem = max(0.0, float(order.get("remaining") or (float(order.get("qty") or 0.0) - float(order.get("filled") or 0.0))))
+                    if rem <= 0:
+                        continue
+                    entry = pending_map.setdefault(sym_o, {})
+                    entry[side_o] = entry.get(side_o, 0.0) + rem
+            except Exception:
+                pending_map = {}
+        try:
+            recently_closed_set = {
+                str(row.get("sym"))
+                for row in (ctx.get("recently_closed") or [])
+                if row and row.get("sym")
+            }
+        except Exception:
+            recently_closed_set = set()
+        try:
+            account_equity = float((ctx.get("account") or {}).get("equity") or 0.0)
+        except Exception:
+            account_equity = 0.0
 
         def near_earn(sym: str) -> bool:
             try:
@@ -2115,7 +3070,8 @@ class AutopilotManager:
         for d in decisions:
             try:
                 sym = str(d.get("sym") or "")
-                side = str(d.get("side") or ("buy" if d.get("action") != "close" else "sell"))
+                action_val = str(d.get("action") or "")
+                side = str(d.get("side") or ("buy" if action_val != "close" else "sell"))
                 sig = float(sig_map.get(sym) or 0.0)
                 net = float(sig_dir.get(sym) or 0.0)
                 pe = float((fundamentals.get(sym) or {}).get("pe") or 0.0)
@@ -2157,19 +3113,45 @@ class AutopilotManager:
                     score -= 0.2
                 if tone == "bullish" and side == "sell":
                     score -= 0.2
+                # Directional alignment with aggregated signals
+                if side == "buy" and net < -0.15:
+                    score -= 0.3
+                if side == "sell" and net > 0.15:
+                    score -= 0.3
+                # Honor side hint when present
+                try:
+                    sh = (ctx.get("side_hint_map") or {}).get(sym)
+                    if sh == "buy" and side == "buy":
+                        score += 0.1
+                    elif sh == "sell" and side == "sell":
+                        score += 0.1
+                    elif sh in ("buy","sell") and side != sh:
+                        score -= 0.2
+                except Exception:
+                    pass
                 if pe and pe >= 80.0 and side == "buy":
                     score -= 0.2
-                if near_earn(sym) and d.get("action") in ("open","add"):
+                if near_earn(sym) and action_val in ("open","add"):
                     score -= 0.25
                 if side == "buy" and rs >= 70:
                     score += 0.1
                 # IV rank: penalize new opens in very high IV environments
                 try:
                     ivr = float(ivr_map.get(sym) or 0.0)
-                    if d.get("action") in ("open","add") and ivr >= 90.0:
+                    if action_val in ("open","add") and ivr >= 90.0:
                         score -= 0.1
                 except Exception:
                     pass
+                # NL side bias: lightly favor the preferred side for opens/adds
+                try:
+                    if action_val in ("open","add"):
+                        if side_bias < 0 and side == "sell":
+                            score += 0.1
+                        elif side_bias > 0 and side == "buy":
+                            score += 0.1
+                except Exception:
+                    pass
+
                 # liquidity guardrails
                 # hard gate: halted
                 gate_reasons = []
@@ -2178,6 +3160,34 @@ class AutopilotManager:
                     halted = bool(next((u.get('halted') for u in (ctx.get('universe') or []) if u.get('sym')==sym), False))
                 except Exception:
                     halted = False
+                pending_block = False
+                pending_partial = False
+                pending_same = 0.0
+                try:
+                    pending_same = float((pending_map.get(sym) or {}).get(side) or 0.0)
+                except Exception:
+                    pending_same = 0.0
+                if action_val in ("open", "add") and pending_same > 0:
+                    try:
+                        desired_qty = AutopilotManager._qty_from_size(d, last_px, account_equity)
+                    except Exception:
+                        desired_qty = 0
+                    if desired_qty <= 0:
+                        try:
+                            desired_qty = float(d.get("size_value") or 0.0)
+                        except Exception:
+                            desired_qty = 0.0
+                    if desired_qty <= 0:
+                        pending_block = True
+                    else:
+                        ratio = pending_same / max(1.0, float(desired_qty))
+                        if ratio >= 0.8:
+                            pending_block = True
+                        else:
+                            pending_partial = True
+                elif action_val in ("close", "trim") and pending_same > 0:
+                    pending_block = True
+
                 if halted:
                     gate_reasons.append("halted")
                     keep = False
@@ -2190,8 +3200,21 @@ class AutopilotManager:
                 if spread is not None and spread > max_spread_env:
                     score -= 0.2
                     gate_reasons.append("wide_spread")
+                if pending_block:
+                    score -= 0.6
+                    gate_reasons.append("pending_order_same_side")
+                elif pending_partial:
+                    score -= 0.3
+                    gate_reasons.append("pending_partial")
+                # Time gating: down‑weight opens when out of hours or near close
+                try:
+                    if action_val in ("open","add") and (not within_hours_flag or flatten_window_flag):
+                        score -= 0.5
+                except Exception:
+                    pass
+
                 # portfolio concentration: penalize adds to top sector when above cap
-                if sec and concentration_top and sec == concentration_top and float(concentration_pct) >= conc_cap and d.get("action") in ("open","add"):
+                if sec and concentration_top and sec == concentration_top and float(concentration_pct) >= conc_cap and action_val in ("open","add"):
                     score -= 0.25
                 # correlation penalty: avoid adds highly aligned with portfolio
                 try:
@@ -2199,7 +3222,7 @@ class AutopilotManager:
                     cp20 = float(corrp_w20.get(sym) or 0.0)
                     cp120 = float(corrp_w120.get(sym) or 0.0)
                     cpr = float(corrp_risk.get(sym) or 0.0)
-                    if d.get("action") in ("open","add"):
+                    if action_val in ("open","add"):
                         if cp >= 0.75:
                             score -= 0.15
                         if cp20 >= 0.85:
@@ -2215,19 +3238,21 @@ class AutopilotManager:
                 if cidx > 0:
                     score -= min(0.35, cidx * 0.35)
                 # no open slots -> penalize new opens
-                if (open_slots is not None) and int(open_slots) <= 0 and d.get("action") == "open":
+                if (open_slots is not None) and int(open_slots) <= 0 and action_val == "open":
                     score -= 0.25
-                # memory: if recent attempts repeatedly failed on this symbol, down-weight opens
+                # memory: penalize symbols with recent negative R on opens
                 try:
-                    hist = (ctx.get("history") or {}).get(sym) or []
-                    fails = sum(1 for h in hist if str(h.get("status") or "").lower() in ("blocked","rejected"))
-                    if d.get("action") == "open" and fails >= 3:
-                        score -= 0.15
+                    stat = (ctx.get("history") or {}).get(sym) or {}
+                    if action_val == "open" and float(stat.get("realized_r") or 0.0) < 0:
+                        if sym not in recently_closed_set:
+                            score -= 0.15
+                        else:
+                            score -= 0.05
                 except Exception:
                     pass
                 # press-winner heuristic for ADD
                 try:
-                    if d.get("action") == "add" and sym in pos_map and last_px>0:
+                    if action_val == "add" and sym in pos_map and last_px>0:
                         q = float(pos_map[sym].get("qty") or 0.0)
                         avg = float(pos_map[sym].get("avg") or 0.0)
                         if q != 0 and avg>0:
@@ -2236,8 +3261,84 @@ class AutopilotManager:
                                 score += 0.1 if pnl_pct > 0 else -0.1
                 except Exception:
                     pass
-                keep = score >= threshold
-                details.append({"sym": sym, "score": round(score,2), "keep": keep, "reasons": gate_reasons})
+                try:
+                    stat = (ctx.get("history") or {}).get(sym) or {}
+                    if action_val == "add" and float(stat.get("realized_r") or 0.0) > 0:
+                        score += 0.1
+                except Exception:
+                    pass
+                try:
+                    pos_info = pos_meta.get(sym) or {}
+                    qty_live = float(pos_info.get("qty") or 0.0)
+                except Exception:
+                    qty_live = 0.0
+                try:
+                    upl_pct_live = float(pos_info.get("upl_pct") or 0.0)
+                except Exception:
+                    upl_pct_live = 0.0
+                if action_val in ("close", "trim"):
+                    if upl_pct_live > 0:
+                        score += 0.05
+                    if upl_pct_live < -2.0:
+                        score += 0.1
+                if action_val == "add":
+                    if upl_pct_live < -1.0:
+                        score -= 0.15
+                    if upl_pct_live > 3.0:
+                        score += 0.05
+                if action_val == "open" and qty_live != 0:
+                    score -= 0.3
+                try:
+                    recents = recent_map.get(sym) or []
+                    for rec in recents:
+                        r_action = str(rec.get("action") or "")
+                        if r_action and r_action != action_val:
+                            continue
+                        r_side = rec.get("side")
+                        if r_side and str(r_side) != side:
+                            continue
+                        status = str(rec.get("status") or "")
+                        if status in ("guardrail", "evaluator_dropped", "validator_dropped", "strict_prefs_missing", "low_confidence", "skip_existing", "idempotent", "planned_no_exec"):
+                            score -= 0.15
+                            gate_reasons.append(f"recent_{status}")
+                            break
+                except Exception:
+                    pass
+                try:
+                    prev_rows = eval_prev_map.get(sym) or []
+                    for prev in prev_rows[:1]:
+                        if not prev:
+                            continue
+                        prev_keep = bool(prev.get("keep"))
+                        prev_score = float(prev.get("score") or 0.0)
+                        if not prev_keep and action_val in ("open", "add"):
+                            score -= 0.1
+                            gate_reasons.append("prev_eval_drop")
+                            break
+                        if prev_keep and prev_score < threshold and action_val in ("open", "add"):
+                            score -= 0.05
+                except Exception:
+                    pass
+                threshold_used = threshold
+                if action_val in ("close", "trim"):
+                    threshold_used = min(threshold, 0.2)
+                elif action_val == "hold":
+                    threshold_used = min(threshold, 0.15)
+                keep = score >= threshold_used
+                if pending_block:
+                    keep = False
+                detail_row = {
+                    "sym": sym,
+                    "action": action_val,
+                    "side": side,
+                    "score": round(score, 2),
+                    "keep": keep,
+                    "reasons": gate_reasons,
+                    "threshold": round(threshold_used, 3),
+                }
+                if pending_same > 0:
+                    detail_row["pending_qty"] = round(pending_same, 2)
+                details.append(detail_row)
                 if keep:
                     d2 = dict(d)
                     d2.setdefault("rule_checks", {})
@@ -2245,7 +3346,7 @@ class AutopilotManager:
                         # policy/strict prefs checks
                         pol = ctx.get("policy") or {}
                         policy_ok = True
-                        if d.get("action") in ("open","add"):
+                        if action_val in ("open","add"):
                             if pol.get("reduce_only") or pol.get("forbid_new"):
                                 policy_ok = False
                             if pol.get("long_only") and side == "sell":
@@ -2253,7 +3354,7 @@ class AutopilotManager:
                             if pol.get("short_only") and side == "buy":
                                 policy_ok = False
                         strict = bool((ctx.get("planner") or {}).get("strict_prefs") or False)
-                        if strict and d.get("action") in ("open","add"):
+                        if strict and action_val in ("open","add"):
                             has_stop = bool(d.get("stop"))
                             has_take = bool(d.get("take_profit"))
                             strict_ok = bool(has_stop and has_take)
@@ -2273,6 +3374,8 @@ class AutopilotManager:
                             liq_ok = False
                         d2["rule_checks"]["liquidity_ok"] = liq_ok
                         d2["rule_checks"]["halted"] = bool(halted)
+                        d2["rule_checks"]["unusual_flow"] = bool(uf_map.get(sym))
+                        d2["rule_checks"]["unusual_flow_strength"] = float(uf_strength_map.get(sym) or 0.0)
                         # options analytics
                         d2["rule_checks"]["iv_rank_pct"] = float(ivr_map.get(sym) or 0.0)
                         try:
@@ -2492,6 +3595,7 @@ class AutopilotManager:
 
         last_prices = self._last_price_map(ctx)
         pos = self._pos_map(ctx)
+        working_pos: Dict[str, float] = dict(pos)
         equity = float((ctx.get("account") or {}).get("equity") or 0.0)
         client = self.get_client()
 
@@ -2501,6 +3605,8 @@ class AutopilotManager:
             return
 
         self._log("planner_decisions", {"n": len(decisions)})
+
+        executed: List[Dict[str, Any]] = []
 
         # Read min_confidence from ctx and refresh from settings (latest wins)
         try:
@@ -2534,13 +3640,21 @@ class AutopilotManager:
 
             side_field = getattr(d, "side", None) or (d.get("side") if isinstance(d, dict) else "buy") or "buy"
             action = getattr(d, "action", None) or (d.get("action") if isinstance(d, dict) else "open") or "open"
+            if _HAS_STORAGE:
+                try:
+                    update_symbol_last_action(str(sym), str(action))
+                except Exception:
+                    pass
 
             if action == "close":
-                cur_qty = float(pos.get(sym) or 0.0)
+                cur_qty = float(working_pos.get(sym) or 0.0)
+                side_close = "sell" if cur_qty >= 0 else "buy"
                 if cur_qty == 0:
                     self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": "close",
                                        "symbol": sym, "side": None, "qty": "", "price": "",
                                        "reason": "no_position_to_close", "status": "skipped"})
+                    meta = self._lookup_score(sym, action, side_close)
+                    self._record_decision(sym, action, side_close, "no_position", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="no_position_to_close")
                     continue
                 side = "sell" if cur_qty > 0 else "buy"
             else:
@@ -2548,7 +3662,7 @@ class AutopilotManager:
 
             # Skip duplicate OPEN when already in that direction (avoid rebuying same symbol)
             try:
-                cur_qty = float(pos.get(sym) or 0.0)
+                cur_qty = float(working_pos.get(sym) or 0.0)
                 if action == "open":
                     if side == "buy" and cur_qty > 0:
                         self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
@@ -2558,6 +3672,8 @@ class AutopilotManager:
                                 insert_action_log("autopilot_act", mode="auto", symbol=sym, side="BUY", reason="skip_existing_long", status="skipped")
                             except Exception:
                                 pass
+                        meta = self._lookup_score(sym, action, side)
+                        self._record_decision(sym, action, side, "skip_existing", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="existing_position")
                         continue
                     if side == "sell" and cur_qty < 0:
                         self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
@@ -2567,6 +3683,8 @@ class AutopilotManager:
                                 insert_action_log("autopilot_act", mode="auto", symbol=sym, side="SELL", reason="skip_existing_short", status="skipped")
                             except Exception:
                                 pass
+                        meta = self._lookup_score(sym, action, side)
+                        self._record_decision(sym, action, side, "skip_existing", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="existing_position")
                         continue
             except Exception:
                 pass
@@ -2583,6 +3701,8 @@ class AutopilotManager:
                 tif_val = getattr(d, "time_in_force", None) or (d.get("time_in_force") if isinstance(d, dict) else "day")
                 return f"{sym}|{action}|{side}|{entry}|{lim}|{st}|{sv}|{tif_val}"
 
+            idem_key: Optional[str] = None
+            exp_ts: float = 0.0
             try:
                 import time as _time
                 idem_key = _idem_key()
@@ -2601,6 +3721,8 @@ class AutopilotManager:
                             insert_action_log("autopilot_act", mode="auto", symbol=sym, side=side.upper(), reason="idempotent_suppress", status="skipped")
                         except Exception:
                             pass
+                    meta = self._lookup_score(sym, action, side)
+                    self._record_decision(sym, action, side, "idempotent", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"))
                     continue
             except Exception:
                 pass
@@ -2632,6 +3754,8 @@ class AutopilotManager:
                                                   extra={"conf": float(conf), "min_conf": float(min_conf)})
                             except Exception:
                                 pass
+                        meta = self._lookup_score(sym, action, side)
+                        self._record_decision(sym, action, side, "low_confidence", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="low_confidence")
                 except Exception:
                     pass
                 continue
@@ -2662,6 +3786,8 @@ class AutopilotManager:
                                               extra={"want_stop": want_stop, "has_stop": has_stop, "want_take": want_take, "has_take": has_take})
                         except Exception:
                             pass
+                    meta = self._lookup_score(sym, action, side)
+                    self._record_decision(sym, action, side, "strict_prefs_missing", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="strict_prefs")
                     continue
 
             # Optional auto-augmentation: if strict_prefs is OFF but prefs specify
@@ -2728,6 +3854,8 @@ class AutopilotManager:
                                           reason="guardrail", status="blocked", extra={"msg": str(e)})
                     except Exception:
                         pass
+                meta = self._lookup_score(sym, action, side)
+                self._record_guardrail(sym, action, side, str(e), score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"))
                 continue
 
             if exec_service is None or OrderSpec is None:
@@ -2736,6 +3864,8 @@ class AutopilotManager:
                                    "symbol": sym, "side": side,
                                    "qty": f"{getattr(d,'size_type','shares') if not isinstance(d, dict) else d.get('size_type','shares')}:{getattr(d,'size_value',0) if not isinstance(d, dict) else d.get('size_value',0)}",
                                    "price": limit_price or "", "reason": "no_execution_service", "status": "planned"})
+                meta = self._lookup_score(sym, action, side)
+                self._record_decision(sym, action, side, "planned_no_exec", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"))
                 continue
 
             tif_val = getattr(d, "time_in_force", None) or (d.get("time_in_force") if isinstance(d, dict) else "day") or "day"
@@ -2758,7 +3888,20 @@ class AutopilotManager:
             )
             order = exec_service.place_order(spec, ctx_exec)
             try:
-                self._live_decisions[idem_key] = exp_ts
+                status_txt = str(order.status.value)
+            except Exception:
+                status_txt = ""
+            if status_txt != "rejected":
+                try:
+                    qty_delta = float(est_qty)
+                except Exception:
+                    qty_delta = 0.0
+                if qty_delta:
+                    delta_signed = qty_delta if side == "buy" else -qty_delta
+                    working_pos[sym] = float(working_pos.get(sym) or 0.0) + delta_signed
+            try:
+                if idem_key is not None and exp_ts > 0:
+                    self._live_decisions[idem_key] = exp_ts
             except Exception:
                 pass
 
@@ -2832,7 +3975,36 @@ class AutopilotManager:
                 except Exception:
                     pass
 
-            # If entry filled immediately and we have augmented/declared stops/takes,
+            order_status = str(order.status.value)
+            status_tag = "executed" if order_status == "filled" else "submitted"
+            meta = self._lookup_score(sym, action, side)
+            self._record_decision(sym, action, side, status_tag, score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), order_id=order.order_id)
+
+            if order_status == "filled":
+                try:
+                    if idem_key is not None:
+                        self._live_decisions.pop(idem_key, None)
+                except Exception:
+                    pass
+
+            prop = d.dict() if hasattr(d, "dict") else (d if isinstance(d, dict) else {})
+            executed.append(prop)
+            self._log("validator_executed", {"proposal": prop, "order_id": order.order_id})
+            if _HAS_STORAGE:
+                try:
+                    insert_action_log(
+                        "validator_executed",
+                        mode="auto",
+                        symbol=sym,
+                        side=side.upper(),
+                        reason="order",
+                        status=str(order.status.value),
+                        extra={"proposal": prop, "order_id": order.order_id},
+                    )
+                except Exception:
+                    pass
+
+            # If entry filled immediately and have augmented or declared stops/takes,
             # place resting protective orders in SIM using stop/limit types.
             try:
                 entry_filled = str(order.status.value) == "filled"
@@ -2930,7 +4102,11 @@ class AutopilotManager:
                 except Exception:
                     pass
 
-        # Try fill any resting limits
+        try:
+            self._last_executed = executed[-24:]
+        except Exception:
+            pass
+
         try:
             if exec_service is not None:
                 exec_service.try_fill_resting(self._last_price_map(ctx))

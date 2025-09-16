@@ -688,13 +688,25 @@ class MoomooClient:
                 return float(default)
             for r in recs:
                 out["equity"] += f(r, "total_assets", "net_assets", "total_asset")
-                out["bp"] += f(r, "power", "buying_power", "available_funds")
+                # Include a wide set of possible keys used across moomoo builds for buying power
+                out["bp"] += f(
+                    r,
+                    "power", "buying_power", "available_funds", "availableBuyingPower",
+                    "buying_power_stk", "overnight_buying_power", "available_buying_power",
+                    "pdt_buying_power", "day_trading_buying_power", "cash_available_for_trade",
+                )
                 cash = f(r, "cash", "cash_usd", "available_cash")
                 unsettled = f(r, "uncleared_cash", "unclearedCash", "unsettled_cash")
                 out["cash"] += cash + unsettled
                 out["unsettled_cash"] += unsettled
             out["raw"] = recs
             # API may omit fields or currencies
+            # Fallback: if bp is missing but cash is present, use cash as a proxy for bp for preview purposes
+            try:
+                if (out.get("bp") or 0.0) <= 0.0 and (out.get("cash") or 0.0) > 0.0:
+                    out["bp"] = float(out.get("cash") or 0.0)
+            except Exception:
+                pass
             return out
 
         errors: List[str] = []

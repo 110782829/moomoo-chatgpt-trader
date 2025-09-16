@@ -1,7 +1,7 @@
 // Desktop UI with connection panel, strategy catalog, status, logs, settings, and activity log.
 // API base comes from VITE_API_BASE (defaults to http://127.0.0.1:8000)
 
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from "react-dom";
 import api, { API_BASE, SEND, GET } from "./api";
 import { SectionCard } from "./components/settings/SettingsLayout";
@@ -11,9 +11,10 @@ import SettingsData from "./components/settings/SettingsData";
 import SettingsSignals from "./components/settings/SettingsSignals";
 import SettingsPlanner from "./components/settings/SettingsPlanner";
 import SettingsTrading from "./components/settings/SettingsTrading";
-import SettingsPreferences from "./components/settings/SettingsPreferences";
 import SettingsWatchlist from "./components/settings/SettingsWatchlist";
 import SettingsNews from "./components/settings/SettingsNews";
+import AssistantChat from "./components/AssistantChat";
+import AssistantMemory from "./components/AssistantMemory";
 
 // ---------- Styles ----------
 const css = `
@@ -163,6 +164,41 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .pref-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px}
 .pref-count{font-size:12px;color:var(--muted);margin-right:auto}
 
+.report-hero{display:grid;grid-template-columns:2fr 1fr;gap:8px}
+@media (max-width:980px){.report-hero{grid-template-columns:1fr}}
+.report-chart{margin-top:10px}
+.report-chart svg{display:block}
+.chart-axis{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px}
+.chart-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:12px}
+.stat-pill{display:flex;flex-direction:column;gap:4px;padding:10px;border:1px solid var(--border);border-radius:10px;background:#0f1420}
+.stat-pill .label{font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0}
+.stat-pill .value{font-size:16px;font-weight:600;white-space:nowrap}
+.report-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
+.funnel-list{display:grid;gap:8px;margin-top:12px}
+.funnel-row{display:flex;align-items:center;gap:10px}
+.funnel-row .label-text{flex:1;color:var(--muted);font-size:13px}
+.funnel-bar{flex:2;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden}
+.funnel-bar .fill{height:100%}
+.funnel-row .value{width:70px;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.funnel-row .pct{width:56px;text-align:right;font-size:12px;color:var(--muted)}
+.strategy-list{display:grid;gap:8px;margin-top:10px}
+.strategy-row{display:flex;align-items:center;gap:10px}
+.strategy-row .name{flex:1;color:var(--muted);font-size:13px}
+.strategy-row .bar{flex:2;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden}
+.strategy-row .bar span{display:block;height:100%;background:linear-gradient(90deg, rgba(124,58,237,.6), rgba(6,182,212,.5))}
+.strategy-row .val{width:60px;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.symbol-list{display:grid;gap:8px;margin-top:12px}
+.symbol-row{display:flex;align-items:center;gap:10px}
+.symbol-row .sym{min-width:68px;font-weight:600}
+.symbol-row .sym small{display:block;font-size:11px;color:var(--muted);font-weight:400}
+.symbol-row .bar{flex:1;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden;position:relative}
+.symbol-row .bar span{display:block;height:100%;background:linear-gradient(90deg, rgba(34,197,94,.55), rgba(56,189,248,.45))}
+.symbol-row .numbers{width:116px;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.report-table{display:grid;gap:6px;margin-top:12px}
+.report-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:#0f1420;font-variant-numeric:tabular-nums}
+.report-row .date{font-size:13px;color:var(--muted)}
+.report-row .pnl{font-size:14px;font-weight:600}
+
 .indicator{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid var(--border);background:#0e1320}
 .dot{width:8px;height:8px;border-radius:50%}
 .dot.green{background:var(--green)} .dot.red{background:var(--red)}
@@ -202,6 +238,31 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
     radial-gradient(1000px 500px at 100% 0%, rgba(34,211,238,.10), transparent 60%);
 
 }
+
+/* --- Assistant chat styles --- */
+.chatbox{display:grid;grid-template-rows:1fr auto;gap:8px;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px}
+.chat-list{overflow:auto;height:520px;display:flex;flex-direction:column;gap:10px;padding:4px}
+.msg{display:flex}
+.msg.user{justify-content:flex-end}
+.msg.assistant{justify-content:flex-start}
+.bubble-block{display:flex;flex-direction:column;max-width:72%}
+.msg.user .bubble-block{max-width:88%; min-width:40%; align-items:flex-end}
+.bubble{max-width:72%;padding:10px 12px;border-radius:12px;border:1px solid var(--border);background:#0f1420;box-shadow:0 6px 24px rgba(0,0,0,.2)}
+.label-row{display:flex;gap:8px;align-items:center;margin:6px 0 0 0;color:#a3e635;font-size:12px}
+.label-row .icon{width:14px;height:14px}
+.assistant .bubble{background:linear-gradient(180deg, rgba(124,58,237,.18), rgba(6,182,212,.12));border-color:rgba(124,58,237,.35)}
+.user .bubble{background:linear-gradient(180deg, rgba(15,23,42,.9), rgba(15,23,42,.7));}
+.bubble .role{font-size:12px;color:var(--muted);margin-bottom:4px}
+.bubble .text{white-space:pre-wrap;line-height:1.5}
+.bubble .saved{margin-top:6px;font-size:12px;color:#a3e635;opacity:.9;display:flex;align-items:center;gap:6px}
+.bubble .saved svg{width:14px;height:14px;display:block}
+.inner-card{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px}
+.inner-card.editing{border-color:rgba(124,58,237,.6); box-shadow: inset 0 0 0 1px rgba(124,58,237,.35), 0 0 0 2px rgba(124,58,237,.15)}
+.style-block{white-space:pre-wrap;background:transparent;padding:0;border:none;outline:none;margin:0;height:280px;overflow-y:auto;font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 14px; line-height: 1.6}
+.editable-content{white-space:pre-wrap;background:transparent;padding:0;border:none;outline:none;margin:0;height:280px;overflow-y:auto;caret-color:#e5e7eb;font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 14px; line-height: 1.6}
+.typing{opacity:.7;font-size:12px}
+.chat-input{display:flex;gap:8px;align-items:flex-end}
+.chat-input .input{height:74px}
   
   .health { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"top metrics"; gap:12px 18px; align-items:start; }
 .health .health-top { grid-area:top; display:flex; align-items:center; gap:8px; margin-top:6px; }
@@ -447,7 +508,7 @@ function useToast() {
 }
 
 // ---------- App ----------
-enum Tab { Settings=0, Status=1, Activity=2, Reports=3 }
+enum Tab { Settings=0, Status=1, Activity=2, Reports=3, Assistant=4 }
 
 export default function App() {
   const toast = useToast();
@@ -485,6 +546,7 @@ export default function App() {
   const [statusEvery, setStatusEvery] = useLocalStorage("status.ms", 5000);
   const [statusAt, setStatusAt] = useState<string>("—");
   const [weekly, setWeekly] = useState<any|null>(null);
+  const [pnlSeries, setPnlSeries] = useState<Array<{ date: string; realized_pnl: number }>>([]);
   const [lastDiff, setLastDiff] = useState<any|null>(null);
 
   // logs
@@ -812,6 +874,7 @@ async function refreshAutoStatus() {
     setAutoStatus(st || null);
     setAutoAt(nowIso());
     try { const wk = await api.autopilotWeekly(); setWeekly(wk || null); } catch {}
+    try { const ps = await api.getPnlSeries(30); setPnlSeries((ps as any)?.series || []); } catch {}
     try { const df = await api.autopilotLastDiff(); setLastDiff(df || null); } catch {}
   } catch (e:any) {
     // silent
@@ -855,6 +918,123 @@ async function openExplain(r:any) {
     setExplainData({ row: r });
   }
 }
+
+function formatUsd(value: number | null | undefined, digits = 2) {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const v = Number(value);
+  const abs = Math.abs(v);
+  const opts: Intl.NumberFormatOptions = digits > 0
+    ? { minimumFractionDigits: digits, maximumFractionDigits: digits }
+    : { minimumFractionDigits: 0, maximumFractionDigits: 0 };
+  const formatted = abs.toLocaleString(undefined, opts);
+  return `${v >= 0 ? "+" : "-"}$${formatted}`;
+}
+
+function formatPct(value: number | null | undefined, digits = 1) {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  return `${Number(value).toFixed(digits)}%`;
+}
+
+function shortDateLabel(iso?: string) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch {
+    return iso;
+  }
+}
+  // ---------- Derived (reports) ----------
+  const pnlData = Array.isArray(pnlSeries) ? pnlSeries : [];
+  const pnlLast7 = pnlData.slice(-7);
+  const pnlTotal7 = pnlLast7.reduce((sum, row) => sum + Number(row?.realized_pnl ?? 0), 0);
+  const bestDay = pnlLast7.reduce<{ date?: string; value: number } | null>((acc, row) => {
+    const val = Number(row?.realized_pnl ?? 0);
+    if (!acc || val > acc.value) return { date: row?.date, value: val };
+    return acc;
+  }, null);
+  const worstDay = pnlLast7.reduce<{ date?: string; value: number } | null>((acc, row) => {
+    const val = Number(row?.realized_pnl ?? 0);
+    if (!acc || val < acc.value) return { date: row?.date, value: val };
+    return acc;
+  }, null);
+  const greenDays = pnlLast7.filter(row => Number(row?.realized_pnl ?? 0) >= 0).length;
+  const chartStart = pnlLast7[0]?.date;
+  const chartEnd = pnlLast7[pnlLast7.length - 1]?.date;
+
+  const weeklyPerf = (weekly as any)?.performance_7d || {};
+  const weeklyPnl = weeklyPerf?.realized_pnl != null ? Number(weeklyPerf.realized_pnl) : null;
+  const weeklyTrades = weeklyPerf?.trades != null ? Number(weeklyPerf.trades) : null;
+  const weeklyWins = weeklyPerf?.wins != null ? Number(weeklyPerf.wins) : null;
+  const weeklyLosses = weeklyPerf?.losses != null ? Number(weeklyPerf.losses) : null;
+  const weeklyAvgMove = weeklyPerf?.avg_realized_move_pct != null ? Number(weeklyPerf.avg_realized_move_pct) : null;
+  const weeklyMaxDD = weeklyPerf?.max_dd != null ? Number(weeklyPerf.max_dd) : null;
+  const reweights = (weekly as any)?.auto_weight_adjustments != null ? Number((weekly as any).auto_weight_adjustments) : null;
+
+  const dropped = (weekly as any)?.dropped || {};
+  const proposedTotal = dropped?.proposed_total != null ? Number(dropped.proposed_total) : 0;
+  const validatorDrops = dropped?.validator_dropped != null ? Number(dropped.validator_dropped) : 0;
+  const evaluatorDrops = dropped?.evaluator_dropped != null ? Number(dropped.evaluator_dropped) : 0;
+  const droppedPct = dropped?.pct_dropped_validator != null
+    ? Number(dropped.pct_dropped_validator)
+    : (proposedTotal ? Math.round((validatorDrops / proposedTotal) * 1000) / 10 : null);
+
+  const missedRules = (weekly as any)?.missed_rules || {};
+  const plannerInvalid = missedRules?.planner_invalid_json != null ? Number(missedRules.planner_invalid_json) : 0;
+  const guardrailCount = missedRules?.guardrails != null ? Number(missedRules.guardrails) : 0;
+
+  const executedCounts: Record<string, number> = (weekly as any)?.executed_counts || {};
+  const proposedCounts: Record<string, number> = (weekly as any)?.proposed_counts || {};
+  const executedTotal = Object.values(executedCounts).reduce((sum, val) => sum + Number(val ?? 0), 0);
+
+  const funnelRows = [
+    { key: "proposed", label: "Proposed", value: proposedTotal, pct: proposedTotal ? 100 : 0 },
+    { key: "executed", label: "Executed", value: executedTotal, pct: proposedTotal ? (executedTotal / proposedTotal) * 100 : 0 },
+    { key: "validator", label: "Validator drops", value: validatorDrops, pct: proposedTotal ? (validatorDrops / proposedTotal) * 100 : 0 },
+    { key: "evaluator", label: "Evaluator drops", value: evaluatorDrops, pct: proposedTotal ? (evaluatorDrops / proposedTotal) * 100 : 0 },
+  ];
+  const funnelBase = Math.max(proposedTotal, executedTotal, validatorDrops, evaluatorDrops, 1);
+  const funnelColors: Record<string, string> = {
+    proposed: "linear-gradient(90deg, rgba(124,58,237,.55), rgba(6,182,212,.55))",
+    executed: "linear-gradient(90deg, rgba(34,197,94,.55), rgba(16,185,129,.4))",
+    validator: "linear-gradient(90deg, rgba(239,68,68,.55), rgba(248,113,113,.4))",
+    evaluator: "linear-gradient(90deg, rgba(245,158,11,.55), rgba(250,204,21,.45))",
+  };
+
+  const attribution: Record<string, number> = (weekly as any)?.attribution || {};
+  const attrEntries = Object.entries(attribution)
+    .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))
+    .slice(0, 8);
+  const attrMax = attrEntries.reduce((mx, [, val]) => Math.max(mx, Number(val ?? 0)), 0);
+
+  const symbolUniverse = Array.from(new Set([...Object.keys(proposedCounts), ...Object.keys(executedCounts)]));
+  const symbolRows = symbolUniverse
+    .sort((a, b) => Number(proposedCounts[b] ?? 0) - Number(proposedCounts[a] ?? 0))
+    .slice(0, 6)
+    .map(sym => {
+      const proposed = Number(proposedCounts[sym] ?? 0);
+      const executed = Number(executedCounts[sym] ?? 0);
+      const pct = proposed ? Math.min(100, (executed / proposed) * 100) : (executed > 0 ? 100 : 0);
+      return { sym, proposed, executed, pct };
+    });
+
+  const decisionReasons: Record<string, string[]> = (weekly as any)?.decision_reasons || {};
+  const reasonCounts: Record<string, number> = {};
+  Object.values(decisionReasons).forEach(list => {
+    if (Array.isArray(list)) {
+      list.forEach(reason => {
+        const key = String(reason || "").trim();
+        if (key) reasonCounts[key] = (reasonCounts[key] || 0) + 1;
+      });
+    }
+  });
+  const reasonEntries = Object.entries(reasonCounts)
+    .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))
+    .slice(0, 6);
+
+  const dailyRows = pnlLast7.slice().reverse();
+
 // ---------- Render ----------
   return (
     <div className="app">
@@ -900,7 +1080,7 @@ async function openExplain(r:any) {
       </header>
 
       <nav className="tabs">
-        {["Settings","Bot Status","Activity Log","Reports"].map((t,i)=>(
+        {["Settings","Bot Status","Activity Log","Reports","Assistant"].map((t,i)=>(
           <button key={t} className={`tab ${tab===i?'active':''}`} onClick={()=>setTab(i as Tab)}>{t}</button>
         ))}
       </nav>
@@ -954,8 +1134,8 @@ async function openExplain(r:any) {
             <SettingsTrading />
           </SectionCard>
 
-          <SectionCard id="preferences" title="Preferences">
-            <SettingsPreferences toast={toast} />
+          <SectionCard id="preferences" title="Preferences & Memory">
+            <AssistantMemory />
           </SectionCard>
         </div>
       )}
@@ -1254,67 +1434,255 @@ async function openExplain(r:any) {
       {/* Reports tab */}
       {tab===Tab.Reports && (
         <section className="stack">
-          <div className="grid-3">
-            <div className="card" style={{gridColumn:"span 3"}}>
-              <h3>Weekly Report</h3>
-              {weekly ? (
-                <div className="row" style={{flexWrap:"wrap", gap:12}}>
-                  <span className="badge">trades {weekly?.performance_7d?.trades ?? "—"}</span>
-                  <span className="badge">win {weekly?.performance_7d?.win_rate_pct ?? "—"}%</span>
-                  <span className="badge">avg R {weekly?.performance_7d?.avg_rr ?? "—"}</span>
-                  <span className="badge">max DD {weekly?.performance_7d?.max_dd ?? "—"}%</span>
-                  <span className="badge">reweights {weekly?.auto_weight_adjustments ?? 0}</span>
-                  <span className="badge">validator drop {weekly?.dropped?.validator_dropped ?? 0}</span>
-                  <span className="badge">evaluator drop {weekly?.dropped?.evaluator_dropped ?? 0}</span>
-                  {(() => {
-                    const at = weekly?.attribution || {}; const keys = Object.keys(at);
-                    if (!keys.length) return null;
-                    return <span className="badge" title="Top strategies">{keys.slice(0,6).map(k=>`${k}:${(at[k]||0).toFixed?.(2) ?? at[k]}`).join(" ")}</span>;
-                  })()}
+          <div className="report-hero">
+            <div className="card card-lg">
+              <h3>Realized PnL (7d)</h3>
+              {pnlLast7.length ? (() => {
+                const series = pnlLast7;
+                const W = 720; const H = 200; const P = 30;
+                const xs = series.map((_, i) => i);
+                const ys = series.map(r => Number(r?.realized_pnl ?? 0));
+                const minY = Math.min(0, ...ys);
+                const maxY = Math.max(0, ...ys);
+                const spanY = (maxY - minY) || 1;
+                const spanX = Math.max(1, xs[xs.length - 1] - xs[0]);
+                const getX = series.length === 1
+                  ? () => W / 2
+                  : (x: number) => P + (x - xs[0]) / spanX * (W - 2 * P);
+                const getY = (y: number) => H - P - (y - minY) / spanY * (H - 2 * P);
+                let linePath = '';
+                series.forEach((row, idx) => {
+                  const X = getX(xs[idx]);
+                  const Y = getY(ys[idx]);
+                  linePath += (idx === 0 ? `M ${X} ${Y}` : ` L ${X} ${Y}`);
+                });
+                const zeroY = getY(0);
+                let areaPath = '';
+                if (series.length > 1) {
+                  areaPath = `M ${getX(xs[0])} ${zeroY}`;
+                  series.forEach((row, idx) => {
+                    const X = getX(xs[idx]);
+                    const Y = getY(ys[idx]);
+                    areaPath += ` L ${X} ${Y}`;
+                  });
+                  areaPath += ` L ${getX(xs[xs.length - 1])} ${zeroY} Z`;
+                }
+                return (
+                  <div className="report-chart">
+                    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:'#0f1420', border:'1px solid var(--border)', borderRadius:10}}>
+                      <defs>
+                        <linearGradient id="pnlLine" x1="0" y1="0" x2="1" y2="0">
+                          <stop offset="0%" stopColor="rgba(124,58,237,1)"/>
+                          <stop offset="100%" stopColor="rgba(6,182,212,1)"/>
+                        </linearGradient>
+                        <linearGradient id="pnlArea" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="rgba(124,58,237,0.45)"/>
+                          <stop offset="100%" stopColor="rgba(6,182,212,0.05)"/>
+                        </linearGradient>
+                      </defs>
+                      <path d={`M ${P} ${zeroY} L ${W-P} ${zeroY}`} stroke="rgba(148,163,184,.35)" strokeWidth="1" strokeDasharray="4 6" fill="none"/>
+                      {areaPath ? <path d={areaPath} fill="url(#pnlArea)" stroke="none"/> : null}
+                      <path d={linePath} stroke="url(#pnlLine)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                      {series.map((row, idx) => {
+                        const X = getX(xs[idx]);
+                        const Y = getY(ys[idx]);
+                        const positive = ys[idx] >= 0;
+                        return <circle key={row?.date || idx} cx={X} cy={Y} r={3.2} fill={positive ? 'var(--green)' : 'var(--red)'} stroke="#0f1420" strokeWidth="1.4"/>;
+                      })}
+                    </svg>
+                    <div className="chart-axis">
+                      <span>{shortDateLabel(chartStart)}</span>
+                      <span>{shortDateLabel(chartEnd)}</span>
+                    </div>
+                  </div>
+                );
+              })() : <div className="help">No realized PnL tracked for the past week.</div>}
+              <div className="chart-meta">
+                <div className="stat-pill">
+                  <span className="label">Total</span>
+                  <span className="value" style={{color: pnlTotal7 >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(pnlTotal7)}</span>
                 </div>
-              ) : <div className="help">No weekly data</div>}
+                <div className="stat-pill">
+                  <span className="label">Best day</span>
+                  {bestDay ? (
+                    <>
+                      <span className="value" style={{color: bestDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(bestDay.value)}</span>
+                      <span className="help">{shortDateLabel(bestDay.date)}</span>
+                    </>
+                  ) : <span className="value">—</span>}
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Worst day</span>
+                  {worstDay ? (
+                    <>
+                      <span className="value" style={{color: worstDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(worstDay.value)}</span>
+                      <span className="help">{shortDateLabel(worstDay.date)}</span>
+                    </>
+                  ) : <span className="value">—</span>}
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Green days</span>
+                  <span className="value">{pnlLast7.length ? `${greenDays}/${pnlLast7.length}` : '—'}</span>
+                  {pnlLast7.length ? <span className="help">{formatPct((greenDays / pnlLast7.length) * 100, (greenDays === pnlLast7.length || greenDays === 0) ? 0 : 1)}</span> : null}
+                </div>
+              </div>
             </div>
+            <div className="card card-lg">
+              <h3>Weekly Snapshot</h3>
+              <div className="report-stats">
+                <div className="stat-pill">
+                  <span className="label">7d realized PnL</span>
+                  <span className="value" style={{color: (weeklyPnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{weeklyPnl==null ? '—' : formatUsd(weeklyPnl)}</span>
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Trades</span>
+                  <span className="value">{weeklyTrades==null ? '—' : weeklyTrades.toLocaleString()}</span>
+                  {(weeklyWins!=null || weeklyLosses!=null) ? <span className="help">W {weeklyWins ?? 0} / L {weeklyLosses ?? 0}</span> : null}
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Max drawdown</span>
+                  <span className="value">{weeklyMaxDD==null ? '—' : formatPct(weeklyMaxDD, 1)}</span>
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Avg move</span>
+                  <span className="value">{weeklyAvgMove==null ? '—' : formatPct(weeklyAvgMove, 1)}</span>
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Auto reweights</span>
+                  <span className="value">{reweights==null ? '—' : reweights.toLocaleString()}</span>
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Validator drop rate</span>
+                  <span className="value">{droppedPct==null ? '—' : formatPct(droppedPct, droppedPct >= 10 ? 0 : 1)}</span>
+                  {proposedTotal ? <span className="help">{validatorDrops.toLocaleString()} / {proposedTotal.toLocaleString()}</span> : null}
+                </div>
+                <div className="stat-pill">
+                  <span className="label">Planner errors</span>
+                  <span className="value">{plannerInvalid.toLocaleString()}</span>
+                  <span className="help">Guardrails {guardrailCount.toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
+          </div>
 
-            <div className="card" style={{gridColumn:"span 3"}}>
-              <h3>Plan Diff (Proposed → Kept → Orders)</h3>
-              {(() => {
-                const prop = (lastDiff?.proposed||[]).map((d:any)=>d.sym).filter(Boolean);
-                const kept = (lastDiff?.kept||[]).map((d:any)=>d.sym).filter(Boolean);
-                const ordSyms = (orders||[]).map((o:any)=>o.symbol).filter(Boolean);
-                return (
-                  <div className="row" style={{gap:8, flexWrap:"wrap"}}>
-                    <span className="badge">proposed {prop.length}</span>
-                    <span className="badge">kept {kept.length}</span>
-                    <span className="badge">orders {ordSyms.length}</span>
-                    {prop.length>0 && <span className="badge" title="proposed syms">{prop.slice(0,8).join(", ")}</span>}
-                    {kept.length>0 && <span className="badge" title="kept syms">{kept.slice(0,8).join(", ")}</span>}
-                  </div>
-                );
-              })()}
+          <div className="grid-2">
+            <div className="card card-lg">
+              <h3>Execution Funnel (7d)</h3>
+              {(proposedTotal || executedTotal || validatorDrops || evaluatorDrops) ? (
+                <div className="funnel-list">
+                  {funnelRows.map(row => {
+                    const width = row.value > 0 ? Math.max(6, Math.round((row.value / funnelBase) * 100)) : 0;
+                    const pctLabel = row.key === 'proposed' ? '100%' : (proposedTotal ? formatPct(row.pct, row.pct >= 10 ? 0 : 1) : '—');
+                    return (
+                      <div key={row.key} className="funnel-row">
+                        <span className="label-text">{row.label}</span>
+                        <div className="funnel-bar">
+                          {width ? <span className="fill" style={{width:`${Math.min(100, width)}%`, background:funnelColors[row.key] || funnelColors.proposed}}/> : null}
+                        </div>
+                        <span className="value">{row.value.toLocaleString()}</span>
+                        <span className="pct">{pctLabel}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="help">No planner activity captured over the past week.</div>
+              )}
             </div>
+            <div className="card card-lg">
+              <h3>Strategy Attribution (7d)</h3>
+              {attrEntries.length ? (
+                <div className="strategy-list">
+                  {attrEntries.map(([name, val]) => {
+                    const value = Number(val ?? 0);
+                    const width = attrMax > 0 ? Math.max(6, Math.round((value / attrMax) * 100)) : 0;
+                    return (
+                      <div key={name} className="strategy-row">
+                        <span className="name">{name}</span>
+                        <div className="bar"><span style={{width:`${Math.min(100, width)}%`}}/></div>
+                        <span className="val">{value.toFixed(2)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="help">No strategy attribution captured for the past week.</div>
+              )}
+            </div>
+          </div>
 
-            <div className="card" style={{gridColumn:"span 3"}}>
-              <h3>Proposed vs Executed (7d)</h3>
-              {(() => {
-                const pc = weekly?.proposed_counts || {};
-                const ec = weekly?.executed_counts || {};
-                const dr = weekly?.decision_reasons || {};
-                const syms = Array.from(new Set([...Object.keys(pc), ...Object.keys(ec)])).slice(0,20);
-                if (!syms.length) return <div className="help">No data</div>;
-                return (
-                  <div className="table-wrap">
-                    <table className="table-modern">
-                      <thead><tr><th>Symbol</th><th className="num">Proposed</th><th className="num">Executed</th><th>Reasons</th></tr></thead>
-                      <tbody>
-                        {syms.map(s => (
-                          <tr key={s}><td>{s}</td><td className="num">{pc[s]||0}</td><td className="num">{ec[s]||0}</td><td>{(dr[s]||[]).slice(0,3).join(', ')}</td></tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })()}
+          <div className="grid-2">
+            <div className="card card-lg">
+              <h3>Symbol Follow-through (7d)</h3>
+              {symbolRows.length ? (
+                <div className="symbol-list">
+                  {symbolRows.map(row => {
+                    const width = row.proposed > 0 ? Math.max(6, Math.round((row.executed / row.proposed) * 100)) : (row.executed > 0 ? 100 : 0);
+                    return (
+                      <div key={row.sym} className="symbol-row">
+                        <div className="sym">{row.sym}<small>{row.proposed ? `${row.proposed.toLocaleString()} proposed` : 'No proposals'}</small></div>
+                        <div className="bar">{width ? <span style={{width:`${Math.min(100, width)}%`}}/> : null}</div>
+                        <div className="numbers">
+                          <span>{row.executed.toLocaleString()} filled</span>
+                          {row.proposed ? <span>{formatPct(row.pct, row.pct >= 10 ? 0 : 1)}</span> : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="help">No planner proposals recorded in the past week.</div>
+              )}
             </div>
+            <div className="card card-lg">
+              <h3>Guardrail &amp; Planner Notes (7d)</h3>
+              {reasonEntries.length ? (
+                <div className="strategy-list">
+                  {reasonEntries.map(([reason, count], idx) => {
+                    const base = reasonEntries[0][1] || 1;
+                    const width = Math.max(6, Math.round((count / base) * 100));
+                    return (
+                      <div key={reason || idx} className="strategy-row">
+                        <span className="name">{reason}</span>
+                        <div className="bar"><span style={{width:`${Math.min(100, width)}%`, background:'linear-gradient(90deg, rgba(248,113,113,.55), rgba(244,114,182,.45))'}}/></div>
+                        <span className="val">{count}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="help">No guardrail actions logged over the past week.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="card card-lg">
+            <h3>Daily Realized PnL (7d)</h3>
+            {dailyRows.length ? (
+              <div className="report-table">
+                {dailyRows.map((row, idx) => {
+                  const value = Number(row?.realized_pnl ?? 0);
+                  return (
+                    <div key={row?.date || idx} className="report-row">
+                      <span className="date">{shortDateLabel(row?.date)}</span>
+                      <span className="pnl" style={{color: value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(value)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="help">No realized trades logged in the last 7 days.</div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Assistant tab */}
+      {tab===Tab.Assistant && (
+        <section className="stack">
+          <div className="card" style={{gridColumn:"span 3"}}>
+            <h3>Trading Assistant</h3>
+            <AssistantChat />
           </div>
         </section>
       )}
@@ -1381,6 +1749,7 @@ async function openExplain(r:any) {
                         {rc.near_earnings!=null && <span className="badge" title="Earnings window">earn {rc.near_earnings?"near":"-"}</span>}
                         {rc.valuation_ok!=null && <span className="badge" title="Valuation">val {rc.valuation_ok?"ok":"rich"}</span>}
                         {rc.conflict!=null && <span className="badge" title="Conflict index">conflict {rc.conflict?"hi":"lo"}</span>}
+                        {rc.unusual_flow!=null && <span className="badge" title="Unusual flow">flow {rc.unusual_flow?Number(rc.unusual_flow_strength||0).toFixed(2):"-"}</span>}
                       </>}
                       {sigs.slice(0,6).map((s:any, i:number)=> (
                         <span key={i} className="badge" title={`${s.strategy} ${s.signal}`}>{s.strategy}:{s.signal} {Number(s.strength||0).toFixed(2)}</span>
@@ -1760,6 +2129,7 @@ function ActivityLog(props: {
   const [mdSymbol, setMdSymbol] = useState("US.AAPL");
   const [mdBars, setMdBars] = useState<any[]>([]);
   const [mdSource, setMdSource] = useState("");
+  const diff:any = (window as any).__autopilotLastDiff || null;
 
   useEffect(() => {
     let t: any;
@@ -1784,6 +2154,7 @@ function ActivityLog(props: {
     <section className="stack activity">
       <div className="panel">
         <h2 className="title-lg" style={{marginTop:0}}>Activity Log</h2>
+        {/* proposed vs executed diff table removed */}
         <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
           <div>
             <div className="label">Source</div>
@@ -2838,4 +3209,7 @@ function PlannerSettings() {
       </div>
     </div>
   );
+}
+function setPnlSeries(arg0: any) {
+  throw new Error('Function not implemented.');
 }

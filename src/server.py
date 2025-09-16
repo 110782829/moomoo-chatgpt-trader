@@ -1,7 +1,9 @@
 '''
 Start command: uvicorn --app-dir src server:app --reload --port 8000
 '''
+import re
 from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any 
 import os
@@ -106,6 +108,618 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------- Assistant Chat (OpenAI-backed) ----------
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    include_context: Optional[bool] = True
+
+@app.post("/assistant/chat")
+def assistant_chat(body: ChatRequest):
+    # Build a concise context block for the assistant
+    ctx_lines: List[str] = []
+    if body.include_context:
+        try:
+            mgr = _get_autopilot()
+            st = mgr.status()
+            last_in = mgr.last_input or {}
+            acct = (last_in.get("account") or {}) if isinstance(last_in, dict) else {}
+            pos = (last_in.get("positions") or []) if isinstance(last_in, dict) else []
+            orders = (last_in.get("orders") or []) if isinstance(last_in, dict) else []
+            # Account snapshot
+            eq = float(acct.get("equity") or 0.0); bp = float(acct.get("bp") or 0.0)
+            cash = float(acct.get("cash") or 0.0); uc = float(acct.get("unsettled_cash") or 0.0)
+            pnl = float(acct.get("pnl_today") or 0.0)
+            ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}")
+            # Top positions by abs MV if we have prices
+            mv_map = {u.get('sym'): float(u.get('px') or 0.0) for u in (last_in.get('universe') or []) if isinstance(u, dict) and u.get('sym')}
+            try:
+                top = sorted([
+                    (str(p.get('sym')), abs(float(p.get('qty') or 0.0)) * float(mv_map.get(str(p.get('sym')), 0.0)))
+                    for p in pos if isinstance(p, dict) and p.get('sym')
+                ], key=lambda x: x[1], reverse=True)[:8]
+            except Exception:
+                top = []
+            if top:
+                ctx_lines.append("positions: " + ", ".join([f"{s}:{w:.0f}" for s,w in top]))
+            # Open orders summary
+            try:
+                oo = [o for o in orders if isinstance(o, dict) and str(o.get('status','')).lower() not in ('filled','done','cancelled','canceled','rejected','expired','failed')]
+                if oo:
+                    ctx_lines.append("open_orders: " + ", ".join([f"{o.get('sym')} {o.get('side')} {o.get('qty')} @ {o.get('price')} ({o.get('status')})" for o in oo[:8]]))
+            except Exception:
+                pass
+            # Settings snapshot (planner prefs)
+            try:
+                prefs = (last_in.get("prefs") or {}) if isinstance(last_in, dict) else {}
+                planner = (last_in.get("planner") or {}) if isinstance(last_in, dict) else {}
+                mc = planner.get("min_confidence"); tn = planner.get("top_n"); sp = planner.get("strict_prefs")
+                if prefs:
+                    bits = []
+                    if prefs.get("stop_loss_pct"): bits.append(f"stop {prefs.get('stop_loss_pct')}%")
+                    if prefs.get("take_profit_pct"): bits.append(f"tp {prefs.get('take_profit_pct')}%")
+                    if prefs.get("measured_move_atr_mult"): bits.append(f"mm {prefs.get('measured_move_atr_mult')}x ATR")
+                    if bits:
+                        ctx_lines.append("prefs: " + ", ".join(bits))
+                ctx_lines.append("planner: " + ", ".join([
+                    f"min_conf {mc}" if mc is not None else None,
+                    f"top_n {tn}" if tn is not None else None,
+                    "strict_prefs" if sp else None,
+                ]).replace("None, ", "").strip(" ,"))
+            except Exception:
+                pass
+            # Planner notes, if any
+            if getattr(mgr, 'last_notes', None):
+                ctx_lines.append("notes: " + str(getattr(mgr, 'last_notes'))[:240])
+        except Exception:
+            pass
+        # Fallback: fetch directly from broker + settings if manager context is missing
+        try:
+            if not ctx_lines or (not pos and not orders):
+                c = get_client()
+                if c is not None and getattr(c, "connected", False):
+                    try:
+                        ai = c.get_account_assets()
+                        ctx_lines.append(f"account: equity=${float(ai.get('equity') or 0):,.0f} bp=${float(ai.get('bp') or 0):,.0f} cash=${float(ai.get('cash') or 0):,.0f}")
+                    except Exception:
+                        pass
+                    try:
+                        P = c.get_positions() or []
+                        # rough top 5 by mv using quote-less avg*qty if price not present
+                        top_syms = []
+                        for r in P[:8]:
+                            sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
+                            qty = float(r.get('qty') or r.get('qty_total') or r.get('qty_today') or 0.0)
+                            top_syms.append((sym, abs(qty)))
+                        if top_syms:
+                            ctx_lines.append("positions: " + ", ".join([f"{s}:{int(q)}" for s,q in top_syms if s][:8]))
+                    except Exception:
+                        pass
+                    try:
+                        O = c.get_orders() or []
+                        oo = []
+                        for r in O:
+                            stat = str(r.get('order_status') or r.get('status') or '').lower()
+                            if stat in ('filled','done','cancelled','canceled','rejected','expired','failed'):
+                                continue
+                            sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
+                            side = str(r.get('trd_side') or r.get('side') or '').upper()
+                            qty = float(r.get('qty') or r.get('initial_qty') or 0.0)
+                            price = float(r.get('price') or r.get('order_price') or 0.0)
+                            if sym:
+                                oo.append(f"{sym} {'BUY' if 'BUY' in side else 'SELL'} {int(qty)} @ {price or '-'}")
+                        if oo:
+                            ctx_lines.append("open_orders: " + ", ".join(oo[:8]))
+                    except Exception:
+                        pass
+                # Execution container (SIM) fallback for positions/orders
+                try:
+                    exec_service = get_execution()
+                except Exception:
+                    exec_service = None
+                if exec_service is not None:
+                    try:
+                        P2 = exec_service.list_positions() or []
+                        top2 = []
+                        for r in P2:
+                            sym = str(r.get('symbol') or r.get('sym') or '')
+                            qty = float(r.get('qty') or 0.0)
+                            if sym:
+                                top2.append((sym, abs(qty)))
+                        if top2:
+                            ctx_lines.append("positions(sim): " + ", ".join([f"{s}:{int(q)}" for s,q in top2][:8]))
+                    except Exception:
+                        pass
+                    try:
+                        O2 = exec_service.list_orders(limit=50) or []
+                        oo2 = []
+                        for o in O2:
+                            st = str(o.get('status') or '').lower()
+                            if st in ('filled','done','cancelled','canceled','rejected','expired','failed'):
+                                continue
+                            sym = str(o.get('symbol') or '')
+                            side = str(o.get('side') or '')
+                            qty = float(o.get('requested_qty') or o.get('qty') or 0.0)
+                            px = o.get('limit_price') or o.get('avg_fill_price') or ''
+                            if sym:
+                                oo2.append(f"{sym} {side.upper()} {int(qty)} @ {px or '-'}")
+                        if oo2:
+                            ctx_lines.append("open_orders(sim): " + ", ".join(oo2[:8]))
+                    except Exception:
+                        pass
+            # Settings snapshot (DB) if planner missing
+            try:
+                prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
+                mc_db = _get_json_setting("autopilot.min_confidence", None)
+                tn_db = _get_json_setting("autopilot.top_n", None)
+                sp_db = _get_json_setting("autopilot.strict_prefs", None)
+                bits = []
+                if prefs_db.get('stop_loss_pct'): bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
+                if prefs_db.get('take_profit_pct'): bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
+                if prefs_db.get('measured_move_atr_mult'): bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
+                if bits:
+                    ctx_lines.append("prefs(db): " + ", ".join(bits))
+                planner_bits = []
+                if mc_db is not None: planner_bits.append(f"min_conf {mc_db}")
+                if tn_db is not None: planner_bits.append(f"top_n {tn_db}")
+                if sp_db: planner_bits.append("strict_prefs")
+                if planner_bits:
+                    ctx_lines.append("planner(db): " + ", ".join(planner_bits))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Memory: load conversation + persistent memory
+    chat_log: list[dict] = []
+    memory_text: str = ""
+    try:
+        chat_log = _get_json_setting("assistant.chat", []) or []
+        mem = _get_json_setting("assistant.memory", "") or ""
+        memory_text = str(mem)
+    except Exception:
+        chat_log = []
+        memory_text = ""
+
+    system = (
+        "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
+        "- Be concise and clear (2–6 sentences).\n"
+        "- You can read the bot's settings and state from the provided context;\n"
+        "  when the user asks to change settings, the backend applies them.\n"
+        "  Acknowledge changes instead of saying you cannot modify settings.\n"
+        "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
+        "- Do not place orders here; focus on explanations, risk and next steps.\n"
+        "- Prefer concrete steps (levels, stops/takes, what to monitor)."
+    )
+    if memory_text:
+        system += "\nPersistent user memory (instructions/preferences):\n" + memory_text
+    if ctx_lines:
+        system += "\nContext:\n" + "\n".join(ctx_lines)
+
+    # Build chat call
+    try:
+        # Apply simple commands (live settings changes)
+        _actions: list[str] = []
+        try:
+            joined = "\n".join([m.content for m in body.messages if m.role == 'user'])
+            _actions = _apply_simple_commands(joined)
+        except Exception:
+            _actions = []
+
+        # Persist this turn in chat log
+        now = datetime.utcnow().isoformat()
+        for m in body.messages[-3:]:  # store last 3 inputs each call to reduce bloat
+            chat_log.append({"ts": now, "role": m.role, "content": m.content})
+        # Keep last 80 messages total
+        chat_log = chat_log[-200:]
+        _set_json_setting("assistant.chat", chat_log)
+
+        # If commands applied, append operator notes to system so model acknowledges
+        if _actions:
+            try:
+                system += "\n(Operator notes: " + ", ".join(_actions) + ")\n"
+            except Exception:
+                pass
+
+        # Build ChatGPT-like memory by including tail of conversation
+        tail = _conversation_tail(16)
+        new_msgs = [{"role": m.role, "content": m.content} for m in body.messages]
+        messages = [{"role": "system", "content": system}] + tail + new_msgs
+        out = _openai_chat_msgs(messages)
+        if not out:
+            raise RuntimeError("assistant unavailable")
+        reply = out.strip()
+
+        # Update memory by extracting trading directives from recent turns (skip chit-chat)
+        mem_changed = False
+        try:
+            recent_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
+            if recent_user:
+                summary = _extract_style_directives(recent_user)
+                if summary:
+                    _set_json_setting("assistant.memory", summary)
+                    old_style = _get_json_setting("autopilot.style_summary", "") or ""
+                    merged = _merge_lines(old_style, summary)
+                    cleaned = _clean_style_summary(merged)
+                    mem_changed = (cleaned != old_style)
+                    _set_json_setting("autopilot.style_summary", cleaned)
+        except Exception:
+            pass
+
+        # Persist assistant reply to chat log so history survives reloads
+        try:
+            log2 = _get_json_setting("assistant.chat", []) or []
+            log2.append({"ts": datetime.utcnow().isoformat(), "role": "assistant", "content": reply, "saved": bool(mem_changed), "settingsApplied": bool(_actions and len(_actions)>0)})
+            log2 = log2[-200:]
+            _set_json_setting("assistant.chat", log2)
+        except Exception:
+            pass
+
+        if _actions:
+            reply = "Applied: " + ", ".join(_actions) + "\n\n" + reply
+        return {"reply": reply, "memory": memory_text, "actions": _actions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/assistant/chat_stream")
+def assistant_chat_stream(q: str, include_context: bool = True):
+    # Build the same system prompt & context
+    body = ChatRequest(messages=[ChatMessage(role="user", content=q)], include_context=include_context)
+    # Reuse logic from non-stream for context + memory + commands
+    ctx_lines: List[str] = []
+    try:
+        mgr = _get_autopilot()
+        st = mgr.status()
+        last_in = mgr.last_input or {}
+        acct = (last_in.get("account") or {}) if isinstance(last_in, dict) else {}
+        pos = (last_in.get("positions") or []) if isinstance(last_in, dict) else []
+        orders = (last_in.get("orders") or []) if isinstance(last_in, dict) else []
+        eq = float(acct.get("equity") or 0.0); bp = float(acct.get("bp") or 0.0)
+        cash = float(acct.get("cash") or 0.0); uc = float(acct.get("unsettled_cash") or 0.0)
+        pnl = float(acct.get("pnl_today") or 0.0)
+        ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}")
+        mv_map = {u.get('sym'): float(u.get('px') or 0.0) for u in (last_in.get('universe') or []) if isinstance(u, dict) and u.get('sym')}
+        try:
+            top = sorted([(str(p.get('sym')), abs(float(p.get('qty') or 0.0)) * float(mv_map.get(str(p.get('sym')), 0.0))) for p in pos if isinstance(p, dict) and p.get('sym')], key=lambda x: x[1], reverse=True)[:8]
+        except Exception:
+            top = []
+        if top: ctx_lines.append("positions: " + ", ".join([f"{s}:{w:.0f}" for s,w in top]))
+        try:
+            oo = [o for o in orders if isinstance(o, dict) and str(o.get('status','')).lower() not in ('filled','done','cancelled','canceled','rejected','expired','failed')]
+            if oo:
+                ctx_lines.append("open_orders: " + ", ".join([f"{o.get('sym')} {o.get('side')} {o.get('qty')} @ {o.get('price')} ({o.get('status')})" for o in oo[:8]]))
+        except Exception:
+            pass
+        if getattr(mgr, 'last_notes', None):
+            ctx_lines.append("notes: " + str(getattr(mgr, 'last_notes'))[:240])
+    except Exception:
+        pass
+    # Fallbacks if manager context is light or lacks assets and activity
+    try:
+        needs_more = False
+        try:
+            needs_more = (eq <= 0 and bp <= 0 and cash <= 0 and uc <= 0 and not pos and not orders)
+        except Exception:
+            needs_more = not ctx_lines
+        if not ctx_lines or needs_more:
+            c = get_client()
+            if c is not None and getattr(c, "connected", False):
+                try:
+                    ai = c.get_account_assets()
+                    ctx_lines.append(f"account: equity=${float(ai.get('equity') or 0):,.0f} bp=${float(ai.get('bp') or 0):,.0f} cash=${float(ai.get('cash') or 0):,.0f}")
+                except Exception:
+                    pass
+                try:
+                    P = c.get_positions() or []
+                    top_syms = []
+                    for r in P[:8]:
+                        sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
+                        qty = float(r.get('qty') or r.get('qty_total') or r.get('qty_today') or 0.0)
+                        top_syms.append((sym, abs(qty)))
+                    if top_syms:
+                        ctx_lines.append("positions: " + ", ".join([f"{s}:{int(q)}" for s,q in top_syms if s][:8]))
+                except Exception:
+                    pass
+                try:
+                    O = c.get_orders() or []
+                    oo = []
+                    for r in O:
+                        stat = str(r.get('order_status') or r.get('status') or '').lower()
+                        if stat in ('filled','done','cancelled','canceled','rejected','expired','failed'):
+                            continue
+                        sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
+                        side = str(r.get('trd_side') or r.get('side') or '').upper()
+                        qty = float(r.get('qty') or r.get('initial_qty') or 0.0)
+                        price = float(r.get('price') or r.get('order_price') or 0.0)
+                        if sym:
+                            oo.append(f"{sym} {'BUY' if 'BUY' in side else 'SELL'} {int(qty)} @ {price or '-'}")
+                    if oo:
+                        ctx_lines.append("open_orders: " + ", ".join(oo[:8]))
+                except Exception:
+                    pass
+            # Execution container (SIM) fallback
+            try:
+                exec_service = get_execution()
+            except Exception:
+                exec_service = None
+            if exec_service is not None:
+                try:
+                    P2 = exec_service.list_positions() or []
+                    top2 = []
+                    for r in P2:
+                        sym = str(r.get('symbol') or r.get('sym') or '')
+                        qty = float(r.get('qty') or 0.0)
+                        if sym:
+                            top2.append((sym, abs(qty)))
+                    if top2:
+                        ctx_lines.append("positions(sim): " + ", ".join([f"{s}:{int(q)}" for s,q in top2][:8]))
+                except Exception:
+                    pass
+                try:
+                    O2 = exec_service.list_orders(limit=50) or []
+                    oo2 = []
+                    for o in O2:
+                        st = str(o.get('status') or '').lower()
+                        if st in ('filled','done','cancelled','canceled','rejected','expired','failed'):
+                            continue
+                        sym = str(o.get('symbol') or '')
+                        side = str(o.get('side') or '')
+                        qty = float(o.get('requested_qty') or o.get('qty') or 0.0)
+                        px = o.get('limit_price') or o.get('avg_fill_price') or ''
+                        if sym:
+                            oo2.append(f"{sym} {side.upper()} {int(qty)} @ {px or '-'}")
+                    if oo2:
+                        ctx_lines.append("open_orders(sim): " + ", ".join(oo2[:8]))
+                except Exception:
+                    pass
+        # Settings from DB
+        try:
+            prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
+            mc_db = _get_json_setting("autopilot.min_confidence", None)
+            tn_db = _get_json_setting("autopilot.top_n", None)
+            sp_db = _get_json_setting("autopilot.strict_prefs", None)
+            bits = []
+            if prefs_db.get('stop_loss_pct'): bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
+            if prefs_db.get('take_profit_pct'): bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
+            if prefs_db.get('measured_move_atr_mult'): bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
+            if bits:
+                ctx_lines.append("prefs(db): " + ", ".join(bits))
+            planner_bits = []
+            if mc_db is not None: planner_bits.append(f"min_conf {mc_db}")
+            if tn_db is not None: planner_bits.append(f"top_n {tn_db}")
+            if sp_db: planner_bits.append("strict_prefs")
+            if planner_bits:
+                ctx_lines.append("planner(db): " + ", ".join(planner_bits))
+            # feature toggles summary
+            try:
+                news = _get_json_setting("autopilot.use_news", None)
+                sigs = _get_json_setting("autopilot.signals.enabled", None)
+                autow = _get_json_setting("autopilot.signals.auto_weight", None)
+                disc = _get_json_setting("autopilot.discovery_enabled", None)
+                diso = _get_json_setting("autopilot.discovery_only", None)
+                weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
+                toggles = []
+                if news is not None: toggles.append(f"news={'on' if news else 'off'}")
+                if sigs is not None: toggles.append(f"signals={'on' if sigs else 'off'}")
+                if autow is not None: toggles.append(f"auto_weight={'on' if autow else 'off'}")
+                if disc is not None: toggles.append(f"discovery={'on' if disc else 'off'}")
+                if diso is not None: toggles.append(f"discovery_only={'on' if diso else 'off'}")
+                if toggles:
+                    ctx_lines.append("toggles(db): " + ", ".join(toggles))
+                # summarize top weights
+                try:
+                    if isinstance(weights_raw, dict) and weights_raw:
+                        items = list(weights_raw.items())
+                        items.sort(key=lambda kv: float(kv[1] or 0), reverse=True)
+                        top = ", ".join([f"{k}={float(v):.2f}" for k,v in items[:6]])
+                        if top:
+                            ctx_lines.append("weights(db): " + top)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    chat_log = _get_json_setting("assistant.chat", []) or []
+    memory_text = str(_get_json_setting("assistant.memory", "") or "")
+    system = (
+        "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
+        "- Be concise and clear (2–6 sentences).\n"
+        "- You can read the bot's settings and state from the provided context;\n"
+        "  when the user asks to change settings, the backend applies them.\n"
+        "  Acknowledge changes instead of saying you cannot modify settings.\n"
+        "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
+        "- Do not place orders here; focus on explanations, risk and next steps.\n"
+        "- Prefer concrete steps (levels, stops/takes, what to monitor)."
+    )
+    if memory_text:
+        system += "\nPersistent user memory (instructions/preferences):\n" + memory_text
+    if ctx_lines:
+        system += "\nContext:\n" + "\n".join(ctx_lines)
+
+    # Apply commands immediately
+    actions = _apply_simple_commands(q or "")
+    if actions:
+        system += "\n(Operator notes: " + ", ".join(actions) + ")\n"
+
+    # Persist turn
+    try:
+        now = datetime.utcnow().isoformat()
+        chat_log.append({"ts": now, "role": "user", "content": q})
+        chat_log = chat_log[-200:]
+        _set_json_setting("assistant.chat", chat_log)
+    except Exception:
+        pass
+
+    def _gen():
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        if not api_key:
+            yield "data: assistant unavailable\n\n"
+            yield "data: __END__\n\n"
+            return
+        import requests, json as _json
+        import time as _t
+        started = _t.time()
+        tail = _conversation_tail(16)
+        payload = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}] + tail + [{"role": "user", "content": q}],
+            "temperature": 0.2,
+            "stream": True,
+        }
+        try:
+            with requests.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, stream=True, timeout=float(os.getenv("OPENAI_TIMEOUT", "15"))) as r:
+                r.raise_for_status()
+                full = []
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data = line[len("data: "):]
+                        if data.strip() == "[DONE]":
+                            break
+                        try:
+                            obj = _json.loads(data)
+                            delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if delta:
+                                full.append(delta)
+                                yield f"data: {delta}\n\n"
+                        except Exception:
+                            continue
+                # Summarize to memory after completion
+                mem_changed = False
+                try:
+                    joined_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
+                    if joined_user:
+                        summary = _extract_style_directives(joined_user)
+                        if summary:
+                            _set_json_setting("assistant.memory", summary)
+                            old_style = _get_json_setting("autopilot.style_summary", "") or ""
+                            merged = _merge_lines(old_style, summary)
+                            cleaned = _clean_style_summary(merged)
+                            _set_json_setting("autopilot.style_summary", cleaned)
+                            mem_changed = (cleaned != old_style)
+                    # Persist assistant reply to chat log
+                    try:
+                        text = "".join(full)
+                        now = datetime.utcnow().isoformat()
+                        log = _get_json_setting("assistant.chat", []) or []
+                        log.append({"ts": now, "role": "assistant", "content": text, "saved": bool(mem_changed), "settingsApplied": bool(actions and len(actions)>0)})
+                        log = log[-200:]
+                        _set_json_setting("assistant.chat", log)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Emit actions applied (for client-side label) if there were commands
+                try:
+                    if actions:
+                        yield "data: __ACTIONS__|" + _json.dumps(actions) + "\n\n"
+                except Exception:
+                    pass
+        except Exception:
+            yield "data: (stream error)\n\n"
+            yield "data: __END__\n\n"
+            return
+        yield "data: __END__\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+@app.get("/assistant/memory")
+def assistant_memory_get():
+    memory = _get_json_setting("assistant.memory", "") or ""
+    chat = _get_json_setting("assistant.chat", []) or []
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    try:
+        cleaned = _clean_style_summary(style)
+        if cleaned != style:
+            _set_json_setting("autopilot.style_summary", cleaned)
+            style = cleaned
+    except Exception:
+        pass
+    return {"memory": memory, "style_summary": style, "chat_len": len(chat)}
+
+@app.delete("/assistant/memory")
+def assistant_memory_delete():
+    _set_json_setting("assistant.memory", "")
+    _set_json_setting("assistant.chat", [])
+    return assistant_memory_get()
+
+@app.post("/assistant/preset")
+def assistant_preset(body: dict):
+    preset = str(body.get("preset") or "").lower().strip()
+    presets = {
+        "al_brooks": "- al brooks price action (focus micro-trend, second entries, avoid midday chop)",
+        "trend_follow": "- trend follow (momentum bias; add on pullbacks; avoid counter-trend opens)",
+        "mean_revert": "- mean reversion (fade extremes; smaller size in high IV)",
+        "long_bias": "- long bias (prefer buys)",
+        "short_bias": "- short bias (prefer sells)",
+    }
+    if preset not in presets:
+        raise HTTPException(status_code=400, detail="unknown preset")
+    memory = _get_json_setting("assistant.memory", "") or ""
+    memory2 = _merge_lines(memory, presets[preset])
+    _set_json_setting("assistant.memory", memory2)
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    _set_json_setting("autopilot.style_summary", _merge_lines(style, presets[preset]))
+    return assistant_memory_get()
+
+@app.get("/assistant/chat_log")
+def assistant_chat_log(limit: int = 200):
+    log = _get_json_setting("assistant.chat", []) or []
+    try:
+        if isinstance(log, list):
+            return {"messages": log[-int(limit):]}
+    except Exception:
+        pass
+    return {"messages": []}
+
+# ---- Style summary quick edit endpoints ----
+@app.get("/assistant/style_lines")
+def assistant_style_lines():
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    return {"lines": _style_lines(style)}
+
+@app.post("/assistant/style_lines")
+def assistant_style_add(body: dict):
+    add = body.get("add") or []
+    cur = _get_json_setting("autopilot.style_summary", "") or ""
+    new = _merge_lines(cur, "\n".join([str(x) for x in add if str(x).strip()]))
+    _set_json_setting("autopilot.style_summary", _clean_style_summary(new))
+    return assistant_style_lines()
+
+@app.delete("/assistant/style_lines")
+def assistant_style_delete(body: dict):
+    idxs = body.get("indexes") or []
+    texts = body.get("texts") or []
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    L = _style_lines(style)
+    rm_idx = {int(i) for i in (idxs or []) if isinstance(i, int) or str(i).isdigit()}
+    rm_text = {str(t).strip().lower() for t in (texts or []) if str(t).strip()}
+    out = []
+    for i, l in enumerate(L):
+        if i in rm_idx: continue
+        if l.strip().lower() in rm_text: continue
+        out.append(l)
+    _set_json_setting("autopilot.style_summary", _clean_style_summary("\n".join(out)))
+    return assistant_style_lines()
+
+@app.put("/assistant/style_summary")
+def assistant_style_summary_put(body: dict):
+    """Directly set the style summary text (with cleaning and dedupe)."""
+    text = str(body.get("text") or "")
+    cleaned = _clean_style_summary(text)
+    _set_json_setting("autopilot.style_summary", cleaned)
+    return {"style_summary": cleaned}
 
 
 # ---------- Globals ----------
@@ -1383,7 +1997,7 @@ async def autopilot_last_diff():
     try:
         mgr = _get_autopilot()
     except Exception:
-        return {"proposed": [], "kept": []}
+        return {"proposed": [], "kept": [], "executed": []}
     try:
         proposed = getattr(mgr, "_last_proposed", []) or []
     except Exception:
@@ -1392,7 +2006,15 @@ async def autopilot_last_diff():
         kept = getattr(mgr, "_last_evaluated", []) or []
     except Exception:
         kept = []
-    return {"proposed": proposed[:12], "kept": kept[:12]}
+    try:
+        executed = getattr(mgr, "_last_executed", []) or []
+    except Exception:
+        executed = []
+    try:
+        note = getattr(mgr, "last_notes", None)
+    except Exception:
+        note = None
+    return {"proposed": proposed[:12], "kept": kept[:12], "executed": executed[:12], "notes": note}
 
 @autopilot_router.get("/env_debug")
 def autopilot_env_debug():
@@ -1511,6 +2133,55 @@ def _openai_chat(system: str, user: str) -> Optional[str]:
     except Exception:
         return None
 
+def _openai_chat_text(system: str, user: str) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests  # lazy import
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.2,
+        }
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+def _openai_chat_msgs(messages: list[dict]) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests
+        payload = {"model": model, "messages": messages, "temperature": 0.2}
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
 
 def _summarize_style(text: str) -> str:
     text = (text or "").strip()
@@ -1522,7 +2193,7 @@ def _summarize_style(text: str) -> str:
         "Prefer rules and thresholds (e.g., win rate target, RR, stop %, time windows)."
     )
     user = f"User preferences/notes to summarize:\n{text}"
-    out = _openai_chat(system, user)
+    out = _openai_chat_text(system, user)
     if out and isinstance(out, str):
         return out.strip()[:600]
     # Fallback summary when model call fails
@@ -1535,6 +2206,266 @@ def _summarize_style(text: str) -> str:
     except Exception:
         pass
     return text[:600]
+
+def _extract_style_directives(text: str) -> str:
+    """Extract only actionable trading directives from user text and recent turns.
+    Ignore questions, small talk, or unrelated chatter. Return <= 12 bullet lines.
+    Examples to extract: side bias, horizon, reduce-only/no-new-opens, stop/take %, measured move ATR, risk appetite,
+    time windows (e.g., avoid lunch), specific approaches (e.g., Al Brooks price action), min confidence.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    system = (
+        "Extract ONLY actionable trading directives from the user's notes.\n"
+        "- Ignore chit-chat, questions, or unrelated conversation.\n"
+        "- Use short bullet lines (<= 12).\n"
+        "- Include items like: side bias (long/short), reduce-only/no new entries, trading horizon in minutes, target RR/win rate, stop/take %, measured_move_atr_mult, avoid windows (midday), and approaches (Al Brooks price action)."
+    )
+    user = f"User conversation notes to extract directives from:\n{text}"
+    out = _openai_chat_text(system, user)
+    if out and isinstance(out, str):
+        # Filter questions and settings toggles
+        try:
+            lines = [l.strip() for l in out.strip().split("\n") if l.strip()]
+            drop_cmd = re.compile(r"\b(turn|enable|disable)\b", re.I)
+            drop_kw = re.compile(r"\b(news|signals|discovery|auto\s*weight|strict\s*prefs)\b", re.I)
+            drop = re.compile(r"\?$|\b(what|what's|whats|how|why|should|could|would|tell|show|list|determine|find|review|pull|increase|decrease|up\b|down\b)\b", re.I)
+            keep = []
+            for l in lines:
+                low = l.lower()
+                if drop.search(low):
+                    continue
+                if drop_cmd.search(low) and drop_kw.search(low):
+                    continue
+                keep.append(l)
+            return "\n".join(keep)[:800]
+        except Exception:
+            return out.strip()[:800]
+    # Fallback: heuristics filter by directive keywords
+    try:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        keep = []
+        kws = [
+            r"short bias|prefer sells|long bias|prefer buys|reduce only|no new entries|pause opens",
+            r"horizon|minutes|min\b|hrs|hours",
+            r"stop|take profit|tp|rr\b|risk[- ]?reward|win rate|measured move|atr",
+            r"avoid|do not trade|midday|lunch|market hours|pre[- ]?market|after[- ]?hours",
+            r"al brooks|price action|trend follow|mean reversion|momentum",
+        ]
+        pat = re.compile("(" + ")|(".join(kws) + ")", re.I)
+        qdrop = re.compile(r"\?|\b(what|what's|whats|how|why|should|could|would|tell|show|list|determine|find|review|pull|increase|decrease|up\b|down\b|turn|enable|disable)\b", re.I)
+        setkw = re.compile(r"\b(news|signals|discovery|auto\s*weight|strict\s*prefs)\b", re.I)
+        for l in lines:
+            low = l.lower()
+            if qdrop.search(low):
+                continue
+            if ("turn" in low or "enable" in low or "disable" in low) and setkw.search(low):
+                continue
+            if pat.search(low):
+                keep.append(l)
+            if len(keep) >= 12: break
+        return "\n".join([("- " + l) for l in keep])[:800]
+    except Exception:
+        return text[:400]
+
+def _merge_lines(a: str, b: str, limit: int = 1200) -> str:
+    try:
+        import re as _re
+        def _norm(l: str) -> str:
+            l2 = _re.sub(r"\s+", " ", l.strip().lower())
+            l2 = _re.sub(r"[\.:;,]+$", "", l2)
+            return l2
+        def _lines(s: str):
+            return [l for l in str(s or "").split("\n") if l and l.strip()]
+        A = _lines(a); B = _lines(b)
+        seen = set(); outl = []
+        for l in A + B:
+            key = _norm(l)
+            if key and key not in seen:
+                outl.append(l.strip()); seen.add(key)
+        return "\n".join(outl)[:limit]
+    except Exception:
+        return (str(a or "") + ("\n" if a else "") + str(b or ""))[:limit]
+
+def _conversation_tail(max_msgs: int = 16) -> list[dict]:
+    try:
+        log = _get_json_setting("assistant.chat", []) or []
+        if not isinstance(log, list):
+            return []
+        tail = log[-max_msgs:]
+        out = []
+        for m in tail:
+            role = str(m.get("role") or "user")
+            content = str(m.get("content") or "")
+            if content:
+                out.append({"role": role, "content": content})
+        return out
+    except Exception:
+        return []
+
+def _style_lines(text: str) -> list[str]:
+    return [l.strip() for l in str(text or "").split("\n") if l and l.strip()]
+
+def _clean_style_summary(summary: str) -> str:
+    try:
+        prefs = _get_json_setting("autopilot.prefs", {}) or {}
+    except Exception:
+        prefs = {}
+    lines = _style_lines(summary)
+    out: list[str] = []
+    seen: set[str] = set()
+    stop = None; take = None; mm = None; horizon = None; bias = None; avoid_midday = False
+    for l in lines:
+        s = l.strip(); low = s.lower()
+        if not s or len(s) <= 2:
+            continue
+        if any(x in low for x in ["no actionable", "determine ", "review ", "pull ", "increase ", "decrease ", " up ", " in "]):
+            continue
+        m = re.search(r"stop[^\d]*(\d+(?:\.\d+)?)\s*%", low)
+        if m: stop = float(m.group(1)); continue
+        m = re.search(r"take[^\d]*(\d+(?:\.\d+)?)\s*%", low)
+        if m: take = float(m.group(1)); continue
+        m = re.search(r"(horizon|mins|minutes|min)\D*(\d+(?:\.\d+)?)", low)
+        if m: horizon = float(m.group(2)); continue
+        m = re.search(r"(atr|measured.*move)\D*(\d+(?:\.\d+)?)", low)
+        if m: mm = float(m.group(2)); continue
+        if "short bias" in low or "prefer sells" in low: bias = "short"; continue
+        if "long bias" in low or "prefer buys" in low: bias = "long"; continue
+        if "midday" in low or ("avoid" in low and "lunch" in low): avoid_midday = True; continue
+        # strategy/approach lines
+        if any(k in low for k in ["al brooks", "price action", "trend follow", "mean reversion", "momentum"]):
+            key = re.sub(r"\s+", " ", low)
+            if key not in seen:
+                seen.add(key); out.append(s)
+    # prefer prefs for canonical numeric values
+    try:
+        if float(prefs.get("stop_loss_pct") or 0) > 0: stop = float(prefs.get("stop_loss_pct"))
+        if float(prefs.get("take_profit_pct") or 0) > 0: take = float(prefs.get("take_profit_pct"))
+        if float(prefs.get("measured_move_atr_mult") or 0) > 0: mm = float(prefs.get("measured_move_atr_mult"))
+    except Exception:
+        pass
+    if bias == "short": out.insert(0, "Short bias (prefer sells)")
+    if bias == "long": out.insert(0, "Long bias (prefer buys)")
+    if stop is not None: out.append(f"Stop loss: {stop:g}%")
+    if take is not None: out.append(f"Take profit: {take:g}%")
+    if mm is not None: out.append(f"Measured move ATR: {mm:g}x")
+    if horizon is not None: out.append(f"Horizon: {int(horizon)} min")
+    if avoid_midday: out.append("Avoid trading midday")
+    # final dedupe
+    final = []
+    seen2: set[str] = set()
+    for s in out:
+        key = re.sub(r"\s+", " ", s.strip().lower())
+        if key not in seen2:
+            seen2.add(key); final.append(s)
+    return "\n".join(final[:24])
+
+def _apply_simple_commands(text: str) -> list[str]:
+    """Parse very simple natural commands and apply settings; return confirmations."""
+    confirms: list[str] = []
+    if not text:
+        return confirms
+    import re
+    # normalize quotes/punctuation and whitespace to make matching robust
+    t = str(text).lower()
+    t = re.sub(r"[\u2018\u2019\u201C\u201D'\"]+", "", t)  # remove smart quotes and quotes
+    t = re.sub(r"\s+", " ", t).strip()
+    # Reduce-only / pause opens
+    try:
+        if any(p in t for p in ["reduce only", "close only", "flatten only", "pause new opens", "no new entries", "block opens"]):
+            cur = _get_json_setting("autopilot.style_summary", "") or ""
+            nxt = _merge_lines(cur, "- reduce only\n- no new entries")
+            _set_json_setting("autopilot.style_summary", nxt)
+            confirms.append("reduce_only + no_new_entries on")
+        if any(p in t for p in ["resume opens", "allow new opens", "open entries ok"]):
+            cur = str(_get_json_setting("autopilot.style_summary", "") or "")
+            cur = cur.replace("- reduce only", "").replace("- no new entries", "")
+            _set_json_setting("autopilot.style_summary", cur)
+            confirms.append("allow_new_entries on")
+    except Exception:
+        pass
+    # Min confidence
+    m = re.search(r"min(?:imum)?\s*conf(?:idence)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t, re.I)
+    if m:
+        try:
+            val = float(m.group(1))
+            _set_json_setting("autopilot.min_confidence", val)
+            confirms.append(f"min_confidence set to {val}")
+        except Exception:
+            pass
+    # Numeric trading prefs
+    try:
+        prefs = _get_json_setting("autopilot.prefs", {}) or {}
+        changed = False
+        m = re.search(r"stop(?:\s*loss)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["stop_loss_pct"] = float(m.group(1)); changed = True; confirms.append(f"stop_loss_pct {prefs['stop_loss_pct']}%")
+        m = re.search(r"take\s*profit\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["take_profit_pct"] = float(m.group(1)); changed = True; confirms.append(f"take_profit_pct {prefs['take_profit_pct']}%")
+        m = re.search(r"measured\s*move\s*(?:atr)?\s*(?:x|mult|multiple)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            prefs["measured_move_atr_mult"] = float(m.group(1)); changed = True; confirms.append(f"measured_move_atr_mult {prefs['measured_move_atr_mult']}x")
+        m = re.search(r"win\s*rate\s*(?:target)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["target_winrate_pct"] = float(m.group(1)); changed = True; confirms.append(f"target_winrate_pct {prefs['target_winrate_pct']}%")
+        m = re.search(r"(rr|risk[- ]?reward)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            prefs["target_rr"] = float(m.group(2)); changed = True; confirms.append(f"target_rr {prefs['target_rr']}")
+        if changed:
+            _set_json_setting("autopilot.prefs", prefs)
+    except Exception:
+        pass
+    # Bias
+    if any(p in t for p in ["prefer sells", "short bias", "sell bias", "do more sells"]):
+        cur = _get_json_setting("autopilot.style_summary", "") or ""
+        nxt = _merge_lines(cur, "- short bias (prefer sells)")
+        _set_json_setting("autopilot.style_summary", nxt)
+        confirms.append("short_bias applied")
+    if any(p in t for p in ["prefer buys", "long bias", "buy bias", "do more buys"]):
+        cur = _get_json_setting("autopilot.style_summary", "") or ""
+        nxt = _merge_lines(cur, "- long bias (prefer buys)")
+        _set_json_setting("autopilot.style_summary", nxt)
+        confirms.append("long_bias applied")
+    # Feature toggles
+    try:
+        # News on/off (including "news momentum")
+        if re.search(r"\b(news\s+momentum|news)\s+off\b|\bturn\s+(news\s+momentum|news)\s+off\b|\bdisable\s+(news\s+momentum|news)\b", t, re.I):
+            _set_json_setting("autopilot.use_news", False); confirms.append("news disabled")
+        if re.search(r"\b(news\s+momentum|news)\s+on\b|\bturn\s+(news\s+momentum|news)\s+on\b|\benable\s+(news\s+momentum|news)\b", t, re.I):
+            _set_json_setting("autopilot.use_news", True); confirms.append("news enabled")
+        # Signals on/off
+        if re.search(r"\bsignals\s+off\b|\bdisable\s+signals\b", t, re.I):
+            _set_json_setting("autopilot.signals.enabled", False); confirms.append("signals disabled")
+        if re.search(r"\bsignals\s+on\b|\benable\s+signals\b", t, re.I):
+            _set_json_setting("autopilot.signals.enabled", True); confirms.append("signals enabled")
+        # Strict prefs
+        if re.search(r"\bstrict\s*(prefs)?\s*on\b|\benable\s*strict\s*(prefs)?\b", t, re.I):
+            _set_json_setting("autopilot.strict_prefs", True); confirms.append("strict_prefs on")
+        if re.search(r"\bstrict\s*(prefs)?\s*off\b|\bdisable\s*strict\s*(prefs)?\b", t, re.I):
+            _set_json_setting("autopilot.strict_prefs", False); confirms.append("strict_prefs off")
+        # Auto-weight
+        if re.search(r"\bauto\s*weight\s*on\b|\benable\s*auto\s*weight\b", t, re.I):
+            _set_json_setting("autopilot.signals.auto_weight", True); confirms.append("auto_weight on")
+        if re.search(r"\bauto\s*weight\s*off\b|\bdisable\s*auto\s*weight\b", t, re.I):
+            _set_json_setting("autopilot.signals.auto_weight", False); confirms.append("auto_weight off")
+        # Discovery
+        if re.search(r"\bdiscovery\s*only\s*on\b|\benable\s*discovery\s*only\b", t, re.I):
+            _set_json_setting("autopilot.discovery_only", True); confirms.append("discovery_only on")
+        if re.search(r"\bdiscovery\s*only\s*off\b|\bdisable\s*discovery\s*only\b", t, re.I):
+            _set_json_setting("autopilot.discovery_only", False); confirms.append("discovery_only off")
+        if re.search(r"\bdiscovery\s*on\b|\benable\s*discovery\b", t, re.I):
+            _set_json_setting("autopilot.discovery_enabled", True); confirms.append("discovery on")
+        if re.search(r"\bdiscovery\s*off\b|\bdisable\s*discovery\b", t, re.I):
+            _set_json_setting("autopilot.discovery_enabled", False); confirms.append("discovery off")
+        # Top-N
+        m = re.search(r"top\s*n\s*(?:to|=)?\s*(\d+)", t, re.I)
+        if m:
+            _set_json_setting("autopilot.top_n", int(m.group(1))); confirms.append(f"top_n {int(m.group(1))}")
+    except Exception:
+        pass
+    return confirms
 
 def _extract_symbols(text: str) -> list[str]:
     try:
@@ -2025,7 +2956,7 @@ def autopilot_weekly():
                     executed_counts[sym] = executed_counts.get(sym, 0) + 1
                     rc = extra.get("rule_checks") or {}
                     try:
-                        bad = [k for k, v in rc.items() if v is False]
+                        bad = [k for k, v in rc.items() if v is False and k != "unusual_flow"]
                         if bad:
                             decision_reasons.setdefault(sym, []).extend(bad)
                     except Exception:
@@ -2077,6 +3008,21 @@ def autopilot_weekly():
     out["executed_counts"] = executed_counts
     out["decision_reasons"] = decision_reasons
     return out
+
+@autopilot_router.get("/pnl_series")
+def autopilot_pnl_series(days: int = 30):
+    try:
+        from core.storage import pnl_history  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage unavailable: {e}")
+    try:
+        d = max(1, int(days))
+    except Exception:
+        d = 30
+    try:
+        return {"series": pnl_history(days=d)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"pnl history failed: {e}")
 
 # Ensure router registration happens after all route definitions
 app.include_router(autopilot_router)

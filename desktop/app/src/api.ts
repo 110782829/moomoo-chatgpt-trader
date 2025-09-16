@@ -51,7 +51,7 @@ const api = {
   autopilotLogs: (limit: number) => GET<any[]>("/autopilot/logs", { limit }),
   autopilotContext: () => GET("/autopilot/context"),
   autopilotLastOutput: () => GET("/autopilot/last_output"),
-  autopilotLastDiff: () => GET("/autopilot/last_diff"),
+  autopilotLastDiff: () => GET<{ proposed: any[]; kept: any[]; executed: any[]; notes?: string | null }>("/autopilot/last_diff"),
   autopilotWeekly: () => GET("/autopilot/weekly"),
   getAutoPrefs: () => GET<any>("/autopilot/prefs"),
   putAutoPrefs: (prefs: any) => SEND("/autopilot/prefs", prefs, "PUT"),
@@ -73,6 +73,13 @@ const api = {
   syncDealsNow: () => SEND("/sync/deals", {}),
   getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
   putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
+  assistantChat: (messages: { role: string; content: string }[], include_context = true) => SEND<{ reply: string }>("/assistant/chat", { messages, include_context }),
+  assistantChatLog: (limit = 200) => GET<{ messages: { role: string; content: string }[] }>("/assistant/chat_log", { limit }),
+  getStyleLines: () => GET<{ lines: string[] }>("/assistant/style_lines"),
+  addStyleLines: (add: string[]) => SEND<{ lines: string[] }>("/assistant/style_lines", { add }),
+  deleteStyleLines: (payload: { indexes?: number[]; texts?: string[] }) => SEND<{ lines: string[] }>("/assistant/style_lines", payload, "DELETE"),
+  setStyleSummary: (text: string) => SEND<{ style_summary: string }>("/assistant/style_summary", { text }, "PUT"),
+  getPnlSeries: (days=30) => GET<{ series: { date: string; realized_pnl: number }[] }>("/autopilot/pnl_series", { days }),
 };
 
 export default api;
