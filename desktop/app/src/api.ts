@@ -60,6 +60,8 @@ const api = {
   deleteAutoStyle: () => SEND<{ raw: string; summary: string }>("/autopilot/style", undefined, "DELETE"),
   getDiscovery: () => GET<{ enabled: boolean; only: boolean; seed: string[]; preview: string[] }>("/autopilot/discovery"),
   putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
+  getWatchlistSnapshot: (params?: { limit?: number; interval?: string; bars?: number; since_hours?: number }) =>
+    GET<{ generated_at: string; symbols: any[] }>("/autopilot/watchlist_snapshot", params),
   getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number; provider?: string }>("/autopilot/news"),
   putNewsSettings: (payload: { enabled?: boolean; ttl_sec?: number; provider?: string }) => SEND("/autopilot/news", payload, "PUT"),
   getDataSettings: () => GET<{ ktype: string; bars_ttl_sec: number; deals_sync_sec: number; data_source: string }>("/autopilot/data"),
@@ -73,8 +75,21 @@ const api = {
   syncDealsNow: () => SEND("/sync/deals", {}),
   getPlannerSettings: () => GET<{ min_confidence: number; top_n: number; strict_prefs: boolean }>("/autopilot/planner"),
   putPlannerSettings: (payload: { min_confidence?: number; top_n?: number; strict_prefs?: boolean }) => SEND("/autopilot/planner", payload, "PUT"),
-  assistantChat: (messages: { role: string; content: string }[], include_context = true) => SEND<{ reply: string }>("/assistant/chat", { messages, include_context }),
-  assistantChatLog: (limit = 200) => GET<{ messages: { role: string; content: string }[] }>("/assistant/chat_log", { limit }),
+  assistantChat: (
+    messages: { role: string; content: string }[],
+    include_context = true
+  ) =>
+    SEND<{ reply: string; actions?: string[]; mem_saved?: boolean; style_summary?: string | null; memory?: string }>(
+      "/assistant/chat",
+      { messages, include_context }
+    ),
+  assistantChatLog: (
+    limit = 200
+  ) =>
+    GET<{ messages: { role: string; content: string; saved?: boolean; settingsApplied?: boolean }[] }>(
+      "/assistant/chat_log",
+      { limit }
+    ),
   getStyleLines: () => GET<{ lines: string[] }>("/assistant/style_lines"),
   addStyleLines: (add: string[]) => SEND<{ lines: string[] }>("/assistant/style_lines", { add }),
   deleteStyleLines: (payload: { indexes?: number[]; texts?: string[] }) => SEND<{ lines: string[] }>("/assistant/style_lines", payload, "DELETE"),

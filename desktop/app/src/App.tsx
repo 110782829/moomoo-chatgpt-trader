@@ -1,7 +1,7 @@
 // Desktop UI with connection panel, strategy catalog, status, logs, settings, and activity log.
 // API base comes from VITE_API_BASE (defaults to http://127.0.0.1:8000)
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from "react-dom";
 import api, { API_BASE, SEND, GET } from "./api";
 import { SectionCard } from "./components/settings/SettingsLayout";
@@ -15,6 +15,7 @@ import SettingsWatchlist from "./components/settings/SettingsWatchlist";
 import SettingsNews from "./components/settings/SettingsNews";
 import AssistantChat from "./components/AssistantChat";
 import AssistantMemory from "./components/AssistantMemory";
+import WatchlistTrends from "./components/status/WatchlistTrends";
 
 // ---------- Styles ----------
 const css = `
@@ -164,9 +165,25 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .pref-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px}
 .pref-count{font-size:12px;color:var(--muted);margin-right:auto}
 
-.report-hero{display:grid;grid-template-columns:2fr 1fr;gap:8px}
-@media (max-width:980px){.report-hero{grid-template-columns:1fr}}
-.report-chart{margin-top:10px}
+.report-layout{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:8px;align-content:start}
+.report-layout>*{min-width:0}
+.report-card{display:flex;flex-direction:column;gap:16px;height:100%}
+.report-card h3{margin-bottom:0}
+.report-card .chart-meta,.report-card .report-stats,.report-card .report-table{margin-top:0}
+.report-layout>.span-12{grid-column:span 12/span 12}
+.report-layout>.span-8{grid-column:span 8/span 8}
+.report-layout>.span-6{grid-column:span 6/span 6}
+.report-layout>.span-4{grid-column:span 4/span 4}
+@media (max-width:1200px){
+  .report-layout{grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+  .report-layout>.span-8,.report-layout>.span-4{grid-column:span 6/span 6}
+  .report-layout>.span-6{grid-column:span 6/span 6}
+}
+@media (max-width:720px){
+  .report-layout{grid-template-columns:1fr;gap:8px}
+  .report-layout>[class*="span-"]{grid-column:span 1/span 1}
+}
+.report-chart{margin-top:8px}
 .report-chart svg{display:block}
 .chart-axis{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px}
 .chart-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:12px}
@@ -174,26 +191,6 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .stat-pill .label{font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0}
 .stat-pill .value{font-size:16px;font-weight:600;white-space:nowrap}
 .report-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
-.funnel-list{display:grid;gap:8px;margin-top:12px}
-.funnel-row{display:flex;align-items:center;gap:10px}
-.funnel-row .label-text{flex:1;color:var(--muted);font-size:13px}
-.funnel-bar{flex:2;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden}
-.funnel-bar .fill{height:100%}
-.funnel-row .value{width:70px;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
-.funnel-row .pct{width:56px;text-align:right;font-size:12px;color:var(--muted)}
-.strategy-list{display:grid;gap:8px;margin-top:10px}
-.strategy-row{display:flex;align-items:center;gap:10px}
-.strategy-row .name{flex:1;color:var(--muted);font-size:13px}
-.strategy-row .bar{flex:2;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden}
-.strategy-row .bar span{display:block;height:100%;background:linear-gradient(90deg, rgba(124,58,237,.6), rgba(6,182,212,.5))}
-.strategy-row .val{width:60px;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
-.symbol-list{display:grid;gap:8px;margin-top:12px}
-.symbol-row{display:flex;align-items:center;gap:10px}
-.symbol-row .sym{min-width:68px;font-weight:600}
-.symbol-row .sym small{display:block;font-size:11px;color:var(--muted);font-weight:400}
-.symbol-row .bar{flex:1;height:10px;border-radius:999px;background:#0f1420;border:1px solid var(--border);overflow:hidden;position:relative}
-.symbol-row .bar span{display:block;height:100%;background:linear-gradient(90deg, rgba(34,197,94,.55), rgba(56,189,248,.45))}
-.symbol-row .numbers{width:116px;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 .report-table{display:grid;gap:6px;margin-top:12px}
 .report-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:#0f1420;font-variant-numeric:tabular-nums}
 .report-row .date{font-size:13px;color:var(--muted)}
@@ -206,6 +203,49 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .sticky-controls{position: sticky; top: 0; background: #0f1420; padding: 6px 0; z-index: 2; border-bottom: 1px solid var(--border);}
 .activity .sticky-controls{ background: transparent; border-bottom: 0; }
+.activity-modern{display:flex;flex-direction:column;gap:16px}
+.activity-main{display:flex;flex-direction:column;gap:18px}
+.activity-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.activity-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.activity-toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;padding:16px;border-radius:12px;background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(11,17,29,.92));border:1px solid rgba(148,163,184,.16);box-shadow:0 18px 34px rgba(2,6,23,.28)}
+.activity-toolbar .field{display:flex;flex-direction:column;gap:6px}
+.activity-toolbar .field .label{font-size:12px;color:var(--muted);margin:0}
+.activity-toolbar .field .input,.activity-toolbar .field .select,.activity-toolbar .field .custom-trigger{margin-top:-2px}
+.activity-filters-row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.activity-count{font-size:12px;color:var(--muted)}
+.activity-filters{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.filter-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;border:1px solid var(--border);background:#0e1320;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;transition:background .18s ease,border-color .18s ease,color .18s ease}
+.filter-chip:hover{background:var(--hover);color:var(--text)}
+.filter-chip.active{background:linear-gradient(135deg,rgba(124,58,237,.3),rgba(6,182,212,.25));border-color:rgba(124,58,237,.45);color:var(--text)}
+.filter-chip .count{font-size:11px;opacity:.75}
+@media (max-width:600px){.activity-filters-row{flex-direction:column;align-items:flex-start}.activity-filters{margin-top:6px}}
+.activity-feed{display:flex;flex-direction:column;gap:12px}
+.activity-event{position:relative;display:grid;grid-template-columns:140px 1fr auto;gap:16px;padding:16px 18px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(15,23,42,.88));box-shadow:0 18px 38px rgba(2,6,23,.32);overflow:hidden}
+.activity-event::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:999px;background:rgba(148,163,184,.35)}
+@media (max-width:900px){.activity-event{grid-template-columns:1fr;align-items:flex-start}}
+.activity-event.good::before{background:rgba(34,197,94,.7)}
+.activity-event.bad::before{background:rgba(239,68,68,.7)}
+.activity-event.warn::before{background:rgba(250,204,21,.7)}
+.activity-event__time{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.activity-event__time .ago{font-weight:700;color:var(--text);font-size:13px}
+.activity-event__body{display:flex;flex-direction:column;gap:6px}
+.activity-event__body .meta-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
+.activity-event__body .meta-top .stage{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text);padding:4px 8px;border-radius:999px;border:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.9)}
+.activity-event__body .meta-top .symbol{font-size:14px;font-weight:700;color:var(--text)}
+.activity-event__body .meta-top .side{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;text-transform:uppercase}
+.activity-event__body .meta-top .side.buy{background:rgba(34,197,94,.15);color:var(--green)}
+.activity-event__body .meta-top .side.sell{background:rgba(239,68,68,.15);color:var(--red)}
+.activity-event__body .meta-top .side.hold{background:rgba(148,163,184,.2);color:var(--muted)}
+.activity-event__body .meta-bottom{display:flex;flex-wrap:wrap;gap:6px;font-size:13px;color:var(--muted)}
+.activity-event__body .meta-bottom .action{font-weight:600;color:var(--text)}
+.activity-event__status{display:flex;flex-direction:column;align-items:flex-end;gap:8px;font-size:12px}
+@media (max-width:900px){.activity-event__status{align-items:flex-start}}
+.status.neutral{color:var(--text-dim)}
+.activity-empty{padding:24px;border:1px dashed rgba(148,163,184,.25);border-radius:12px;text-align:center;color:var(--muted);font-size:13px;background:rgba(15,23,42,.75)}
+.btn.ghost{background:transparent;border:1px solid rgba(148,163,184,.35);color:var(--text);padding:6px 12px;border-radius:10px;transition:background .18s ease,border-color .18s ease,color .18s ease}
+.btn.ghost:hover{background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.5)}
+.chart-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:6px}
+.chart-legend span{display:inline-flex;align-items:center;gap:6px}
   .note{font-size:12px;color:var(--muted)}
 
   .indicator{font-size:12px;font-weight:600}
@@ -214,8 +254,86 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .panel h2{ margin:0 0 6px; font-size:15px; color:var(--text); text-transform:uppercase; letter-spacing:.06em }
 .title-lg{ font-size:20px; }
 
-.grid-2{display:grid;grid-template-columns:2fr 1fr;gap: 8px}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap: 8px;align-items:start}
 @media (max-width:980px){.grid-2{grid-template-columns:1fr}}
+.badge.neutral{color:var(--text-dim);border-color:rgba(148,163,184,.3);background:rgba(15,23,42,.7)}
+.watchlist-trends{display:flex;flex-direction:column;gap:12px}
+.watchlist-trends__title{margin:0;color:var(--text);font-size:20px;font-weight:700}
+.watchlist-trends__header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.watchlist-trends__controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.refresh-btn{background:#0c1424;border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:8px;font-size:12px;cursor:pointer;transition:background .18s ease, transform .06s ease}
+.refresh-btn:hover{background:var(--hover)}
+.refresh-btn:active{transform:translateY(1px)}
+.refresh-btn[disabled]{opacity:.55;cursor:not-allowed}
+.watchlist-error{padding:10px 12px;border-radius:10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);color:var(--red);font-size:12px}
+.watchlist-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:1200px){.watchlist-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:780px){.watchlist-grid{grid-template-columns:1fr}}
+.trend-card{display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:12px;border:1px solid var(--border);background:var(--card);box-shadow:none}
+.trend-card__head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.trend-symbol{font-size:18px;font-weight:700}
+.trend-change{font-size:16px;font-weight:600}
+.trend-change.down{color:var(--red)}
+.trend-change.up{color:var(--green)}
+.trend-chart{border-radius:12px;overflow:hidden;background:#080f1d;border:1px solid rgba(148,163,184,.16)}
+.trend-svg{width:100%;height:auto;display:block}
+.trend-bg{fill:#0b1324;stroke:rgba(148,163,184,.12)}
+.trend-area{stroke:none}
+.trend-line{stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.trend-slow{fill:none;stroke-width:1.1;stroke-linecap:round;opacity:.8}
+.trend-fast{fill:none;stroke-width:1.1;stroke-linecap:round;stroke-dasharray:4 6;opacity:.9}
+.trend-events line{stroke-width:1.2;stroke-dasharray:4 6}
+.trend-event.entry line{stroke:rgba(34,197,94,.6)}
+.trend-event.exit line{stroke:rgba(245,158,11,.7)}
+.trend-event.entry circle{fill:var(--green);stroke:#07101f;stroke-width:1.4}
+.trend-event.exit circle{fill:var(--amber);stroke:#07101f;stroke-width:1.4}
+.trend-footer{display:flex;justify-content:flex-end;align-items:center;gap:10px;font-size:11px;color:var(--muted)}
+.watchlist-trends__legend{display:flex;align-items:center;gap:18px;font-size:12px;color:var(--muted);flex-wrap:wrap;margin-bottom:4px}
+.watchlist-trends__legend span{display:inline-flex;align-items:center;gap:6px}
+.legend-dot{display:inline-block;width:10px;height:10px;border-radius:999px;margin-right:6px;background:rgba(148,163,184,.3)}
+.legend-dot.entry{background:var(--green)}
+.legend-dot.exit{background:var(--amber)}
+.funnel-bars{display:grid;gap:12px;margin-top:6px}
+.funnel-bar-row{display:grid;grid-template-columns:1fr minmax(0,1fr) auto;gap:12px;align-items:center}
+.funnel-bar-label{display:flex;flex-direction:column;gap:2px}
+.funnel-bar-label .label{text-transform:uppercase;font-size:11px;letter-spacing:.08em;color:var(--muted)}
+.funnel-bar-label .value{font-size:16px;font-weight:600}
+.funnel-bar-track{position:relative;height:10px;border-radius:999px;background:rgba(17,24,39,.9);border:1px solid rgba(148,163,184,.15);overflow:hidden}
+.funnel-bar-fill{position:absolute;inset:0;height:100%;border-radius:999px;box-shadow:0 0 12px rgba(124,58,237,.2);transition:width .3s ease}
+.funnel-bar-pct{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.strategy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.strategy-tile{display:flex;align-items:center;gap:14px;padding:12px;border-radius:12px;border:1px solid var(--border);background:rgba(14,19,30,.85)}
+.strategy-radial{position:relative;width:64px;height:64px;flex:0 0 64px}
+.strategy-radial svg{width:64px;height:64px;display:block}
+.strategy-radial circle.bg{stroke:rgba(148,163,184,.18);stroke-width:4;fill:none}
+.strategy-radial circle.fg{stroke-width:4;fill:none;stroke-linecap:round;transform:rotate(-90deg);transform-origin:50% 50%}
+.strategy-radial span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600}
+.strategy-tile .meta{display:flex;flex-direction:column;gap:4px}
+.strategy-tile .meta .name{text-transform:uppercase;font-size:11px;color:var(--muted);letter-spacing:.08em}
+.strategy-tile .meta .value{font-size:18px;font-weight:600}
+.strategy-tile .meta .share{font-size:11px;color:var(--muted)}
+.symbol-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+.symbol-card{display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--border);background:#0f1420;min-height:140px}
+.symbol-card .header{display:flex;justify-content:space-between;align-items:center}
+.symbol-card .ticker{font-size:16px;font-weight:700}
+.symbol-card .status{font-size:12px;color:var(--muted)}
+.symbol-card .status.active{color:#38bdf8}
+.symbol-card .status.ahead{color:var(--green)}
+.symbol-card .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+.symbol-card .ratio{font-weight:600}
+.dot-progress{display:flex;gap:4px;margin-top:6px}
+.dot-progress span{width:10px;height:10px;border-radius:3px;background:rgba(148,163,184,.18);box-shadow:inset 0 0 0 1px rgba(148,163,184,.25)}
+.dot-progress span.active{background:linear-gradient(135deg, rgba(96,165,250,.8), rgba(14,165,233,.7));box-shadow:none}
+.timeline{position:relative;display:flex;flex-direction:column;gap:12px;padding-left:18px;margin-top:6px}
+.timeline::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:1px;background:rgba(148,163,184,.22)}
+.timeline-item{position:relative;padding-left:10px}
+.timeline-item::before{content:"";position:absolute;left:-10px;top:6px;width:12px;height:12px;border-radius:50%;background:linear-gradient(180deg,rgba(248,113,113,.6),rgba(244,114,182,.45));box-shadow:0 0 0 3px rgba(10,14,24,1)}
+.timeline-item .title{font-weight:600;font-size:13px}
+.timeline-item .meta{font-size:12px;color:var(--muted);margin-top:2px}
+.guardrail-list{display:grid;gap:8px;margin-top:6px}
+.guardrail-entry{padding:10px;border-radius:10px;border:1px solid rgba(148,163,184,.18);background:rgba(12,18,30,.9);display:flex;flex-direction:column;gap:4px}
+.guardrail-entry .row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+.guardrail-entry .reason{font-size:13px;font-weight:600;color:var(--text)}
   .panel.thick{padding:22px}
   /* Autopilot toggle */
   .autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06));color:var(--red);transition:transform .06s ease,border-color .18s ease;width:170px}
@@ -253,7 +371,12 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .assistant .bubble{background:linear-gradient(180deg, rgba(124,58,237,.18), rgba(6,182,212,.12));border-color:rgba(124,58,237,.35)}
 .user .bubble{background:linear-gradient(180deg, rgba(15,23,42,.9), rgba(15,23,42,.7));}
 .bubble .role{font-size:12px;color:var(--muted);margin-bottom:4px}
-.bubble .text{white-space:pre-wrap;line-height:1.5}
+.bubble .text{line-height:1.55;white-space:normal}
+.bubble .text p{margin:0 0 6px 0}
+.bubble .text p:last-child{margin-bottom:0}
+.bubble .text ul,.bubble .text ol{margin:6px 0 0 0;padding-left:18px}
+.bubble .text li{margin:4px 0;line-height:1.55}
+.bubble .text strong{font-weight:600}
 .bubble .saved{margin-top:6px;font-size:12px;color:#a3e635;opacity:.9;display:flex;align-items:center;gap:6px}
 .bubble .saved svg{width:14px;height:14px;display:block}
 .inner-card{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px}
@@ -487,6 +610,7 @@ function statusTag(status?: string) {
   const s = String(status ?? '').toLowerCase();
   let cls = "status";
   if (["filled","done","completed","executed"].includes(s)) cls += " good";
+  else if (s.includes("hold")) cls += " warn";
   else if (["canceled","cancelled","rejected","expired","failed","error"].includes(s)) cls += " bad";
   else if (["open","pending","working","new","partially_filled","partial","accepted"].includes(s)) cls += " warn";
   return <span className={cls}>{status ?? ""}</span>;
@@ -548,6 +672,8 @@ export default function App() {
   const [weekly, setWeekly] = useState<any|null>(null);
   const [pnlSeries, setPnlSeries] = useState<Array<{ date: string; realized_pnl: number }>>([]);
   const [lastDiff, setLastDiff] = useState<any|null>(null);
+  const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
+  const watchlistFetchAt = useRef(0);
 
   // logs
   const [logs, setLogs] = useState<any[]>([]);
@@ -556,7 +682,7 @@ export default function App() {
   const [logLimit, setLogLimit] = useLocalStorage("logs.limit", 200);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsAuto, setLogsAuto] = useLocalStorage("logs.auto", true);
-  const [logsEvery, setLogsEvery] = useLocalStorage("logs.ms", 6000);
+  const [logsEvery, setLogsEvery] = useLocalStorage("logs.ms", 2500);
   const [logsSource, setLogsSource] = useLocalStorage<"system"|"autopilot">("logs.source", "system");
   const [logsAt, setLogsAt] = useState<string>("—");
 
@@ -628,6 +754,7 @@ export default function App() {
       try { const c = await api.getRiskConfig(); setCfg(c); setRiskEnabled(typeof c?.enabled === 'boolean' ? !!c.enabled : null); } catch {}
       await refreshStatus(false);
       await refreshAutoStatus();
+      await refreshWatchlist(true);
       await refreshLogs(false);
       await refreshExec(false);
       await refreshPositions(false);
@@ -677,10 +804,12 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [tab]);
 useEffect(() => {
-    if (tab !== Tab.Activity) return;
-    const id = window.setInterval(() => refreshLogs(false), logsEvery);
+    if (tab !== Tab.Activity || !logsAuto) return;
+    const interval = Math.max(1000, Number(logsEvery) || 0);
+    refreshLogs(false);
+    const id = window.setInterval(() => refreshLogs(false), interval);
     return () => window.clearInterval(id);
-  }, [tab, logsEvery, logSymbol, logSince, logLimit]);
+  }, [tab, logsAuto, logsEvery, logSymbol, logSince, logLimit, logsSource]);
 
   useEffect(() => {
     if (tab !== Tab.Status) return;
@@ -868,6 +997,24 @@ async function refreshPositions(acceptEmpty = false) {
 
 
 
+async function refreshWatchlist(force = false) {
+  const now = Date.now();
+  if (!force && now - watchlistFetchAt.current < 60000) return;
+  watchlistFetchAt.current = now;
+  try {
+    const disc = await api.getDiscovery();
+    const raw = Array.isArray(disc?.preview) && disc.preview.length
+      ? disc.preview
+      : Array.isArray(disc?.seed)
+        ? disc.seed
+        : [];
+    const list = (raw || [])
+      .map((sym: any) => String(sym || '').toUpperCase())
+      .filter(Boolean);
+    setWatchlistSymbols(list);
+  } catch {}
+}
+
 async function refreshAutoStatus() {
   try {
     const st = await api.autopilotStatus();
@@ -876,6 +1023,7 @@ async function refreshAutoStatus() {
     try { const wk = await api.autopilotWeekly(); setWeekly(wk || null); } catch {}
     try { const ps = await api.getPnlSeries(30); setPnlSeries((ps as any)?.series || []); } catch {}
     try { const df = await api.autopilotLastDiff(); setLastDiff(df || null); } catch {}
+    await refreshWatchlist();
   } catch (e:any) {
     // silent
   }
@@ -984,8 +1132,20 @@ function shortDateLabel(iso?: string) {
   const plannerInvalid = missedRules?.planner_invalid_json != null ? Number(missedRules.planner_invalid_json) : 0;
   const guardrailCount = missedRules?.guardrails != null ? Number(missedRules.guardrails) : 0;
 
-  const executedCounts: Record<string, number> = (weekly as any)?.executed_counts || {};
-  const proposedCounts: Record<string, number> = (weekly as any)?.proposed_counts || {};
+  const executedCountsRaw: Record<string, number> = (weekly as any)?.executed_counts || {};
+  const proposedCountsRaw: Record<string, number> = (weekly as any)?.proposed_counts || {};
+  const executedCounts: Record<string, number> = {};
+  Object.entries(executedCountsRaw).forEach(([sym, val]) => {
+    const key = String(sym || '').toUpperCase();
+    if (!key) return;
+    executedCounts[key] = (executedCounts[key] || 0) + Number(val ?? 0);
+  });
+  const proposedCounts: Record<string, number> = {};
+  Object.entries(proposedCountsRaw).forEach(([sym, val]) => {
+    const key = String(sym || '').toUpperCase();
+    if (!key) return;
+    proposedCounts[key] = (proposedCounts[key] || 0) + Number(val ?? 0);
+  });
   const executedTotal = Object.values(executedCounts).reduce((sum, val) => sum + Number(val ?? 0), 0);
 
   const funnelRows = [
@@ -994,30 +1154,81 @@ function shortDateLabel(iso?: string) {
     { key: "validator", label: "Validator drops", value: validatorDrops, pct: proposedTotal ? (validatorDrops / proposedTotal) * 100 : 0 },
     { key: "evaluator", label: "Evaluator drops", value: evaluatorDrops, pct: proposedTotal ? (evaluatorDrops / proposedTotal) * 100 : 0 },
   ];
-  const funnelBase = Math.max(proposedTotal, executedTotal, validatorDrops, evaluatorDrops, 1);
-  const funnelColors: Record<string, string> = {
-    proposed: "linear-gradient(90deg, rgba(124,58,237,.55), rgba(6,182,212,.55))",
-    executed: "linear-gradient(90deg, rgba(34,197,94,.55), rgba(16,185,129,.4))",
-    validator: "linear-gradient(90deg, rgba(239,68,68,.55), rgba(248,113,113,.4))",
-    evaluator: "linear-gradient(90deg, rgba(245,158,11,.55), rgba(250,204,21,.45))",
+  const funnelPalette: Record<string, string> = {
+    proposed: "#7c3aed",
+    executed: "#22c55e",
+    validator: "#f97316",
+    evaluator: "#38bdf8",
   };
 
   const attribution: Record<string, number> = (weekly as any)?.attribution || {};
   const attrEntries = Object.entries(attribution)
     .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))
     .slice(0, 8);
-  const attrMax = attrEntries.reduce((mx, [, val]) => Math.max(mx, Number(val ?? 0)), 0);
+  const attrTotal = attrEntries.reduce((sum, [, val]) => sum + Number(val ?? 0), 0);
+  const attrPalette = ["#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#a855f7", "#38bdf8", "#f97316", "#818cf8"];
 
-  const symbolUniverse = Array.from(new Set([...Object.keys(proposedCounts), ...Object.keys(executedCounts)]));
+  const watchlistOrder = new Map<string, number>();
+  watchlistSymbols.forEach((sym, idx) => {
+    const key = String(sym || '').toUpperCase();
+    if (key) watchlistOrder.set(key, idx);
+  });
+  const symbolUniverse = Array.from(new Set([
+    ...watchlistSymbols.map(sym => String(sym || '').toUpperCase()),
+    ...Object.keys(proposedCounts),
+    ...Object.keys(executedCounts),
+  ])).filter(Boolean);
   const symbolRows = symbolUniverse
-    .sort((a, b) => Number(proposedCounts[b] ?? 0) - Number(proposedCounts[a] ?? 0))
-    .slice(0, 6)
+    .sort((a, b) => {
+      const valA = Number(proposedCounts[a] ?? executedCounts[a] ?? 0) || 0;
+      const valB = Number(proposedCounts[b] ?? executedCounts[b] ?? 0) || 0;
+      if (valA !== valB) return valB - valA;
+      const orderA = watchlistOrder.has(a) ? watchlistOrder.get(a)! : Number.MAX_SAFE_INTEGER;
+      const orderB = watchlistOrder.has(b) ? watchlistOrder.get(b)! : Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.localeCompare(b);
+    })
     .map(sym => {
-      const proposed = Number(proposedCounts[sym] ?? 0);
-      const executed = Number(executedCounts[sym] ?? 0);
+      const proposedRaw = Number(proposedCounts[sym] ?? 0);
+      const executedRaw = Number(executedCounts[sym] ?? 0);
+      const proposed = Number.isFinite(proposedRaw) ? proposedRaw : 0;
+      const executed = Number.isFinite(executedRaw) ? executedRaw : 0;
       const pct = proposed ? Math.min(100, (executed / proposed) * 100) : (executed > 0 ? 100 : 0);
       return { sym, proposed, executed, pct };
     });
+
+  const pnlLast30 = pnlData.slice(-30);
+  let runningTotal = 0;
+  const cumulativeSeries = pnlLast30.map(row => {
+    const raw = Number(row?.realized_pnl ?? 0);
+    const value = Number.isFinite(raw) ? raw : 0;
+    runningTotal += value;
+    return { date: row?.date, value: runningTotal };
+  });
+  const cumulativeChange = cumulativeSeries.length ? cumulativeSeries[cumulativeSeries.length - 1].value : 0;
+  const cumulativeMax = cumulativeSeries.length
+    ? cumulativeSeries.reduce((max, row) => Math.max(max, Number(row.value ?? 0) || 0), Number.NEGATIVE_INFINITY)
+    : 0;
+  const cumulativeMin = cumulativeSeries.length
+    ? cumulativeSeries.reduce((min, row) => Math.min(min, Number(row.value ?? 0) || 0), Number.POSITIVE_INFINITY)
+    : 0;
+  const rollingSeries = pnlLast30.map((row, idx) => {
+    const start = Math.max(0, idx - 6);
+    const window = pnlLast30.slice(start, idx + 1);
+    const total = window.reduce((sum, cur) => {
+      const raw = Number(cur?.realized_pnl ?? 0);
+      return sum + (Number.isFinite(raw) ? raw : 0);
+    }, 0);
+    const avg = window.length ? total / window.length : 0;
+    return { date: row?.date, value: avg };
+  });
+  const rollingLatest = rollingSeries.length ? rollingSeries[rollingSeries.length - 1].value : null;
+  const rollingHigh = rollingSeries.length
+    ? rollingSeries.reduce((max, row) => Math.max(max, Number(row.value ?? 0) || 0), Number.NEGATIVE_INFINITY)
+    : 0;
+  const rollingLow = rollingSeries.length
+    ? rollingSeries.reduce((min, row) => Math.min(min, Number(row.value ?? 0) || 0), Number.POSITIVE_INFINITY)
+    : 0;
 
   const decisionReasons: Record<string, string[]> = (weekly as any)?.decision_reasons || {};
   const reasonCounts: Record<string, number> = {};
@@ -1034,6 +1245,9 @@ function shortDateLabel(iso?: string) {
     .slice(0, 6);
 
   const dailyRows = pnlLast7.slice().reverse();
+  const guardrailEvents = Array.isArray((autoStatus as any)?.recent_guardrails)
+    ? ((autoStatus as any).recent_guardrails as any[])
+    : [];
 
 // ---------- Render ----------
   return (
@@ -1306,10 +1520,13 @@ function shortDateLabel(iso?: string) {
         })()}</span>
       </div>
     </div>
-  </div>
+            </div>
 
 
             </div>
+          <div className="panel thick">
+            <WatchlistTrends />
+          </div>
 {/* Positions – its own panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
@@ -1433,14 +1650,13 @@ function shortDateLabel(iso?: string) {
 
       {/* Reports tab */}
       {tab===Tab.Reports && (
-        <section className="stack">
-          <div className="report-hero">
-            <div className="card card-lg">
-              <h3>Realized PnL (7d)</h3>
-              {pnlLast7.length ? (() => {
-                const series = pnlLast7;
-                const W = 720; const H = 200; const P = 30;
-                const xs = series.map((_, i) => i);
+        <section className="report-layout">
+          <div className="card card-lg report-card span-8">
+            <h3>Realized PnL (7d)</h3>
+            {pnlLast7.length ? (() => {
+              const series = pnlLast7;
+              const W = 720; const H = 200; const P = 30;
+              const xs = series.map((_, i) => i);
                 const ys = series.map(r => Number(r?.realized_pnl ?? 0));
                 const minY = Math.min(0, ...ys);
                 const maxY = Math.max(0, ...ys);
@@ -1492,42 +1708,42 @@ function shortDateLabel(iso?: string) {
                     </svg>
                     <div className="chart-axis">
                       <span>{shortDateLabel(chartStart)}</span>
-                      <span>{shortDateLabel(chartEnd)}</span>
-                    </div>
+                    <span>{shortDateLabel(chartEnd)}</span>
                   </div>
-                );
-              })() : <div className="help">No realized PnL tracked for the past week.</div>}
-              <div className="chart-meta">
-                <div className="stat-pill">
-                  <span className="label">Total</span>
-                  <span className="value" style={{color: pnlTotal7 >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(pnlTotal7)}</span>
                 </div>
-                <div className="stat-pill">
-                  <span className="label">Best day</span>
-                  {bestDay ? (
-                    <>
-                      <span className="value" style={{color: bestDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(bestDay.value)}</span>
-                      <span className="help">{shortDateLabel(bestDay.date)}</span>
-                    </>
-                  ) : <span className="value">—</span>}
-                </div>
-                <div className="stat-pill">
-                  <span className="label">Worst day</span>
-                  {worstDay ? (
-                    <>
-                      <span className="value" style={{color: worstDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(worstDay.value)}</span>
-                      <span className="help">{shortDateLabel(worstDay.date)}</span>
-                    </>
-                  ) : <span className="value">—</span>}
-                </div>
-                <div className="stat-pill">
-                  <span className="label">Green days</span>
-                  <span className="value">{pnlLast7.length ? `${greenDays}/${pnlLast7.length}` : '—'}</span>
-                  {pnlLast7.length ? <span className="help">{formatPct((greenDays / pnlLast7.length) * 100, (greenDays === pnlLast7.length || greenDays === 0) ? 0 : 1)}</span> : null}
-                </div>
+              );
+            })() : <div className="help">No realized PnL tracked for the past week.</div>}
+            <div className="chart-meta">
+              <div className="stat-pill">
+                <span className="label">Total</span>
+                <span className="value" style={{color: pnlTotal7 >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(pnlTotal7)}</span>
+              </div>
+              <div className="stat-pill">
+                <span className="label">Best day</span>
+                {bestDay ? (
+                  <>
+                    <span className="value" style={{color: bestDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(bestDay.value)}</span>
+                    <span className="help">{shortDateLabel(bestDay.date)}</span>
+                  </>
+                ) : <span className="value">—</span>}
+              </div>
+              <div className="stat-pill">
+                <span className="label">Worst day</span>
+                {worstDay ? (
+                  <>
+                    <span className="value" style={{color: worstDay.value >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(worstDay.value)}</span>
+                    <span className="help">{shortDateLabel(worstDay.date)}</span>
+                  </>
+                ) : <span className="value">—</span>}
+              </div>
+              <div className="stat-pill">
+                <span className="label">Green days</span>
+                <span className="value">{pnlLast7.length ? `${greenDays}/${pnlLast7.length}` : '—'}</span>
+                {pnlLast7.length ? <span className="help">{formatPct((greenDays / pnlLast7.length) * 100, (greenDays === pnlLast7.length || greenDays === 0) ? 0 : 1)}</span> : null}
               </div>
             </div>
-            <div className="card card-lg">
+          </div>
+          <div className="card card-lg report-card span-4">
               <h3>Weekly Snapshot</h3>
               <div className="report-stats">
                 <div className="stat-pill">
@@ -1563,100 +1779,315 @@ function shortDateLabel(iso?: string) {
                 </div>
               </div>
             </div>
+          <div className="card card-lg report-card span-6">
+            <h3>30d Cumulative PnL</h3>
+            {cumulativeSeries.length ? (() => {
+                  const series = cumulativeSeries;
+                  const W = 720; const H = 220; const P = 32;
+                  const xs = series.map((_, idx) => idx);
+                  const ys = series.map(row => Number(row.value ?? 0) || 0);
+                  const minY = Math.min(0, ...ys);
+                  const maxY = Math.max(0, ...ys);
+                  const spanY = (maxY - minY) || 1;
+                  const spanX = Math.max(1, xs.length > 1 ? xs[xs.length - 1] - xs[0] : 1);
+                  const getX = series.length === 1
+                    ? () => W / 2
+                    : (x: number) => P + (x - xs[0]) / spanX * (W - 2 * P);
+                  const getY = (y: number) => H - P - (y - minY) / spanY * (H - 2 * P);
+                  let linePath = '';
+                  series.forEach((row, idx) => {
+                    const X = getX(xs[idx]);
+                    const Y = getY(ys[idx]);
+                    linePath += idx === 0 ? `M ${X} ${Y}` : ` L ${X} ${Y}`;
+                  });
+                  let areaPath = '';
+                  if (series.length > 1) {
+                    areaPath = `M ${getX(xs[0])} ${getY(minY)}`;
+                    series.forEach((row, idx) => {
+                      const X = getX(xs[idx]);
+                      const Y = getY(ys[idx]);
+                      areaPath += ` L ${X} ${Y}`;
+                    });
+                    areaPath += ` L ${getX(xs[xs.length - 1])} ${getY(minY)} Z`;
+                  }
+                  const zeroY = getY(0);
+                  const startDate = series[0]?.date;
+                  const endDate = series[series.length - 1]?.date;
+                  return (
+                    <div className="report-chart">
+                      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:'#0f1420', border:'1px solid var(--border)', borderRadius:10}}>
+                        <defs>
+                          <linearGradient id="cumLine" x1="0" y1="0" x2="1" y2="0">
+                            <stop offset="0%" stopColor="rgba(96,165,250,1)" />
+                            <stop offset="100%" stopColor="rgba(14,165,233,1)" />
+                          </linearGradient>
+                          <linearGradient id="cumArea" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="rgba(59,130,246,0.45)" />
+                            <stop offset="100%" stopColor="rgba(15,23,42,0.05)" />
+                          </linearGradient>
+                        </defs>
+                        <path d={`M ${P} ${zeroY} L ${W - P} ${zeroY}`} stroke="rgba(148,163,184,.35)" strokeWidth="1" strokeDasharray="4 6" fill="none" />
+                        {areaPath ? <path d={areaPath} fill="url(#cumArea)" stroke="none" /> : null}
+                        <path d={linePath} stroke="url(#cumLine)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                        {series.map((row, idx) => {
+                          const X = getX(xs[idx]);
+                          const Y = getY(ys[idx]);
+                          const positive = ys[idx] >= 0;
+                          return <circle key={row?.date || idx} cx={X} cy={Y} r={3.2} fill={positive ? 'var(--green)' : 'var(--red)'} stroke="#0f1420" strokeWidth="1.4"/>;
+                        })}
+                      </svg>
+                      <div className="chart-axis">
+                        <span>{shortDateLabel(startDate)}</span>
+                    <span>{shortDateLabel(endDate)}</span>
+                  </div>
+                  <div className="chart-legend">
+                    <span><span className="legend-dot" style={{background:'rgba(96,165,250,0.85)'}}></span>Cumulative PnL</span>
+                  </div>
+                </div>
+              );
+            })() : <div className="help">Not enough realized PnL history yet.</div>}
+            <div className="chart-meta">
+              <div className="stat-pill">
+                <span className="label">Net change</span>
+                <span className="value" style={{color: (cumulativeChange ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeChange)}</span>
+              </div>
+              <div className="stat-pill">
+                <span className="label">High watermark</span>
+                <span className="value" style={{color: (cumulativeMax ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeMax)}</span>
+              </div>
+              <div className="stat-pill">
+                <span className="label">Low watermark</span>
+                <span className="value" style={{color: (cumulativeMin ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeMin)}</span>
+              </div>
+            </div>
           </div>
-
-          <div className="grid-2">
-            <div className="card card-lg">
-              <h3>Execution Funnel (7d)</h3>
-              {(proposedTotal || executedTotal || validatorDrops || evaluatorDrops) ? (
-                <div className="funnel-list">
-                  {funnelRows.map(row => {
-                    const width = row.value > 0 ? Math.max(6, Math.round((row.value / funnelBase) * 100)) : 0;
-                    const pctLabel = row.key === 'proposed' ? '100%' : (proposedTotal ? formatPct(row.pct, row.pct >= 10 ? 0 : 1) : '—');
-                    return (
-                      <div key={row.key} className="funnel-row">
-                        <span className="label-text">{row.label}</span>
-                        <div className="funnel-bar">
-                          {width ? <span className="fill" style={{width:`${Math.min(100, width)}%`, background:funnelColors[row.key] || funnelColors.proposed}}/> : null}
-                        </div>
+          <div className="card card-lg report-card span-6">
+            <h3>7d Rolling Avg PnL</h3>
+            {rollingSeries.length ? (() => {
+                  const series = rollingSeries;
+                  const W = 720; const H = 200; const P = 30;
+                  const xs = series.map((_, idx) => idx);
+                  const ys = series.map(row => Number(row.value ?? 0) || 0);
+                  const minY = Math.min(0, ...ys);
+                  const maxY = Math.max(0, ...ys);
+                  const spanY = (maxY - minY) || 1;
+                  const spanX = Math.max(1, xs.length > 1 ? xs[xs.length - 1] - xs[0] : 1);
+                  const getX = series.length === 1
+                    ? () => W / 2
+                    : (x: number) => P + (x - xs[0]) / spanX * (W - 2 * P);
+                  const getY = (y: number) => H - P - (y - minY) / spanY * (H - 2 * P);
+                  let linePath = '';
+                  series.forEach((row, idx) => {
+                    const X = getX(xs[idx]);
+                    const Y = getY(ys[idx]);
+                    linePath += idx === 0 ? `M ${X} ${Y}` : ` L ${X} ${Y}`;
+                  });
+                  let areaPath = '';
+                  if (series.length > 1) {
+                    areaPath = `M ${getX(xs[0])} ${getY(0)}`;
+                    series.forEach((row, idx) => {
+                      const X = getX(xs[idx]);
+                      const Y = getY(ys[idx]);
+                      areaPath += ` L ${X} ${Y}`;
+                    });
+                    areaPath += ` L ${getX(xs[xs.length - 1])} ${getY(0)} Z`;
+                  }
+                  const zeroY = getY(0);
+                  const startDate = series[0]?.date;
+                  const endDate = series[series.length - 1]?.date;
+                  return (
+                    <div className="report-chart">
+                      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:'#0f1420', border:'1px solid var(--border)', borderRadius:10}}>
+                        <defs>
+                          <linearGradient id="rollLine" x1="0" y1="0" x2="1" y2="0">
+                            <stop offset="0%" stopColor="rgba(168,85,247,1)" />
+                            <stop offset="100%" stopColor="rgba(244,114,182,1)" />
+                          </linearGradient>
+                          <linearGradient id="rollArea" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="rgba(168,85,247,0.35)" />
+                            <stop offset="100%" stopColor="rgba(15,23,42,0.05)" />
+                          </linearGradient>
+                        </defs>
+                        <path d={`M ${P} ${zeroY} L ${W - P} ${zeroY}`} stroke="rgba(148,163,184,.35)" strokeWidth="1" strokeDasharray="4 6" fill="none" />
+                        {areaPath ? <path d={areaPath} fill="url(#rollArea)" stroke="none" /> : null}
+                        <path d={linePath} stroke="url(#rollLine)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                        {series.map((row, idx) => {
+                          const X = getX(xs[idx]);
+                          const Y = getY(ys[idx]);
+                          const positive = ys[idx] >= 0;
+                          return <circle key={row?.date || idx} cx={X} cy={Y} r={3} fill={positive ? 'var(--green)' : 'var(--red)'} stroke="#0f1420" strokeWidth="1.2"/>;
+                        })}
+                      </svg>
+                      <div className="chart-axis">
+                        <span>{shortDateLabel(startDate)}</span>
+                    <span>{shortDateLabel(endDate)}</span>
+                  </div>
+                  <div className="chart-legend">
+                    <span><span className="legend-dot" style={{background:'rgba(168,85,247,0.85)'}}></span>Rolling average</span>
+                  </div>
+                </div>
+              );
+            })() : <div className="help">Not enough realized PnL history yet.</div>}
+            <div className="chart-meta">
+              <div className="stat-pill">
+                <span className="label">Latest average</span>
+                <span className="value" style={{color: (rollingLatest ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{rollingLatest == null ? '—' : formatUsd(rollingLatest)}</span>
+              </div>
+              <div className="stat-pill">
+                <span className="label">Best avg</span>
+                <span className="value" style={{color: (rollingHigh ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(rollingHigh)}</span>
+              </div>
+              <div className="stat-pill">
+                <span className="label">Soft floor</span>
+                <span className="value" style={{color: (rollingLow ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(rollingLow)}</span>
+              </div>
+            </div>
+          </div>
+          <div className="card card-lg report-card span-6">
+            <h3>Execution Funnel (7d)</h3>
+            {(proposedTotal || executedTotal || validatorDrops || evaluatorDrops) ? (
+              <div className="funnel-bars">
+                {funnelRows.map(row => {
+                  const ratio = row.key === 'proposed' ? 1 : (proposedTotal ? Math.max(0, Math.min(1, row.value / proposedTotal)) : 0);
+                  const pctLabel = row.key === 'proposed' ? '100%' : (proposedTotal ? formatPct(row.pct, row.pct >= 10 ? 0 : 1) : '—');
+                  const accent = funnelPalette[row.key] || '#7c3aed';
+                  return (
+                    <div key={row.key} className="funnel-bar-row">
+                      <div className="funnel-bar-label">
+                        <span className="label">{row.label}</span>
                         <span className="value">{row.value.toLocaleString()}</span>
-                        <span className="pct">{pctLabel}</span>
                       </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="help">No planner activity captured over the past week.</div>
-              )}
-            </div>
-            <div className="card card-lg">
-              <h3>Strategy Attribution (7d)</h3>
-              {attrEntries.length ? (
-                <div className="strategy-list">
-                  {attrEntries.map(([name, val]) => {
-                    const value = Number(val ?? 0);
-                    const width = attrMax > 0 ? Math.max(6, Math.round((value / attrMax) * 100)) : 0;
-                    return (
-                      <div key={name} className="strategy-row">
-                        <span className="name">{name}</span>
-                        <div className="bar"><span style={{width:`${Math.min(100, width)}%`}}/></div>
-                        <span className="val">{value.toFixed(2)}</span>
+                      <div className="funnel-bar-track">
+                        <div
+                          className="funnel-bar-fill"
+                          style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%`, background: `linear-gradient(90deg, ${accent}, rgba(148,163,184,.25))` }}
+                        />
                       </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="help">No strategy attribution captured for the past week.</div>
-              )}
-            </div>
+                      <span className="funnel-bar-pct">{pctLabel}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="help">No planner activity captured over the past week.</div>
+            )}
           </div>
-
-          <div className="grid-2">
-            <div className="card card-lg">
-              <h3>Symbol Follow-through (7d)</h3>
-              {symbolRows.length ? (
-                <div className="symbol-list">
-                  {symbolRows.map(row => {
-                    const width = row.proposed > 0 ? Math.max(6, Math.round((row.executed / row.proposed) * 100)) : (row.executed > 0 ? 100 : 0);
+          <div className="card card-lg report-card span-6">
+            <h3>Strategy Attribution (7d)</h3>
+            {attrEntries.length ? (
+              <div className="strategy-grid">
+                {attrEntries.map(([name, val], idx) => {
+                    const value = Number(val ?? 0);
+                    const share = attrTotal > 0 ? Math.max(0, value / attrTotal) : 0;
+                    const circumference = 2 * Math.PI * 19;
+                    const offset = circumference * (1 - Math.min(1, share));
+                    const color = attrPalette[idx % attrPalette.length];
                     return (
-                      <div key={row.sym} className="symbol-row">
-                        <div className="sym">{row.sym}<small>{row.proposed ? `${row.proposed.toLocaleString()} proposed` : 'No proposals'}</small></div>
-                        <div className="bar">{width ? <span style={{width:`${Math.min(100, width)}%`}}/> : null}</div>
-                        <div className="numbers">
-                          <span>{row.executed.toLocaleString()} filled</span>
-                          {row.proposed ? <span>{formatPct(row.pct, row.pct >= 10 ? 0 : 1)}</span> : null}
+                      <div key={name} className="strategy-tile">
+                        <div className="strategy-radial">
+                          <svg viewBox="0 0 44 44">
+                            <circle className="bg" cx="22" cy="22" r="19" />
+                            <circle
+                              className="fg"
+                              cx="22"
+                              cy="22"
+                              r="19"
+                              stroke={color}
+                              strokeDasharray={`${circumference} ${circumference}`}
+                              strokeDashoffset={offset}
+                            />
+                          </svg>
+                          <span>{formatPct(share * 100, share >= 0.1 ? 0 : 1)}</span>
+                        </div>
+                        <div className="meta">
+                          <span className="name">{name}</span>
+                          <span className="value">{value.toFixed(2)}</span>
+                          <span className="share">of total PnL</span>
                         </div>
                       </div>
                     );
-                  })}
-                </div>
-              ) : (
-                <div className="help">No planner proposals recorded in the past week.</div>
-              )}
-            </div>
-            <div className="card card-lg">
-              <h3>Guardrail &amp; Planner Notes (7d)</h3>
-              {reasonEntries.length ? (
-                <div className="strategy-list">
-                  {reasonEntries.map(([reason, count], idx) => {
-                    const base = reasonEntries[0][1] || 1;
-                    const width = Math.max(6, Math.round((count / base) * 100));
+                })}
+              </div>
+            ) : (
+              <div className="help">No strategy attribution captured for the past week.</div>
+            )}
+          </div>
+          <div className="card card-lg report-card span-6">
+            <h3>Symbol Follow-through (7d)</h3>
+            {symbolRows.length ? (
+              <div className="symbol-grid">
+                {symbolRows.map(row => {
+                    const ratio = row.proposed ? Math.max(0, Math.min(1, row.executed / row.proposed)) : (row.executed > 0 ? 1 : 0);
+                    const statusClass = ratio >= 1 ? 'ahead' : ratio > 0 ? 'active' : 'idle';
+                    const dots = 10;
+                    const filled = Math.round(ratio * dots);
                     return (
-                      <div key={reason || idx} className="strategy-row">
-                        <span className="name">{reason}</span>
-                        <div className="bar"><span style={{width:`${Math.min(100, width)}%`, background:'linear-gradient(90deg, rgba(248,113,113,.55), rgba(244,114,182,.45))'}}/></div>
-                        <span className="val">{count}</span>
+                      <div key={row.sym} className="symbol-card">
+                        <div className="header">
+                          <span className="ticker">{row.sym}</span>
+                          <span className={`status ${statusClass}`}>{row.executed.toLocaleString()} filled</span>
+                        </div>
+                        <div className="meta">
+                          <span>{row.proposed ? `${row.proposed.toLocaleString()} proposed` : 'No proposals'}</span>
+                          <span className={`ratio ${statusClass}`}>{row.proposed ? formatPct(row.pct, row.pct >= 10 ? 0 : 1) : '—'}</span>
+                        </div>
+                        <div className="dot-progress" title={`${(ratio * 100).toFixed(0)}% follow-through`}>
+                          {Array.from({ length: dots }).map((_, idx) => (
+                            <span key={idx} className={idx < filled ? 'active' : ''} />
+                          ))}
+                        </div>
                       </div>
                     );
-                  })}
+                })}
+              </div>
+            ) : (
+              <div className="help">No planner proposals recorded in the past week.</div>
+            )}
+          </div>
+          <div className="card card-lg report-card span-6">
+            <h3>Guardrail &amp; Planner Notes (7d)</h3>
+            {guardrailEvents.length ? (
+              <>
+                <div className="help" style={{ fontWeight: 600 }}>Recent guardrail triggers</div>
+                <div className="guardrail-list">
+                  {guardrailEvents.map((evt, idx) => (
+                    <div key={`${evt?.ts || idx}-${idx}`} className="guardrail-entry">
+                      <div className="row">
+                        <span>{evt?.sym || evt?.symbol || '—'}</span>
+                        <span>{timeAgo(evt?.ts)}</span>
+                      </div>
+                      <div className="reason">{evt?.reason || evt?.status || 'Guardrail tripped'}</div>
+                      <div className="row" style={{ justifyContent: 'flex-start', gap: 12 }}>
+                        {evt?.action && <span>action {evt.action}</span>}
+                        {evt?.side && <span>{String(evt.side).toUpperCase()}</span>}
+                      </div>
+                    </div>
+                  ))}
                 </div>
+              </>
+            ) : null}
+            {reasonEntries.length ? (
+              <>
+                <div className="help" style={{ fontWeight: 600, marginTop: guardrailEvents.length ? 12 : 0 }}>Planner drop reasons</div>
+                <div className="timeline">
+                  {reasonEntries.map(([reason, count], idx) => (
+                    <div key={reason || idx} className="timeline-item">
+                      <div className="title">{reason}</div>
+                      <div className="meta">{count} events</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : null}
+            {!guardrailEvents.length && !reasonEntries.length ? (
+              guardrailCount > 0 ? (
+                <div className="help">Guardrails triggered {guardrailCount.toLocaleString()} times over the past week.</div>
               ) : (
                 <div className="help">No guardrail actions logged over the past week.</div>
-              )}
-            </div>
+              )
+            ) : null}
           </div>
-
-          <div className="card card-lg">
+          <div className="card card-lg report-card span-12">
             <h3>Daily Realized PnL (7d)</h3>
             {dailyRows.length ? (
               <div className="report-table">
@@ -2125,124 +2556,270 @@ function ActivityLog(props: {
           logsSource, setLogsSource, onExplain,
           refreshLogs, logsLoading } = props;
 
-  // Market data display
-  const [mdSymbol, setMdSymbol] = useState("US.AAPL");
-  const [mdBars, setMdBars] = useState<any[]>([]);
-  const [mdSource, setMdSource] = useState("");
-  const diff:any = (window as any).__autopilotLastDiff || null;
+  const [activeCategory, setActiveCategory] = useState<string>("All");
 
-  useEffect(() => {
-    let t: any;
-    async function load() {
-      if (!mdSymbol) {
-        setMdBars([]);
-        setMdSource("");
-        return;
-      }
-      try {
-        const r = await GET<any>("/debug/bars", { symbol: mdSymbol, ktype: "K_1M", n: 3 });
-        setMdBars(r.last || []);
-        setMdSource(r.source || "");
-      } catch {}
+  function titleize(text: string) {
+    if (!text) return "";
+    return text
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b(\w)/g, (m) => m.toUpperCase());
+  }
+
+  function deriveCategory(mode: string, action: string, status: string, reason: string) {
+    const text = `${mode} ${action} ${status} ${reason}`.toLowerCase();
+    if (text.includes("hold")) return "Hold";
+    if (text.includes("guardrail")) return "Guardrail";
+    if (text.includes("validator")) return "Validator";
+    if (text.includes("evaluator")) return "Evaluator";
+    if (text.includes("planner") || text.includes("plan ")) return "Planner";
+    if (text.includes("autopilot act") || text.includes("execution") || text.includes("fill") || text.includes("order")) return "Execution";
+    if (text.includes("autopilot")) return "Autopilot";
+    return mode ? mode : "System";
+  }
+
+  function deriveTone(status: string, action: string, reason: string): "good" | "bad" | "warn" | "neutral" {
+    const combined = `${status} ${action} ${reason}`.toLowerCase();
+    if (combined.includes("hold")) return "neutral";
+    if (combined.includes("reject") || combined.includes("drop") || combined.includes("fail") || combined.includes("error") || combined.includes("cancel")) return "bad";
+    if (combined.includes("exec") || combined.includes("fill") || combined.includes("accept") || combined.includes("complete") || combined.includes("sent")) return "good";
+    if (combined.includes("pending") || combined.includes("plan") || combined.includes("queue") || combined.includes("proposed")) return "warn";
+    return "neutral";
+  }
+
+  function relativeLabel(ts: any) {
+    if (!ts) return "—";
+    try {
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      const diff = Date.now() - d.getTime();
+      if (diff < 0) return "just now";
+      const s = Math.floor(diff / 1000);
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60);
+      if (h < 48) return `${h}h ago`;
+      const days = Math.floor(h / 24);
+      return `${days}d ago`;
+    } catch {
+      return String(ts);
     }
-    load();
-    t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [mdSymbol]);
+  }
+
+  function exactLabel(ts: any) {
+    if (!ts) return "—";
+    try {
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    } catch {
+      return String(ts);
+    }
+  }
+
+  const normalized = useMemo(() => {
+    return logs.map((row, idx) => {
+      const rawTs = row?.ts ?? row?.time ?? row?.timestamp ?? row?.created_at ?? row?.date ?? "";
+      const symbolRaw = row?.symbol ?? row?.sym ?? row?.ticker ?? "";
+      const modeRaw = row?.mode ?? row?.phase ?? row?.source ?? row?.origin ?? "";
+      const actionRaw = row?.action ?? row?.event ?? row?.type ?? row?.decision ?? "";
+      const statusRaw = row?.status ?? row?.result ?? row?.outcome ?? row?.decision ?? "";
+      const reasonRaw = row?.reason ?? row?.message ?? row?.note ?? row?.detail ?? row?.description ?? "";
+      const sideRaw = row?.side ?? row?.order_side ?? row?.direction ?? "";
+      const qtyRaw = row?.qty ?? row?.quantity ?? row?.size ?? row?.volume ?? null;
+      const priceRaw = row?.price ?? row?.limit_price ?? row?.avg_price ?? row?.fill_price ?? null;
+      const hold = /hold/i.test(String(actionRaw)) || /hold/i.test(String(statusRaw)) || /hold/i.test(String(row?.decision ?? "")) || /hold/i.test(String(reasonRaw));
+      const baseStatus = hold ? "Hold" : String(statusRaw || "");
+      const actionText = String(actionRaw || (hold ? "Hold" : ""));
+      const statusText = baseStatus || actionText || "";
+      const category = titleize(deriveCategory(String(modeRaw || ""), actionText, statusText, String(reasonRaw || "")));
+      const tone = deriveTone(statusText, actionText, String(reasonRaw || ""));
+      const statusLabel = statusText ? titleize(statusText) : "—";
+      const actionLabel = actionText ? titleize(actionText) : "";
+      const symbol = symbolRaw ? String(symbolRaw).toUpperCase() : "";
+      const sideUpper = typeof sideRaw === "string" ? String(sideRaw).toUpperCase() : "";
+      let sideClass = "";
+      if (sideUpper.startsWith("B")) sideClass = "buy";
+      else if (sideUpper.startsWith("S")) sideClass = "sell";
+      else if (sideUpper.startsWith("H")) sideClass = "hold";
+      else if (sideUpper) sideClass = sideUpper.toLowerCase();
+      const qtyNum = qtyRaw != null ? Number(qtyRaw) : null;
+      const qty = qtyNum != null && Number.isFinite(qtyNum) ? qtyNum : null;
+      const priceNum = priceRaw != null ? Number(priceRaw) : null;
+      const price = priceNum != null && Number.isFinite(priceNum) ? priceNum : null;
+      const reason = reasonRaw ? String(reasonRaw) : "";
+      const trimmedReason = reason.length > 220 ? `${reason.slice(0, 220)}…` : reason;
+      return {
+        key: row?.id ?? `${rawTs || "row"}-${idx}`,
+        raw: row,
+        when: relativeLabel(rawTs),
+        exact: exactLabel(rawTs),
+        symbol,
+        modeLabel: titleize(String(modeRaw || "")),
+        actionLabel: actionLabel || statusLabel,
+        reason: trimmedReason,
+        status: statusLabel,
+        tone,
+        category,
+        side: sideUpper,
+        sideClass,
+        qty,
+        price,
+      };
+    });
+  }, [logs]);
+
+  const categoryCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    normalized.forEach(entry => {
+      const key = entry.category || "Other";
+      map.set(key, (map.get(key) || 0) + 1);
+    });
+    return map;
+  }, [normalized]);
+
+  const categoryOptions = useMemo(() => {
+    const keys = Array.from(categoryCounts.keys());
+    const order = ["Autopilot", "Planner", "Execution", "Validator", "Evaluator", "Guardrail", "Hold", "System", "Other"];
+    keys.sort((a, b) => {
+      const ia = order.indexOf(a);
+      const ib = order.indexOf(b);
+      if (ia === -1 && ib === -1) return a.localeCompare(b);
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+    return ["All", ...keys];
+  }, [categoryCounts]);
+
+  const filtered = useMemo(() => (
+    activeCategory === "All"
+      ? normalized
+      : normalized.filter(entry => entry.category === activeCategory)
+  ), [normalized, activeCategory]);
+
+  const refreshChoices = useMemo(() => [
+    { value: "1000", label: "1s" },
+    { value: "2500", label: "2.5s" },
+    { value: "5000", label: "5s" },
+    { value: "10000", label: "10s" },
+    { value: "15000", label: "15s" },
+  ], []);
+
+  const showingTotal = filtered.length;
+  const totalEvents = normalized.length;
 
   return (
-    <section className="stack activity">
-      <div className="panel">
-        <h2 className="title-lg" style={{marginTop:0}}>Activity Log</h2>
-        {/* proposed vs executed diff table removed */}
-        <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
+    <section className="activity activity-modern">
+      <div className="panel activity-main">
+        <div className="activity-header">
           <div>
-            <div className="label">Source</div>
+            <h2 className="title-lg" style={{marginTop:0}}>Activity Stream</h2>
+            <span className="help">Updated {logsAt || "—"}{logsLoading ? " • refreshing…" : ""}</span>
+          </div>
+          <div className="activity-header-actions">
+            <button className={`btn ${logsAuto ? "brand" : ""}`} onClick={() => setLogsAuto(!logsAuto)}>
+              {logsAuto ? "Auto refresh: On" : "Auto refresh: Off"}
+            </button>
+            <button className="btn" onClick={refreshLogs} disabled={logsLoading}>{logsLoading ? "Refreshing…" : "Refresh now"}</button>
+            <button className="btn ghost" onClick={() => exportCsv(logs)} disabled={!logs.length}>Export CSV</button>
+          </div>
+        </div>
+        <div className="activity-toolbar">
+          <div className="field">
+            <span className="label">Source</span>
             <NiceSelect
               value={logsSource}
               onChange={(v)=>{ setLogsSource((v as any) as ("system"|"autopilot")); setTimeout(()=>refreshLogs(), 0); }}
               options={[{value:"system",label:"System"},{value:"autopilot",label:"Autopilot"}]}
-              width={160}
+              width="100%"
             />
           </div>
-          <div style={{minWidth:220}}><div className="label">Symbol (optional)</div>
+          <div className="field">
+            <span className="label">Symbol (optional)</span>
             <input className="input search" value={logSymbol}
                    onChange={e=>setLogSymbol(e.target.value)}
                    placeholder="US.AAPL" />
           </div>
-          <div style={{width:140}}><div className="label">Since (hours)</div>
+          <div className="field">
+            <span className="label">Since (hours)</span>
             <input className="input" type="number" value={logSince}
                    onChange={e=>setLogSince(parseInt(e.target.value)||0)} />
           </div>
-          <div>
-            <div className="label">Limit</div>
-            <div className="row" style={{gap:6, alignItems:"center"}}>
-              <input className="input" type="number" value={logLimit}
-                     onChange={e=>setLogLimit(parseInt(e.target.value)||0)}
-                     style={{width:110}} />
-              <button className="btn" onClick={()=>exportCsv(logs)} style={{padding:"6px 10px"}}>Export CSV</button>
+          <div className="field">
+            <span className="label">Limit</span>
+            <input className="input" type="number" value={logLimit}
+                   onChange={e=>setLogLimit(parseInt(e.target.value)||0)} />
+          </div>
+          <div className="field">
+            <span className="label">Refresh cadence</span>
+            <NiceSelect
+              value={String(logsEvery)}
+              onChange={(v)=>setLogsEvery(parseInt(v) || logsEvery)}
+              options={refreshChoices}
+              width="100%"
+            />
+          </div>
+        </div>
+        <div className="activity-filters-row">
+          <span className="activity-count">{`Showing ${showingTotal} of ${totalEvents} events`}</span>
+          <div className="activity-filters">
+            {categoryOptions.map(cat => {
+              const count = cat === "All" ? totalEvents : (categoryCounts.get(cat) || 0);
+              return (
+                <button
+                  key={cat}
+                  className={`filter-chip ${activeCategory === cat ? "active" : ""}`}
+                  onClick={() => setActiveCategory(cat)}
+                  type="button"
+                >
+                  {cat}
+                  <span className="count">{count}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="activity-feed">
+          {filtered.length ? filtered.map(entry => {
+            const qtyLabel = entry.qty != null ? entry.qty.toLocaleString() : null;
+            const priceLabel = entry.price != null
+              ? entry.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+              : null;
+            const toneClass = entry.tone !== "neutral" ? entry.tone : "";
+            const sideClass = entry.sideClass ? entry.sideClass.toLowerCase() : "";
+            return (
+              <div key={entry.key} className={`activity-event ${toneClass}`}>
+                <div className="activity-event__time">
+                  <span className="ago">{entry.when || "—"}</span>
+                  <span className="exact">{entry.exact}</span>
+                </div>
+                <div className="activity-event__body">
+                  <div className="meta-top">
+                    <span className="stage">{entry.category || "Update"}</span>
+                    {entry.symbol && <span className="symbol">{entry.symbol}</span>}
+                    {entry.side && <span className={`side ${sideClass}`}>{entry.side}</span>}
+                    {qtyLabel && <span className="mono">Qty {qtyLabel}</span>}
+                    {priceLabel && <span className="mono">@ {priceLabel}</span>}
+                  </div>
+                  <div className="meta-bottom">
+                    <span className="action">{entry.actionLabel || "—"}</span>
+                    {entry.reason && <span className="reason">{entry.reason}</span>}
+                  </div>
+                </div>
+                <div className="activity-event__status">
+                  <span className={`status ${entry.tone !== "neutral" ? entry.tone : "neutral"}`}>{entry.status}</span>
+                  <button className="btn ghost" onClick={() => onExplain(entry.raw)}>Explain</button>
+                </div>
+              </div>
+            );
+          }) : (
+            <div className="activity-empty">
+              <span>{logs.length ? "No log entries match this view." : "No log entries yet."}</span>
             </div>
-          </div>
-          <div className="row" style={{marginLeft:"auto", gap:10}}>
-            <span className="help">Last updated: {logsAt}</span>
-          </div>
-        </div>
-
-        <div className="table-wrap" style={{maxHeight: 460}}>
-          <table className="table-modern">
-            <thead>
-              <tr>
-                <th>Time</th><th>Mode</th><th>Action</th><th>Symbol</th>
-                <th>Side</th><th>Qty</th><th>Price</th><th>Reason</th><th>Status</th><th>Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {logs.length ? logs.map((r:any)=>(
-                <tr key={r.id ?? `${r.ts}-${Math.random()}`}>
-                  <td className="small mono">{r.ts ?? ""}</td><td>{r.mode ?? ""}</td><td>{r.action ?? ""}</td>
-                  <td>{r.symbol ?? ""}</td><td>{r.side ?? ""}</td><td className="num">{r.qty ?? ""}</td>
-                  <td className="num">{r.price ?? ""}</td><td>{r.reason ?? ""}</td><td>{statusTag(r.status)}</td>
-                  <td><button className="btn" onClick={()=>onExplain(r)}>Explain</button></td>
-                </tr>
-              )) : <tr><td colSpan={9}>No log entries yet.</td></tr>}
-            </tbody>
-          </table>
-        </div>
-        <div className="help" style={{marginTop:8}}>All actions are logged server-side for traceability.</div>
-      </div>
-      <div className="panel">
-        <h2 className="title-lg" style={{marginTop:0}}>Market Data</h2>
-        <div className="row sticky-controls" style={{alignItems:"end", gap:12, marginTop:12}}>
-          <div style={{minWidth:220}}>
-            <div className="label">Symbol</div>
-            <input className="input search" value={mdSymbol}
-                   onChange={e=>setMdSymbol(e.target.value)}
-                   placeholder="US.AAPL" />
-          </div>
-          <div className="row" style={{marginLeft:"auto", gap:10}}>
-            <span className="help">Source: {mdSource || "—"}</span>
-          </div>
-        </div>
-        <div className="table-wrap" style={{maxHeight:200}}>
-          <table className="table-modern">
-            <thead>
-              <tr>
-                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Vol</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mdBars.length ? mdBars.map((b:any,i:number)=>(
-                <tr key={i}>
-                  <td className="small mono">{b.time}</td>
-                  <td className="num">{Number(b.open).toFixed ? Number(b.open).toFixed(2) : b.open}</td>
-                  <td className="num">{Number(b.high).toFixed ? Number(b.high).toFixed(2) : b.high}</td>
-                  <td className="num">{Number(b.low).toFixed ? Number(b.low).toFixed(2) : b.low}</td>
-                  <td className="num">{Number(b.close).toFixed ? Number(b.close).toFixed(2) : b.close}</td>
-                  <td className="num">{Number(b.volume).toLocaleString?.() ?? b.volume}</td>
-                </tr>
-              )) : <tr><td colSpan={6}>No data.</td></tr>}
-            </tbody>
-          </table>
+          )}
         </div>
       </div>
     </section>

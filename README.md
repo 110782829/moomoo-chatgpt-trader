@@ -7,6 +7,7 @@ Core capabilities:
 - Connect to moomoo via local OpenD gateway
 - Run strategies (e.g., MA crossover) and Autopilot GPT planner
 - Desktop UI for controls, preferences, Autopilot, and activity logs
+- Chat assistant renders structured responses (lists, emphasis) in real time and flags when trading directives are saved to persistent memory.
 - Current stats card shows win rate, average R multiple, average realized move, and drawdown
 - Settings tab for connection, risk, data, signals, planner, trading preferences, style preferences, watchlist, and news
 - Preference card accepts natural language style instructions with bullet summary under "GPT will note:"
@@ -103,6 +104,20 @@ Core capabilities:
 
    The UI uses `VITE_API_BASE` (defaults to `http://127.0.0.1:8000`).
    It detects an active session automatically.
+
+## Assistant natural-language commands
+
+The in-app assistant can change bot settings directly when you phrase requests in plain English. Examples include:
+
+- "set min confidence to 0.65" or "limit top n to 5"
+- "set max drawdown to 8%" or "cap max open positions at 6"
+- "set news ttl to 1200 seconds" or "switch news provider to gpt"
+- "change data source to yfinance" or "set ktype to k_1m"
+- "add tsla to watchlist" / "remove amzn from watchlist" / "clear watchlist"
+- "set macd weight to 0.3" or "set news weight to 0.2"
+- "flatten before close 15 minutes" or "trading hours start 06:30"
+
+When a directive updates persistent memory or settings, the assistant acknowledges the change in the chat timeline and the memory pane refreshes automatically.
 
 ## Unlock trading
 

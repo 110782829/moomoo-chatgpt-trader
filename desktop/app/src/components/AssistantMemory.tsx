@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE, GET, SEND } from "../api";
 import api from "../api";
 
@@ -12,14 +12,20 @@ export default function AssistantMemory() {
   const editRef = useRef<HTMLDivElement|null>(null);
   const draftRef = useRef<string>("");
 
-  async function load() {
+  const load = useCallback(async () => {
     try {
       const r = await GET<{ memory: string; style_summary: string; chat_len: number }>("/assistant/memory");
       setMemory(r.memory||""); setStyle(r.style_summary||""); setChatLen(r.chat_len||0);
     } catch {}
     draftRef.current = ""; setEdit(false);
-  }
-  useEffect(()=>{ load(); }, []);
+  }, []);
+  useEffect(()=>{ load(); }, [load]);
+
+  useEffect(() => {
+    const handler = () => { load(); };
+    window.addEventListener("assistant-memory-updated", handler);
+    return () => window.removeEventListener("assistant-memory-updated", handler);
+  }, [load]);
 
   // When entering edit mode, focus and place caret at end on first click
   useEffect(() => {

@@ -10,6 +10,7 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
+from collections import Counter, defaultdict
 
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
@@ -118,165 +119,437 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     include_context: Optional[bool] = True
 
+
+def _assistant_context_lines() -> List[str]:
+    """Gather a detailed snapshot of account state, positions, and settings for chat context."""
+    ctx_lines: List[str] = []
+    account_added = False
+    positions_added = False
+    orders_added = False
+    eq = bp = cash = uc = pnl = 0.0
+
+    def _fmt_qty(val: float) -> str:
+        aval = abs(val)
+        if aval >= 100:
+            return f"{aval:.0f}"
+        if aval >= 10:
+            return f"{aval:.1f}"
+        if aval >= 1:
+            return f"{aval:.2f}"
+        return f"{aval:.3f}"
+
+    try:
+        mgr = _get_autopilot()
+    except Exception:
+        mgr = None
+
+    if mgr is not None:
+        try:
+            st = mgr.status()
+        except Exception:
+            st = {}
+        if isinstance(st, dict) and st:
+            stats = st.get("stats") or {}
+            parts: List[str] = []
+            parts.append(f"status={'on' if st.get('on') else 'off'}")
+            up = stats.get("uptime")
+            if isinstance(up, str) and up:
+                parts.append(f"uptime={up}")
+            ticks = stats.get("ticks")
+            if isinstance(ticks, int) and ticks >= 0:
+                parts.append(f"ticks={ticks}")
+            dec = stats.get("decisions_today")
+            if isinstance(dec, int) and dec >= 0:
+                parts.append(f"decisions_today={dec}")
+            avg_ms = stats.get("avg_think_ms")
+            if isinstance(avg_ms, (int, float)) and avg_ms:
+                parts.append(f"avg_think_ms={int(round(float(avg_ms)))}")
+            rej = stats.get("rejected")
+            if isinstance(rej, int) and rej >= 0:
+                parts.append(f"rejects={rej}")
+            streak = st.get("reject_streak")
+            if isinstance(streak, int) and streak > 0:
+                parts.append(f"reject_streak={streak}")
+            last_tick = st.get("last_tick")
+            if isinstance(last_tick, str) and last_tick:
+                parts.append(f"last_tick={last_tick}")
+            ctx_lines.append("autopilot_stats: " + " ".join(parts))
+
+        last_in = getattr(mgr, "last_input", {}) or {}
+        acct = last_in.get("account") if isinstance(last_in, dict) else {}
+        pos = last_in.get("positions") if isinstance(last_in, dict) else []
+        orders = last_in.get("orders") if isinstance(last_in, dict) else []
+        if isinstance(acct, dict) and acct:
+            try:
+                eq = float(acct.get("equity") or 0.0)
+                bp = float(acct.get("bp") or 0.0)
+                cash = float(acct.get("cash") or 0.0)
+                uc = float(acct.get("unsettled_cash") or 0.0)
+                pnl = float(acct.get("pnl_today") or 0.0)
+                ctx_lines.append(
+                    f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}"
+                )
+                account_added = True
+            except Exception:
+                pass
+
+        mv_map: Dict[str, float] = {}
+        try:
+            universe = last_in.get("universe") if isinstance(last_in, dict) else []
+            if isinstance(universe, list):
+                for u in universe:
+                    if not isinstance(u, dict):
+                        continue
+                    sym = str(u.get("sym") or "")
+                    if not sym:
+                        continue
+                    try:
+                        mv_map[sym] = float(u.get("px") or 0.0)
+                    except Exception:
+                        mv_map[sym] = 0.0
+        except Exception:
+            mv_map = {}
+
+        if isinstance(pos, list) and pos:
+            rows: List[str] = []
+            for p in pos:
+                if not isinstance(p, dict):
+                    continue
+                sym = str(p.get("sym") or p.get("symbol") or "")
+                if not sym:
+                    continue
+                try:
+                    qty = float(p.get("qty") or 0.0)
+                except Exception:
+                    qty = 0.0
+                try:
+                    avg_px = float(p.get("avg") or p.get("avg_cost") or 0.0)
+                except Exception:
+                    avg_px = 0.0
+                px = mv_map.get(sym, avg_px)
+                mv = abs(qty) * px if px else 0.0
+                side = "LONG" if qty >= 0 else "SHORT"
+                qty_txt = _fmt_qty(qty)
+                entry = f"{sym} {side} {qty_txt}"
+                if px:
+                    entry += f" @ {px:.2f}"
+                if mv:
+                    entry += f" (${mv:,.0f})"
+                rows.append(entry)
+            if rows:
+                ctx_lines.append("positions: " + "; ".join(rows[:8]))
+                positions_added = True
+
+        if isinstance(orders, list) and orders:
+            open_rows: List[str] = []
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                sym = str(o.get("sym") or o.get("symbol") or "")
+                status = str(o.get("status") or o.get("order_status") or "").lower()
+                if status in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                    continue
+                side = str(o.get("side") or o.get("trd_side") or "").upper()
+                try:
+                    remaining = float(o.get("remaining") or 0.0)
+                except Exception:
+                    remaining = 0.0
+                if remaining <= 0:
+                    try:
+                        qty_o = float(o.get("qty") or o.get("order_qty") or 0.0)
+                    except Exception:
+                        qty_o = 0.0
+                else:
+                    qty_o = remaining
+                try:
+                    filled = float(o.get("filled") or o.get("dealt_qty") or 0.0)
+                except Exception:
+                    filled = 0.0
+                try:
+                    price = float(o.get("price") or o.get("limit_price") or o.get("avg_fill_price") or 0.0)
+                except Exception:
+                    price = 0.0
+                if not sym:
+                    continue
+                entry = f"{sym} {side or '-'} {int(round(abs(qty_o)))}"
+                if filled > 0:
+                    entry += f" ({int(round(filled))} filled)"
+                if price:
+                    entry += f" @ {price:.2f}"
+                if status:
+                    entry += f" [{status}]"
+                open_rows.append(entry)
+            if open_rows:
+                ctx_lines.append("open_orders: " + "; ".join(open_rows[:8]))
+                orders_added = True
+
+        last_notes = getattr(mgr, "last_notes", None)
+        if last_notes:
+            ctx_lines.append("notes: " + str(last_notes)[:240])
+
+    # Broker/execution fallbacks for account + positions + orders
+    try:
+        c = get_client()
+    except Exception:
+        c = None
+    if c is not None and getattr(c, "connected", False):
+        if not account_added:
+            try:
+                ai = c.get_account_assets()
+                eq = float(ai.get("equity") or 0.0)
+                bp = float(ai.get("bp") or ai.get("buying_power") or 0.0)
+                cash = float(ai.get("cash") or 0.0)
+                uc = float(ai.get("unsettled_cash") or 0.0)
+                ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f}")
+                account_added = True
+            except Exception:
+                pass
+        if not positions_added:
+            try:
+                P = c.get_positions() or []
+                rows = []
+                for r in P:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "")
+                    if not sym:
+                        continue
+                    qty = float(r.get("qty") or r.get("qty_total") or r.get("qty_today") or 0.0)
+                    avg = float(r.get("cost_price") or r.get("avg_cost_price") or 0.0)
+                    side = "LONG" if qty >= 0 else "SHORT"
+                    entry = f"{sym} {side} {_fmt_qty(qty)}"
+                    if avg:
+                        entry += f" @ {avg:.2f}"
+                    rows.append(entry)
+                if rows:
+                    ctx_lines.append("positions: " + "; ".join(rows[:8]))
+                    positions_added = True
+            except Exception:
+                pass
+        if not orders_added:
+            try:
+                O = c.get_orders() or []
+                oo = []
+                for r in O:
+                    if not isinstance(r, dict):
+                        continue
+                    stat = str(r.get("order_status") or r.get("status") or "").lower()
+                    if stat in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                        continue
+                    sym = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "")
+                    if not sym:
+                        continue
+                    side = str(r.get("trd_side") or r.get("side") or "").upper()
+                    qty = float(r.get("qty") or r.get("initial_qty") or 0.0)
+                    price = float(r.get("price") or r.get("order_price") or 0.0)
+                    entry = f"{sym} {side or '-'} {int(round(abs(qty)))}"
+                    if price:
+                        entry += f" @ {price:.2f}"
+                    entry += f" [{stat or 'open'}]"
+                    oo.append(entry)
+                if oo:
+                    ctx_lines.append("open_orders: " + "; ".join(oo[:8]))
+                    orders_added = True
+            except Exception:
+                pass
+
+    try:
+        exec_service = get_execution()
+    except Exception:
+        exec_service = None
+    if exec_service is not None:
+        if not positions_added:
+            try:
+                P2 = exec_service.list_positions() or []
+                rows = []
+                for r in P2:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("symbol") or r.get("sym") or "")
+                    if not sym:
+                        continue
+                    qty = float(r.get("qty") or 0.0)
+                    price = float(r.get("avg_cost") or r.get("avg") or 0.0)
+                    entry = f"{sym} {'LONG' if qty >= 0 else 'SHORT'} {_fmt_qty(qty)}"
+                    if price:
+                        entry += f" @ {price:.2f}"
+                    rows.append(entry)
+                if rows:
+                    ctx_lines.append("positions(sim): " + "; ".join(rows[:8]))
+                    positions_added = True
+            except Exception:
+                pass
+        if not orders_added:
+            try:
+                O2 = exec_service.list_orders(limit=50) or []
+                oo2 = []
+                for o in O2:
+                    if not isinstance(o, dict):
+                        continue
+                    st = str(o.get("status") or "").lower()
+                    if st in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                        continue
+                    sym = str(o.get("symbol") or "")
+                    if not sym:
+                        continue
+                    side = str(o.get("side") or "").upper()
+                    qty = float(o.get("requested_qty") or o.get("qty") or 0.0)
+                    px = o.get("limit_price") or o.get("avg_fill_price") or 0.0
+                    entry = f"{sym} {side or '-'} {int(round(abs(qty)))}"
+                    if px:
+                        entry += f" @ {px:.2f}"
+                    entry += f" [{st or 'open'}]"
+                    oo2.append(entry)
+                if oo2:
+                    ctx_lines.append("open_orders(sim): " + "; ".join(oo2[:8]))
+                    orders_added = True
+            except Exception:
+                pass
+
+    # Settings snapshot (DB)
+    try:
+        prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
+        bits = []
+        if prefs_db.get("stop_loss_pct") is not None:
+            bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
+        if prefs_db.get("take_profit_pct") is not None:
+            bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
+        if prefs_db.get("measured_move_atr_mult") is not None:
+            bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
+        if prefs_db.get("target_winrate_pct") is not None:
+            bits.append(f"winrate {prefs_db.get('target_winrate_pct')}%")
+        if prefs_db.get("target_rr") is not None:
+            bits.append(f"rr {prefs_db.get('target_rr')}")
+        if prefs_db.get("max_dd_pct") is not None:
+            bits.append(f"max_dd {prefs_db.get('max_dd_pct')}%")
+        if bits:
+            ctx_lines.append("prefs(db): " + ", ".join(bits))
+    except Exception:
+        pass
+
+    try:
+        mc_db = _get_json_setting("autopilot.min_confidence", None)
+        tn_db = _get_json_setting("autopilot.top_n", None)
+        sp_db = _get_json_setting("autopilot.strict_prefs", None)
+        planner_bits = []
+        if mc_db is not None:
+            planner_bits.append(f"min_conf {mc_db}")
+        if tn_db is not None:
+            planner_bits.append(f"top_n {tn_db}")
+        if sp_db is not None:
+            planner_bits.append("strict_prefs" if sp_db else "strict_prefs=off")
+        if planner_bits:
+            ctx_lines.append("planner(db): " + ", ".join(planner_bits))
+    except Exception:
+        pass
+
+    try:
+        news_enabled = _get_json_setting("autopilot.use_news", None)
+        news_ttl = _get_json_setting("autopilot.news_ttl_sec", None)
+        provider = _get_json_setting("autopilot.news_provider", None)
+        toggles = []
+        if news_enabled is not None:
+            toggles.append(f"news={'on' if news_enabled else 'off'}")
+        sigs = _get_json_setting("autopilot.signals.enabled", None)
+        if sigs is not None:
+            toggles.append(f"signals={'on' if sigs else 'off'}")
+        auto_w = _get_json_setting("autopilot.signals.auto_weight", None)
+        if auto_w is not None:
+            toggles.append(f"auto_weight={'on' if auto_w else 'off'}")
+        disc = _get_json_setting("autopilot.discovery_enabled", None)
+        if disc is not None:
+            toggles.append(f"discovery={'on' if disc else 'off'}")
+        disc_only = _get_json_setting("autopilot.discovery_only", None)
+        if disc_only is not None:
+            toggles.append(f"discovery_only={'on' if disc_only else 'off'}")
+        if toggles:
+            ctx_lines.append("toggles(db): " + ", ".join(toggles))
+        if news_ttl or provider:
+            ctx_lines.append(
+                "news_settings: "
+                + ("ttl=" + str(int(news_ttl)) + "s " if news_ttl else "")
+                + ("provider=" + str(provider) if provider else "")
+            )
+    except Exception:
+        pass
+
+    try:
+        weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
+        if isinstance(weights_raw, dict) and weights_raw:
+            items = list(weights_raw.items())
+            items.sort(key=lambda kv: float(kv[1] or 0), reverse=True)
+            top = ", ".join([f"{k}={float(v):.2f}" for k, v in items[:6]])
+            if top:
+                ctx_lines.append("weights(db): " + top)
+    except Exception:
+        pass
+
+    try:
+        style = _get_json_setting("autopilot.style_summary", "") or ""
+        if style:
+            lines = [s.strip() for s in _style_lines(style) if s.strip()]
+            if lines:
+                ctx_lines.append("style_summary: " + " | ".join(lines[:8]))
+    except Exception:
+        pass
+
+    try:
+        wl = _get_json_setting("autopilot.discovery_seed", None)
+        if isinstance(wl, list) and wl:
+            ctx_lines.append("watchlist: " + ", ".join([str(s) for s in wl[:12]]))
+    except Exception:
+        pass
+
+    try:
+        data_line = []
+        kt = _get_json_setting("autopilot.ktype", None)
+        if kt:
+            data_line.append(f"ktype={kt}")
+        ttl = _get_json_setting("autopilot.bars_ttl_sec", None)
+        if ttl:
+            data_line.append(f"bars_ttl={ttl}s")
+        deals = _get_json_setting("autopilot.deals_sync_sec", None)
+        if deals:
+            data_line.append(f"deals_sync={deals}s")
+        src = _get_json_setting("autopilot.data_source", None)
+        if src:
+            data_line.append(f"source={src}")
+        if data_line:
+            ctx_lines.append("data_settings: " + " ".join(data_line))
+    except Exception:
+        pass
+
+    try:
+        risk_cfg = _risk_load() or {}
+        if isinstance(risk_cfg, dict) and risk_cfg:
+            risk_bits = [f"enabled={'on' if risk_cfg.get('enabled', True) else 'off'}"]
+            if risk_cfg.get("max_usd_per_trade"):
+                risk_bits.append(f"max_usd={float(risk_cfg.get('max_usd_per_trade')):,.0f}")
+            if risk_cfg.get("max_open_positions"):
+                risk_bits.append(f"max_positions={int(risk_cfg.get('max_open_positions'))}")
+            if risk_cfg.get("max_daily_loss_usd"):
+                risk_bits.append(f"max_daily_loss=${float(risk_cfg.get('max_daily_loss_usd')):,.0f}")
+            flatten = risk_cfg.get("flatten_before_close_min")
+            if flatten:
+                risk_bits.append(f"flatten_before_close={int(flatten)}m")
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if isinstance(hours, dict) and hours.get("start") and hours.get("end"):
+                risk_bits.append(f"hours_pt={hours.get('start')}–{hours.get('end')}")
+            ctx_lines.append("risk: " + " ".join(risk_bits))
+    except Exception:
+        pass
+
+    return [line for line in ctx_lines if line]
+
 @app.post("/assistant/chat")
 def assistant_chat(body: ChatRequest):
     # Build a concise context block for the assistant
-    ctx_lines: List[str] = []
-    if body.include_context:
-        try:
-            mgr = _get_autopilot()
-            st = mgr.status()
-            last_in = mgr.last_input or {}
-            acct = (last_in.get("account") or {}) if isinstance(last_in, dict) else {}
-            pos = (last_in.get("positions") or []) if isinstance(last_in, dict) else []
-            orders = (last_in.get("orders") or []) if isinstance(last_in, dict) else []
-            # Account snapshot
-            eq = float(acct.get("equity") or 0.0); bp = float(acct.get("bp") or 0.0)
-            cash = float(acct.get("cash") or 0.0); uc = float(acct.get("unsettled_cash") or 0.0)
-            pnl = float(acct.get("pnl_today") or 0.0)
-            ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}")
-            # Top positions by abs MV if we have prices
-            mv_map = {u.get('sym'): float(u.get('px') or 0.0) for u in (last_in.get('universe') or []) if isinstance(u, dict) and u.get('sym')}
-            try:
-                top = sorted([
-                    (str(p.get('sym')), abs(float(p.get('qty') or 0.0)) * float(mv_map.get(str(p.get('sym')), 0.0)))
-                    for p in pos if isinstance(p, dict) and p.get('sym')
-                ], key=lambda x: x[1], reverse=True)[:8]
-            except Exception:
-                top = []
-            if top:
-                ctx_lines.append("positions: " + ", ".join([f"{s}:{w:.0f}" for s,w in top]))
-            # Open orders summary
-            try:
-                oo = [o for o in orders if isinstance(o, dict) and str(o.get('status','')).lower() not in ('filled','done','cancelled','canceled','rejected','expired','failed')]
-                if oo:
-                    ctx_lines.append("open_orders: " + ", ".join([f"{o.get('sym')} {o.get('side')} {o.get('qty')} @ {o.get('price')} ({o.get('status')})" for o in oo[:8]]))
-            except Exception:
-                pass
-            # Settings snapshot (planner prefs)
-            try:
-                prefs = (last_in.get("prefs") or {}) if isinstance(last_in, dict) else {}
-                planner = (last_in.get("planner") or {}) if isinstance(last_in, dict) else {}
-                mc = planner.get("min_confidence"); tn = planner.get("top_n"); sp = planner.get("strict_prefs")
-                if prefs:
-                    bits = []
-                    if prefs.get("stop_loss_pct"): bits.append(f"stop {prefs.get('stop_loss_pct')}%")
-                    if prefs.get("take_profit_pct"): bits.append(f"tp {prefs.get('take_profit_pct')}%")
-                    if prefs.get("measured_move_atr_mult"): bits.append(f"mm {prefs.get('measured_move_atr_mult')}x ATR")
-                    if bits:
-                        ctx_lines.append("prefs: " + ", ".join(bits))
-                ctx_lines.append("planner: " + ", ".join([
-                    f"min_conf {mc}" if mc is not None else None,
-                    f"top_n {tn}" if tn is not None else None,
-                    "strict_prefs" if sp else None,
-                ]).replace("None, ", "").strip(" ,"))
-            except Exception:
-                pass
-            # Planner notes, if any
-            if getattr(mgr, 'last_notes', None):
-                ctx_lines.append("notes: " + str(getattr(mgr, 'last_notes'))[:240])
-        except Exception:
-            pass
-        # Fallback: fetch directly from broker + settings if manager context is missing
-        try:
-            if not ctx_lines or (not pos and not orders):
-                c = get_client()
-                if c is not None and getattr(c, "connected", False):
-                    try:
-                        ai = c.get_account_assets()
-                        ctx_lines.append(f"account: equity=${float(ai.get('equity') or 0):,.0f} bp=${float(ai.get('bp') or 0):,.0f} cash=${float(ai.get('cash') or 0):,.0f}")
-                    except Exception:
-                        pass
-                    try:
-                        P = c.get_positions() or []
-                        # rough top 5 by mv using quote-less avg*qty if price not present
-                        top_syms = []
-                        for r in P[:8]:
-                            sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
-                            qty = float(r.get('qty') or r.get('qty_total') or r.get('qty_today') or 0.0)
-                            top_syms.append((sym, abs(qty)))
-                        if top_syms:
-                            ctx_lines.append("positions: " + ", ".join([f"{s}:{int(q)}" for s,q in top_syms if s][:8]))
-                    except Exception:
-                        pass
-                    try:
-                        O = c.get_orders() or []
-                        oo = []
-                        for r in O:
-                            stat = str(r.get('order_status') or r.get('status') or '').lower()
-                            if stat in ('filled','done','cancelled','canceled','rejected','expired','failed'):
-                                continue
-                            sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
-                            side = str(r.get('trd_side') or r.get('side') or '').upper()
-                            qty = float(r.get('qty') or r.get('initial_qty') or 0.0)
-                            price = float(r.get('price') or r.get('order_price') or 0.0)
-                            if sym:
-                                oo.append(f"{sym} {'BUY' if 'BUY' in side else 'SELL'} {int(qty)} @ {price or '-'}")
-                        if oo:
-                            ctx_lines.append("open_orders: " + ", ".join(oo[:8]))
-                    except Exception:
-                        pass
-                # Execution container (SIM) fallback for positions/orders
-                try:
-                    exec_service = get_execution()
-                except Exception:
-                    exec_service = None
-                if exec_service is not None:
-                    try:
-                        P2 = exec_service.list_positions() or []
-                        top2 = []
-                        for r in P2:
-                            sym = str(r.get('symbol') or r.get('sym') or '')
-                            qty = float(r.get('qty') or 0.0)
-                            if sym:
-                                top2.append((sym, abs(qty)))
-                        if top2:
-                            ctx_lines.append("positions(sim): " + ", ".join([f"{s}:{int(q)}" for s,q in top2][:8]))
-                    except Exception:
-                        pass
-                    try:
-                        O2 = exec_service.list_orders(limit=50) or []
-                        oo2 = []
-                        for o in O2:
-                            st = str(o.get('status') or '').lower()
-                            if st in ('filled','done','cancelled','canceled','rejected','expired','failed'):
-                                continue
-                            sym = str(o.get('symbol') or '')
-                            side = str(o.get('side') or '')
-                            qty = float(o.get('requested_qty') or o.get('qty') or 0.0)
-                            px = o.get('limit_price') or o.get('avg_fill_price') or ''
-                            if sym:
-                                oo2.append(f"{sym} {side.upper()} {int(qty)} @ {px or '-'}")
-                        if oo2:
-                            ctx_lines.append("open_orders(sim): " + ", ".join(oo2[:8]))
-                    except Exception:
-                        pass
-            # Settings snapshot (DB) if planner missing
-            try:
-                prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
-                mc_db = _get_json_setting("autopilot.min_confidence", None)
-                tn_db = _get_json_setting("autopilot.top_n", None)
-                sp_db = _get_json_setting("autopilot.strict_prefs", None)
-                bits = []
-                if prefs_db.get('stop_loss_pct'): bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
-                if prefs_db.get('take_profit_pct'): bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
-                if prefs_db.get('measured_move_atr_mult'): bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
-                if bits:
-                    ctx_lines.append("prefs(db): " + ", ".join(bits))
-                planner_bits = []
-                if mc_db is not None: planner_bits.append(f"min_conf {mc_db}")
-                if tn_db is not None: planner_bits.append(f"top_n {tn_db}")
-                if sp_db: planner_bits.append("strict_prefs")
-                if planner_bits:
-                    ctx_lines.append("planner(db): " + ", ".join(planner_bits))
-            except Exception:
-                pass
-        except Exception:
-            pass
+    ctx_lines: List[str] = _assistant_context_lines() if body.include_context else []
 
     # Memory: load conversation + persistent memory
     chat_log: list[dict] = []
     memory_text: str = ""
+    style_summary_text: str = ""
     try:
         chat_log = _get_json_setting("assistant.chat", []) or []
         mem = _get_json_setting("assistant.memory", "") or ""
@@ -288,9 +561,10 @@ def assistant_chat(body: ChatRequest):
     system = (
         "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
         "- Be concise and clear (2–6 sentences).\n"
-        "- You can read the bot's settings and state from the provided context;\n"
-        "  when the user asks to change settings, the backend applies them.\n"
-        "  Acknowledge changes instead of saying you cannot modify settings.\n"
+        "- You operate the live trading autopilot, with full awareness of state and settings.\n"
+        "- The backend already executed any user commands listed in Operator notes.\n"
+        "  Confirm those updates as actions you just performed and describe the new state.\n"
+        "  Never claim you cannot change settings that were just applied.\n"
         "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
         "- Do not place orders here; focus on explanations, risk and next steps.\n"
         "- Prefer concrete steps (levels, stops/takes, what to monitor)."
@@ -337,18 +611,46 @@ def assistant_chat(body: ChatRequest):
         # Update memory by extracting trading directives from recent turns (skip chit-chat)
         mem_changed = False
         try:
+            prev_memory = str(_get_json_setting("assistant.memory", "") or "")
+        except Exception:
+            prev_memory = ""
+        try:
+            prev_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+        except Exception:
+            prev_style = ""
+        memory_text = prev_memory
+        style_summary_text = prev_style
+        try:
             recent_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
             if recent_user:
                 summary = _extract_style_directives(recent_user)
                 if summary:
                     _set_json_setting("assistant.memory", summary)
-                    old_style = _get_json_setting("autopilot.style_summary", "") or ""
-                    merged = _merge_lines(old_style, summary)
+                    try:
+                        memory_text = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        memory_text = summary
+                    if memory_text != prev_memory:
+                        mem_changed = True
+                    merged = _merge_lines(prev_style, summary)
                     cleaned = _clean_style_summary(merged)
-                    mem_changed = (cleaned != old_style)
-                    _set_json_setting("autopilot.style_summary", cleaned)
+                    style_summary_text = cleaned
+                    if cleaned != prev_style:
+                        _set_json_setting("autopilot.style_summary", cleaned)
+                        mem_changed = True
         except Exception:
             pass
+
+        try:
+            memory_text = str(_get_json_setting("assistant.memory", "") or "")
+        except Exception:
+            memory_text = memory_text or ""
+        try:
+            style_summary_text = str(_get_json_setting("autopilot.style_summary", "") or "")
+        except Exception:
+            style_summary_text = style_summary_text or ""
+        if memory_text != prev_memory or style_summary_text != prev_style:
+            mem_changed = True
 
         # Persist assistant reply to chat log so history survives reloads
         try:
@@ -361,7 +663,13 @@ def assistant_chat(body: ChatRequest):
 
         if _actions:
             reply = "Applied: " + ", ".join(_actions) + "\n\n" + reply
-        return {"reply": reply, "memory": memory_text, "actions": _actions}
+        return {
+            "reply": reply,
+            "memory": memory_text,
+            "actions": _actions,
+            "mem_saved": bool(mem_changed),
+            "style_summary": style_summary_text,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -370,171 +678,17 @@ def assistant_chat_stream(q: str, include_context: bool = True):
     # Build the same system prompt & context
     body = ChatRequest(messages=[ChatMessage(role="user", content=q)], include_context=include_context)
     # Reuse logic from non-stream for context + memory + commands
-    ctx_lines: List[str] = []
-    try:
-        mgr = _get_autopilot()
-        st = mgr.status()
-        last_in = mgr.last_input or {}
-        acct = (last_in.get("account") or {}) if isinstance(last_in, dict) else {}
-        pos = (last_in.get("positions") or []) if isinstance(last_in, dict) else []
-        orders = (last_in.get("orders") or []) if isinstance(last_in, dict) else []
-        eq = float(acct.get("equity") or 0.0); bp = float(acct.get("bp") or 0.0)
-        cash = float(acct.get("cash") or 0.0); uc = float(acct.get("unsettled_cash") or 0.0)
-        pnl = float(acct.get("pnl_today") or 0.0)
-        ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}")
-        mv_map = {u.get('sym'): float(u.get('px') or 0.0) for u in (last_in.get('universe') or []) if isinstance(u, dict) and u.get('sym')}
-        try:
-            top = sorted([(str(p.get('sym')), abs(float(p.get('qty') or 0.0)) * float(mv_map.get(str(p.get('sym')), 0.0))) for p in pos if isinstance(p, dict) and p.get('sym')], key=lambda x: x[1], reverse=True)[:8]
-        except Exception:
-            top = []
-        if top: ctx_lines.append("positions: " + ", ".join([f"{s}:{w:.0f}" for s,w in top]))
-        try:
-            oo = [o for o in orders if isinstance(o, dict) and str(o.get('status','')).lower() not in ('filled','done','cancelled','canceled','rejected','expired','failed')]
-            if oo:
-                ctx_lines.append("open_orders: " + ", ".join([f"{o.get('sym')} {o.get('side')} {o.get('qty')} @ {o.get('price')} ({o.get('status')})" for o in oo[:8]]))
-        except Exception:
-            pass
-        if getattr(mgr, 'last_notes', None):
-            ctx_lines.append("notes: " + str(getattr(mgr, 'last_notes'))[:240])
-    except Exception:
-        pass
-    # Fallbacks if manager context is light or lacks assets and activity
-    try:
-        needs_more = False
-        try:
-            needs_more = (eq <= 0 and bp <= 0 and cash <= 0 and uc <= 0 and not pos and not orders)
-        except Exception:
-            needs_more = not ctx_lines
-        if not ctx_lines or needs_more:
-            c = get_client()
-            if c is not None and getattr(c, "connected", False):
-                try:
-                    ai = c.get_account_assets()
-                    ctx_lines.append(f"account: equity=${float(ai.get('equity') or 0):,.0f} bp=${float(ai.get('bp') or 0):,.0f} cash=${float(ai.get('cash') or 0):,.0f}")
-                except Exception:
-                    pass
-                try:
-                    P = c.get_positions() or []
-                    top_syms = []
-                    for r in P[:8]:
-                        sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
-                        qty = float(r.get('qty') or r.get('qty_total') or r.get('qty_today') or 0.0)
-                        top_syms.append((sym, abs(qty)))
-                    if top_syms:
-                        ctx_lines.append("positions: " + ", ".join([f"{s}:{int(q)}" for s,q in top_syms if s][:8]))
-                except Exception:
-                    pass
-                try:
-                    O = c.get_orders() or []
-                    oo = []
-                    for r in O:
-                        stat = str(r.get('order_status') or r.get('status') or '').lower()
-                        if stat in ('filled','done','cancelled','canceled','rejected','expired','failed'):
-                            continue
-                        sym = str(r.get('code') or r.get('stock_code') or r.get('symbol') or '')
-                        side = str(r.get('trd_side') or r.get('side') or '').upper()
-                        qty = float(r.get('qty') or r.get('initial_qty') or 0.0)
-                        price = float(r.get('price') or r.get('order_price') or 0.0)
-                        if sym:
-                            oo.append(f"{sym} {'BUY' if 'BUY' in side else 'SELL'} {int(qty)} @ {price or '-'}")
-                    if oo:
-                        ctx_lines.append("open_orders: " + ", ".join(oo[:8]))
-                except Exception:
-                    pass
-            # Execution container (SIM) fallback
-            try:
-                exec_service = get_execution()
-            except Exception:
-                exec_service = None
-            if exec_service is not None:
-                try:
-                    P2 = exec_service.list_positions() or []
-                    top2 = []
-                    for r in P2:
-                        sym = str(r.get('symbol') or r.get('sym') or '')
-                        qty = float(r.get('qty') or 0.0)
-                        if sym:
-                            top2.append((sym, abs(qty)))
-                    if top2:
-                        ctx_lines.append("positions(sim): " + ", ".join([f"{s}:{int(q)}" for s,q in top2][:8]))
-                except Exception:
-                    pass
-                try:
-                    O2 = exec_service.list_orders(limit=50) or []
-                    oo2 = []
-                    for o in O2:
-                        st = str(o.get('status') or '').lower()
-                        if st in ('filled','done','cancelled','canceled','rejected','expired','failed'):
-                            continue
-                        sym = str(o.get('symbol') or '')
-                        side = str(o.get('side') or '')
-                        qty = float(o.get('requested_qty') or o.get('qty') or 0.0)
-                        px = o.get('limit_price') or o.get('avg_fill_price') or ''
-                        if sym:
-                            oo2.append(f"{sym} {side.upper()} {int(qty)} @ {px or '-'}")
-                    if oo2:
-                        ctx_lines.append("open_orders(sim): " + ", ".join(oo2[:8]))
-                except Exception:
-                    pass
-        # Settings from DB
-        try:
-            prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
-            mc_db = _get_json_setting("autopilot.min_confidence", None)
-            tn_db = _get_json_setting("autopilot.top_n", None)
-            sp_db = _get_json_setting("autopilot.strict_prefs", None)
-            bits = []
-            if prefs_db.get('stop_loss_pct'): bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
-            if prefs_db.get('take_profit_pct'): bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
-            if prefs_db.get('measured_move_atr_mult'): bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
-            if bits:
-                ctx_lines.append("prefs(db): " + ", ".join(bits))
-            planner_bits = []
-            if mc_db is not None: planner_bits.append(f"min_conf {mc_db}")
-            if tn_db is not None: planner_bits.append(f"top_n {tn_db}")
-            if sp_db: planner_bits.append("strict_prefs")
-            if planner_bits:
-                ctx_lines.append("planner(db): " + ", ".join(planner_bits))
-            # feature toggles summary
-            try:
-                news = _get_json_setting("autopilot.use_news", None)
-                sigs = _get_json_setting("autopilot.signals.enabled", None)
-                autow = _get_json_setting("autopilot.signals.auto_weight", None)
-                disc = _get_json_setting("autopilot.discovery_enabled", None)
-                diso = _get_json_setting("autopilot.discovery_only", None)
-                weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
-                toggles = []
-                if news is not None: toggles.append(f"news={'on' if news else 'off'}")
-                if sigs is not None: toggles.append(f"signals={'on' if sigs else 'off'}")
-                if autow is not None: toggles.append(f"auto_weight={'on' if autow else 'off'}")
-                if disc is not None: toggles.append(f"discovery={'on' if disc else 'off'}")
-                if diso is not None: toggles.append(f"discovery_only={'on' if diso else 'off'}")
-                if toggles:
-                    ctx_lines.append("toggles(db): " + ", ".join(toggles))
-                # summarize top weights
-                try:
-                    if isinstance(weights_raw, dict) and weights_raw:
-                        items = list(weights_raw.items())
-                        items.sort(key=lambda kv: float(kv[1] or 0), reverse=True)
-                        top = ", ".join([f"{k}={float(v):.2f}" for k,v in items[:6]])
-                        if top:
-                            ctx_lines.append("weights(db): " + top)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
+    ctx_lines: List[str] = _assistant_context_lines() if include_context else []
 
     chat_log = _get_json_setting("assistant.chat", []) or []
     memory_text = str(_get_json_setting("assistant.memory", "") or "")
     system = (
         "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
         "- Be concise and clear (2–6 sentences).\n"
-        "- You can read the bot's settings and state from the provided context;\n"
-        "  when the user asks to change settings, the backend applies them.\n"
-        "  Acknowledge changes instead of saying you cannot modify settings.\n"
+        "- You operate the live trading autopilot, with full awareness of state and settings.\n"
+        "- The backend already executed any user commands listed in Operator notes.\n"
+        "  Confirm those updates as actions you just performed and describe the new state.\n"
+        "  Never claim you cannot change settings that were just applied.\n"
         "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
         "- Do not place orders here; focus on explanations, risk and next steps.\n"
         "- Prefer concrete steps (levels, stops/takes, what to monitor)."
@@ -597,17 +751,48 @@ def assistant_chat_stream(q: str, include_context: bool = True):
                             continue
                 # Summarize to memory after completion
                 mem_changed = False
+                memory_snapshot = ""
+                style_snapshot = ""
                 try:
+                    try:
+                        prev_memory = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        prev_memory = ""
+                    try:
+                        prev_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+                    except Exception:
+                        prev_style = ""
+                    memory_snapshot = prev_memory
+                    style_snapshot = prev_style
                     joined_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
                     if joined_user:
                         summary = _extract_style_directives(joined_user)
                         if summary:
                             _set_json_setting("assistant.memory", summary)
-                            old_style = _get_json_setting("autopilot.style_summary", "") or ""
-                            merged = _merge_lines(old_style, summary)
+                            try:
+                                memory_snapshot = str(_get_json_setting("assistant.memory", "") or "")
+                            except Exception:
+                                memory_snapshot = summary
+                            if memory_snapshot != prev_memory:
+                                mem_changed = True
+                            merged = _merge_lines(prev_style, summary)
                             cleaned = _clean_style_summary(merged)
-                            _set_json_setting("autopilot.style_summary", cleaned)
-                            mem_changed = (cleaned != old_style)
+                            if cleaned != prev_style:
+                                _set_json_setting("autopilot.style_summary", cleaned)
+                                mem_changed = True
+                            style_snapshot = cleaned
+                    try:
+                        memory_snapshot = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        memory_snapshot = memory_snapshot or ""
+                    try:
+                        current_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+                        if not style_snapshot:
+                            style_snapshot = current_style
+                    except Exception:
+                        style_snapshot = style_snapshot or ""
+                    if memory_snapshot != prev_memory or style_snapshot != prev_style:
+                        mem_changed = True
                     # Persist assistant reply to chat log
                     try:
                         text = "".join(full)
@@ -620,6 +805,19 @@ def assistant_chat_stream(q: str, include_context: bool = True):
                         pass
                 except Exception:
                     pass
+                if mem_changed:
+                    try:
+                        payload = {}
+                        if memory_snapshot:
+                            payload["memory"] = memory_snapshot
+                        if style_snapshot:
+                            payload["style_summary"] = style_snapshot
+                        if payload:
+                            yield "data: __MEM_SAVED__|" + _json.dumps(payload) + "\n\n"
+                        else:
+                            yield "data: __MEM_SAVED__\n\n"
+                    except Exception:
+                        pass
                 # Emit actions applied (for client-side label) if there were commands
                 try:
                     if actions:
@@ -1924,6 +2122,54 @@ def _get_autopilot():
         _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=get_execution)
     return _autopilot_mgr
 
+def _resolve_watchlist_symbols(limit: Optional[int] = 4) -> List[str]:
+    """Best-effort universe snapshot for dashboard charts."""
+    candidates: List[str] = []
+
+    # Primary: explicit discovery seed list (user curated)
+    seed = _get_json_setting("autopilot.discovery_seed", None)
+    if isinstance(seed, list):
+        candidates.extend(str(s).strip() for s in seed if str(s).strip())
+
+    # Secondary: legacy/autopilot watchlist storage (manual overrides)
+    raw = _get_json_setting("autopilot.watchlist", None)
+    if isinstance(raw, list):
+        candidates.extend(str(s).strip() for s in raw if str(s).strip())
+    elif isinstance(raw, str):
+        candidates.extend(s.strip() for s in raw.split(",") if s and s.strip())
+
+    # Fallback to live universe the manager is using (may include discovery results)
+    if not candidates:
+        try:
+            mgr = _get_autopilot()
+            last_input = getattr(mgr, "last_input", {}) or {}
+            universe = last_input.get("universe") or last_input.get("watchlist") or last_input.get("symbols") or []
+            if isinstance(universe, list):
+                for item in universe:
+                    if isinstance(item, dict):
+                        sym = str(item.get("sym") or item.get("symbol") or "").strip()
+                    else:
+                        sym = str(item or "").strip()
+                    if sym:
+                        candidates.append(sym)
+        except Exception:
+            candidates = []
+
+    if not candidates:
+        fallback = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA").split(",")
+        candidates.extend(s.strip() for s in fallback if s and s.strip())
+
+    deduped: List[str] = []
+    seen = set()
+    cap = None if (limit is None or int(limit) <= 0) else max(1, int(limit))
+    for sym in candidates:
+        if sym and sym not in seen:
+            deduped.append(sym)
+            seen.add(sym)
+        if cap is not None and len(deduped) >= cap:
+            break
+    return deduped
+
 @autopilot_router.post("/enable")
 async def autopilot_enable(body: dict):
     """
@@ -2015,6 +2261,175 @@ async def autopilot_last_diff():
     except Exception:
         note = None
     return {"proposed": proposed[:12], "kept": kept[:12], "executed": executed[:12], "notes": note}
+
+@autopilot_router.get("/watchlist_snapshot")
+def autopilot_watchlist_snapshot(limit: int = 4, interval: str = "K_1M", bars: int = 120, since_hours: int = 36):
+    """Compact market snapshot for dashboard watchlist visuals."""
+    try:
+        limit_int = int(limit)
+    except Exception:
+        limit_int = 4
+    symbols = _resolve_watchlist_symbols(limit=limit_int)
+    client = get_client()
+
+    def _norm_ts(value) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None).isoformat()
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            text = text.replace("/", "-")
+            if "T" not in text and " " in text:
+                text = text.replace(" ", "T")
+            clean = text[:-1] if text.endswith("Z") else text
+            try:
+                dt = datetime.fromisoformat(clean)
+                return dt.isoformat()
+            except Exception:
+                return text
+        except Exception:
+            return None
+
+    def _safe_json(raw) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    capped = int(max(20, min(bars, 360)))
+    series: List[Dict[str, Any]] = []
+    for sym in symbols:
+        entry: Dict[str, Any] = {"symbol": sym, "bars": [], "events": []}
+        closes: List[float] = []
+        source = ""
+        try:
+            raw_bars, source = get_bars_safely(client, sym, interval, capped)
+            normalized = []
+            for row in raw_bars[-capped:]:
+                try:
+                    close = float(row.get("close") or row.get("Close") or row.get("end_price") or 0.0)
+                except Exception:
+                    close = 0.0
+                try:
+                    high = float(row.get("high") or row.get("High") or close)
+                except Exception:
+                    high = close
+                try:
+                    low = float(row.get("low") or row.get("Low") or close)
+                except Exception:
+                    low = close
+                ts = _norm_ts(row.get("time_key") or row.get("time") or row.get("datetime") or row.get("Date") or row.get("ts"))
+                if ts is None:
+                    continue
+                normalized.append({"ts": ts, "close": close, "high": high, "low": low})
+                closes.append(close)
+            entry["bars"] = normalized
+        except Exception as e:
+            entry["error"] = str(e)
+        entry["source"] = source
+
+        fast_period = 8
+        slow_period = 21
+
+        def _sma(period: int) -> List[Optional[float]]:
+            out: List[Optional[float]] = []
+            for idx in range(len(closes)):
+                if idx + 1 < period:
+                    out.append(None)
+                    continue
+                window = closes[idx + 1 - period: idx + 1]
+                out.append(sum(window) / float(period))
+            return out
+
+        if closes:
+            fast = _sma(fast_period)
+            slow = _sma(slow_period)
+            bars_list = entry.get("bars")
+            if isinstance(bars_list, list):
+                for idx, bar in enumerate(bars_list):
+                    bar["sma_fast"] = fast[idx] if idx < len(fast) else None
+                    bar["sma_slow"] = slow[idx] if idx < len(slow) else None
+            try:
+                entry["change_pct"] = ((closes[-1] - closes[0]) / closes[0]) * 100.0 if closes and closes[0] else 0.0
+            except Exception:
+                entry["change_pct"] = None
+
+        try:
+            rows = list_action_logs(limit=400, symbol=sym, since_hours=max(6, since_hours))  # type: ignore[arg-type]
+        except Exception:
+            rows = []
+
+        order_actions: Dict[str, str] = {}
+        for row in rows:
+            if str(row.get("action") or "").lower() != "validator_executed":
+                continue
+            extra = _safe_json(row.get("extra_json"))
+            order_id = str(extra.get("order_id") or "").strip()
+            action_name = None
+            proposal = extra.get("proposal")
+            if isinstance(proposal, dict):
+                action_name = str(proposal.get("action") or "").lower()
+            if order_id and action_name:
+                order_actions[order_id] = action_name
+
+        events: List[Dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("action") or "").lower() != "autopilot_act":
+                continue
+            status = str(row.get("status") or "").lower()
+            if status in ("skipped", "blocked", "planned"):
+                continue
+            ts = _norm_ts(row.get("ts"))
+            if ts is None:
+                continue
+            extra = _safe_json(row.get("extra_json"))
+            order_id = str(extra.get("order_id") or "").strip()
+            action_name = order_actions.get(order_id, "")
+            side = str(row.get("side") or "").upper()
+            entry_type = "entry"
+            if action_name:
+                if action_name in ("close", "trim", "reduce") or "close" in action_name:
+                    entry_type = "exit"
+                elif action_name in ("open", "add"):
+                    entry_type = "entry"
+            elif side == "SELL":
+                entry_type = "exit"
+            price_val = row.get("price")
+            try:
+                price = float(price_val) if price_val is not None else None
+            except Exception:
+                price = None
+            qty_val = row.get("qty")
+            try:
+                qty = float(qty_val) if qty_val is not None else None
+            except Exception:
+                qty = None
+            events.append({
+                "ts": ts,
+                "side": side or None,
+                "status": status,
+                "qty": qty,
+                "price": price,
+                "order_id": order_id or None,
+                "action": action_name or None,
+                "type": entry_type,
+            })
+        events.sort(key=lambda e: str(e.get("ts") or ""))
+        entry["events"] = events
+
+        series.append(entry)
+
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "symbols": series,
+    }
 
 @autopilot_router.get("/env_debug")
 def autopilot_env_debug():
@@ -2413,6 +2828,9 @@ def _apply_simple_commands(text: str) -> list[str]:
         m = re.search(r"(rr|risk[- ]?reward)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t)
         if m:
             prefs["target_rr"] = float(m.group(2)); changed = True; confirms.append(f"target_rr {prefs['target_rr']}")
+        m = re.search(r"max\s*(?:drawdown|dd)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["max_dd_pct"] = float(m.group(1)); changed = True; confirms.append(f"max_dd_pct {prefs['max_dd_pct']}%")
         if changed:
             _set_json_setting("autopilot.prefs", prefs)
     except Exception:
@@ -2463,6 +2881,157 @@ def _apply_simple_commands(text: str) -> list[str]:
         m = re.search(r"top\s*n\s*(?:to|=)?\s*(\d+)", t, re.I)
         if m:
             _set_json_setting("autopilot.top_n", int(m.group(1))); confirms.append(f"top_n {int(m.group(1))}")
+    except Exception:
+        pass
+    # Risk guardrails
+    try:
+        risk_cfg = _risk_load() or {}
+        if not isinstance(risk_cfg, dict):
+            risk_cfg = {}
+        changed = False
+        if re.search(r"\b(enable|turn on)\s*(risk|guardrails|safety)\b", t):
+            risk_cfg["enabled"] = True; changed = True; confirms.append("risk enabled")
+        if re.search(r"\b(disable|turn off)\s*(risk|guardrails|safety)\b", t):
+            risk_cfg["enabled"] = False; changed = True; confirms.append("risk disabled")
+        m = re.search(r"max\s*(?:usd|dollar)s?\s*(?:per\s*trade|trade)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            risk_cfg["max_usd_per_trade"] = float(m.group(1)); changed = True; confirms.append(f"max_usd_per_trade {float(m.group(1))}")
+        m = re.search(r"max\s*(?:open\s*)?positions?\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            risk_cfg["max_open_positions"] = int(m.group(1)); changed = True; confirms.append(f"max_open_positions {int(m.group(1))}")
+        m = re.search(r"max\s*(?:daily\s*)?loss\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*(?:usd|dollars|\$)?(?!\s*%)", t)
+        if m:
+            risk_cfg["max_daily_loss_usd"] = float(m.group(1)); changed = True; confirms.append(f"max_daily_loss_usd {float(m.group(1))}")
+        m = re.search(r"flatten\s*(?:before)?\s*(?:close)?\s*(?:to|=)?\s*(\d+)\s*(?:min|minute)s?", t)
+        if m:
+            risk_cfg["flatten_before_close_min"] = int(m.group(1)); changed = True; confirms.append(f"flatten_before_close_min {int(m.group(1))}")
+        def _norm_time(raw: str) -> str:
+            raw = raw.strip()
+            digits = re.sub(r"[^0-9]", "", raw)
+            if ":" in raw:
+                hh, mm = raw.split(":", 1)
+                return f"{int(hh):02d}:{mm[:2]}"
+            if len(digits) == 3:
+                return f"{digits[0]}:{digits[1:]}"
+            if len(digits) >= 4:
+                return f"{digits[:2]}:{digits[2:4]}"
+            return raw
+        m = re.search(r"trading\s*(?:hours?|session)?\s*(?:start|open)\s*(?:at|=)?\s*(\d{1,2}:?\d{2})", t)
+        if m:
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if not isinstance(hours, dict):
+                hours = {}
+            hours["start"] = _norm_time(m.group(1))
+            risk_cfg["trading_hours_pt"] = hours; changed = True; confirms.append(f"trading_start {hours['start']}")
+        m = re.search(r"trading\s*(?:hours?|session)?\s*(?:end|close)\s*(?:at|=)?\s*(\d{1,2}:?\d{2})", t)
+        if m:
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if not isinstance(hours, dict):
+                hours = {}
+            hours["end"] = _norm_time(m.group(1))
+            risk_cfg["trading_hours_pt"] = hours; changed = True; confirms.append(f"trading_end {hours['end']}")
+        if changed:
+            _risk_save(risk_cfg)
+    except Exception:
+        pass
+    # Data + news configuration tweaks
+    try:
+        data_changed = False
+        m = re.search(r"ktype\s*(?:to|=)?\s*(k[_\s]?[0-9a-z]+)", t)
+        if m:
+            kt = m.group(1).replace(" ", "_").upper()
+            if not kt.startswith("K_") and kt.startswith("K"):
+                kt = "K_" + kt.split("_", 1)[-1]
+            _set_json_setting("autopilot.ktype", kt)
+            data_changed = True
+            confirms.append(f"ktype {kt}")
+        m = re.search(r"bars?\s*ttl\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            _set_json_setting("autopilot.bars_ttl_sec", int(m.group(1)))
+            data_changed = True
+            confirms.append(f"bars_ttl_sec {int(m.group(1))}")
+        m = re.search(r"(deals|fills)\s*(?:sync)?\s*(?:every|to|=)?\s*(\d+)\s*(?:sec|seconds|s)", t)
+        if m:
+            _set_json_setting("autopilot.deals_sync_sec", int(m.group(2)))
+            data_changed = True
+            confirms.append(f"deals_sync_sec {int(m.group(2))}")
+        m = re.search(r"data\s*(?:source)?\s*(?:to|=)?\s*(futu|moomoo|yahoo|yfinance)", t)
+        if m:
+            src = m.group(1).strip().lower()
+            src = "futu" if src in ("futu", "moomoo") else "yfinance"
+            _set_json_setting("autopilot.data_source", src)
+            data_changed = True
+            confirms.append(f"data_source {src}")
+        m = re.search(r"news\s*ttl\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            _set_json_setting("autopilot.news_ttl_sec", int(m.group(1)))
+            confirms.append(f"news_ttl_sec {int(m.group(1))}")
+        m = re.search(r"news\s*provider\s*(?:to|=)?\s*(gpt|heuristic)", t)
+        if m:
+            provider = m.group(1).strip().lower()
+            _set_json_setting("autopilot.news_provider", provider)
+            confirms.append(f"news_provider {provider}")
+    except Exception:
+        pass
+    # Signal weights adjustments
+    try:
+        weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
+        if not isinstance(weights_raw, dict):
+            weights_raw = {}
+        changed = False
+        mapping = {
+            "macd cross": "macd_cross",
+            "macd": "macd_cross",
+            "bollinger breakout": "bb_breakout",
+            "bollinger": "bb_breakout",
+            "stoch rsi": "stoch_rsi_extreme",
+            "stochastic rsi": "stoch_rsi_extreme",
+            "stoch": "stoch_rsi_extreme",
+            "ma trend": "ma_trend",
+            "moving average": "ma_trend",
+            "rsi extreme": "rsi_extreme",
+            "rsi": "rsi_extreme",
+            "news": "news",
+        }
+        for m in re.finditer(r"(macd cross|macd|bollinger breakout|bollinger|stoch rsi|stochastic rsi|stoch|ma trend|moving average|rsi extreme|rsi|news)\s*(?:signal\s*)?(?:weight|wt)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t):
+            key = mapping.get(m.group(1).strip())
+            if not key:
+                continue
+            try:
+                val = float(m.group(2))
+            except Exception:
+                continue
+            weights_raw[key] = val
+            changed = True
+            confirms.append(f"signal_weight {key}={val}")
+        if changed:
+            _set_json_setting("autopilot.signals.weights", weights_raw)
+    except Exception:
+        pass
+    # Discovery watchlist adjustments
+    try:
+        wl_raw = _get_json_setting("autopilot.discovery_seed", None)
+        wl = list(wl_raw) if isinstance(wl_raw, list) else []
+        changed = False
+        for m in re.finditer(r"add\s+([A-Za-z0-9\.]{1,10})\s+(?:to\s+)?watchlist", t):
+            sym = _normalize_symbol(m.group(1))
+            if sym and sym not in wl:
+                wl.append(sym)
+                changed = True
+                confirms.append(f"watchlist add {sym}")
+        for m in re.finditer(r"remove\s+([A-Za-z0-9\.]{1,10})\s+(?:from\s+)?watchlist", t):
+            sym = _normalize_symbol(m.group(1))
+            if sym and sym in wl:
+                wl = [s for s in wl if s != sym]
+                changed = True
+                confirms.append(f"watchlist remove {sym}")
+        if "clear watchlist" in t or "empty watchlist" in t:
+            if wl:
+                wl = []
+                changed = True
+                confirms.append("watchlist cleared")
+        if changed:
+            _set_json_setting("autopilot.discovery_seed", wl)
     except Exception:
         pass
     return confirms
@@ -2925,6 +3494,101 @@ def autopilot_weekly():
         rows = []
 
     import json as _json
+
+    def _safe_json_local(raw: Any) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return {}
+
+    def _normalize_day(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        cleaned = text.replace("/", "-")
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1]
+        if "T" not in cleaned and " " in cleaned:
+            cleaned = cleaned.replace(" ", "T")
+        try:
+            dt = datetime.fromisoformat(cleaned)
+            return dt.date().isoformat()
+        except Exception:
+            # last resort: slice first 10 chars if they look like a date
+            head = cleaned[:10]
+            return head if head and head[0].isdigit() else None
+
+    hold_reason_keywords = {
+        "low_confidence",
+        "strict_prefs",
+        "policy_reduce_only",
+        "policy_long_only",
+        "policy_short_only",
+        "policy",
+        "flatten_window",
+        "market_closed",
+        "no_execution_service",
+        "planner_invalid",
+        "pref_check",
+    }
+    executed_statuses = {"filled", "executed", "completed", "done", "ok", "success"}
+    pending_statuses = {"submitted", "pending", "open", "accepted", "planned", "partially_filled", "partial", "working"}
+    blocked_statuses = {"blocked", "guardrail"}
+    skipped_statuses = {"skipped", "idempotent", "planned_no_exec", "skip_existing"}
+    drop_statuses = {"validator_dropped", "evaluator_dropped"}
+
+    decision_counts: Counter = Counter()
+    daily_counts: Dict[str, Counter] = defaultdict(Counter)
+
+    def _classify_decision(action: str, status: str, reason: str, qty_val: Any, extra: Dict[str, Any]) -> Optional[str]:
+        act = (action or "").lower()
+        st = (status or "").lower()
+        rs = (reason or "").lower()
+        try:
+            qty = float(qty_val or 0)
+        except Exception:
+            qty = 0.0
+        order_id = str(extra.get("order_id") or "") if extra else ""
+
+        if st in executed_statuses:
+            return "executed"
+        if st in blocked_statuses or rs.startswith("guardrail"):
+            return "blocked"
+        if st in skipped_statuses:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            return "skipped"
+        if st in drop_statuses:
+            return "blocked"
+        if st in pending_statuses:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            return "pending"
+        if st in {"rejected", "failed", "error", "cancelled", "canceled", "expired"}:
+            if order_id:
+                return "rejected"
+            if qty <= 0 and any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            if "hold" in rs:
+                return "hold"
+            return "rejected"
+        if st == "planned" and any(k in rs for k in hold_reason_keywords):
+            return "hold"
+        if not st:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+        if act == "autopilot_act" and qty <= 0 and (any(k in rs for k in hold_reason_keywords) or extra.get("next_action") == "hold"):
+            return "hold"
+        if act.startswith("validator") and extra.get("next_action") == "hold":
+            return "hold"
+        return None
+
     # Per-strategy attribution: count strength weighted appearances in 'autopilot_act' signals_used
     strat_use: Dict[str, float] = {}
     reweights: int = 0
@@ -2940,12 +3604,16 @@ def autopilot_weekly():
             act = str(r.get("action") or "")
             src = str(r.get("source") or "")
             reason = str(r.get("reason") or "")
+            status_txt = str(r.get("status") or "")
+            extra = _safe_json_local(r.get("extra_json"))
+            day_key = _normalize_day(r.get("ts") or r.get("created_at"))
+            verdict = _classify_decision(act, status_txt, reason, r.get("qty"), extra)
+            if verdict:
+                decision_counts[verdict] += 1
+                if day_key:
+                    daily_counts[day_key][verdict] += 1
+
             if act == "autopilot_act":
-                extra = {}
-                try:
-                    extra = _json.loads(r.get("extra_json") or "{}")
-                except Exception:
-                    extra = {}
                 for s in extra.get("signals_used", []) or []:
                     k = str(s.get("strategy") or "")
                     if not k:
@@ -2964,29 +3632,19 @@ def autopilot_weekly():
             elif act == "autopilot" and reason == "signals_reweighted":
                 reweights += 1
             elif act == "planner_proposed":
-                extra = {}
-                try:
-                    extra = _json.loads(r.get("extra_json") or "{}")
-                except Exception:
-                    extra = {}
                 proposed_total += int(extra.get("n") or 0)
                 for s in extra.get("syms") or []:
                     sym = str(s)
                     if sym:
                         proposed_counts[sym] = proposed_counts.get(sym, 0) + 1
+                if day_key:
+                    try:
+                        daily_counts[day_key]["proposed"] += int(extra.get("n") or 0)
+                    except Exception:
+                        pass
             elif act == "validator_result":
-                extra = {}
-                try:
-                    extra = _json.loads(r.get("extra_json") or "{}")
-                except Exception:
-                    extra = {}
                 validator_dropped += int(extra.get("dropped") or 0)
             elif act == "evaluator_result":
-                extra = {}
-                try:
-                    extra = _json.loads(r.get("extra_json") or "{}")
-                except Exception:
-                    extra = {}
                 evaluator_dropped += int(extra.get("dropped") or 0)
             elif act == "autopilot" and reason == "planner_invalid_json":
                 missed_rules["planner_invalid_json"] += 1
@@ -3007,6 +3665,28 @@ def autopilot_weekly():
     out["proposed_counts"] = proposed_counts
     out["executed_counts"] = executed_counts
     out["decision_reasons"] = decision_reasons
+    try:
+        out["watchlist_symbols"] = _resolve_watchlist_symbols(limit=None)
+    except Exception:
+        out["watchlist_symbols"] = []
+    out["decision_breakdown"] = dict(decision_counts)
+    if daily_counts:
+        days_sorted = sorted(daily_counts.keys())[-7:]
+        out["daily_activity"] = [
+            {
+                "date": day,
+                "proposed": int(daily_counts[day].get("proposed", 0)),
+                "executed": int(daily_counts[day].get("executed", 0)),
+                "holds": int(daily_counts[day].get("hold", 0)),
+                "blocked": int(daily_counts[day].get("blocked", 0)),
+                "rejected": int(daily_counts[day].get("rejected", 0)),
+                "skipped": int(daily_counts[day].get("skipped", 0)),
+                "pending": int(daily_counts[day].get("pending", 0)),
+            }
+            for day in days_sorted
+        ]
+    else:
+        out["daily_activity"] = []
     return out
 
 @autopilot_router.get("/pnl_series")
