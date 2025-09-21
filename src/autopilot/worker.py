@@ -172,8 +172,6 @@ class AutopilotManager:
         self._decisions_day: str | None = None
         self.stats.setdefault("avg_think_ms", 0)
         self.stats.setdefault("decisions_today", 0)
-        # Idempotence map: decision key -> expiry_ts
-        self._live_decisions: Dict[str, float] = {}
         # Light memory of recent decisions per symbol for the planner
         self._decision_history: Dict[str, List[Dict[str, Any]]] = {}
         self._recent_guardrails: List[Dict[str, Any]] = []
@@ -205,6 +203,10 @@ class AutopilotManager:
             self._fast_mode = str(os.getenv("AUTOPILOT_FAST_MODE", "0")).strip().lower() not in ("0","false","no")
         except Exception:
             self._fast_mode = False
+
+        # Risk: flatten-before-close enforcement trackers
+        self._flatten_last_attempt_day: Optional[str] = None
+        self._flatten_last_attempt_ts: float = 0.0
 
     def _record_decision(
         self,
@@ -755,6 +757,10 @@ class AutopilotManager:
             "max_usd_per_trade": float(risk_cfg.get("max_usd_per_trade") or 0.0),
             "symbol_blocklist": list(risk_cfg.get("symbol_blocklist") or []),
         }
+        try:
+            risk["flatten_before_close_min"] = int(risk_cfg.get("flatten_before_close_min") or 0)
+        except Exception:
+            risk["flatten_before_close_min"] = 0
 
         # Data settings
         try:
@@ -3298,7 +3304,7 @@ class AutopilotManager:
                         if r_side and str(r_side) != side:
                             continue
                         status = str(rec.get("status") or "")
-                        if status in ("guardrail", "evaluator_dropped", "validator_dropped", "strict_prefs_missing", "low_confidence", "skip_existing", "idempotent", "planned_no_exec"):
+                        if status in ("guardrail", "evaluator_dropped", "validator_dropped", "strict_prefs_missing", "low_confidence", "skip_existing", "planned_no_exec"):
                             score -= 0.15
                             gate_reasons.append(f"recent_{status}")
                             break
@@ -3587,6 +3593,150 @@ class AutopilotManager:
             return max(0, int(notional // last_px))
         return 0
 
+    def _force_flatten_positions(
+        self,
+        exec_service,
+        ctx: Dict[str, Any],
+        flatten_minutes: int,
+    ) -> bool:
+        """Place MARKET orders to exit all open positions when within the flatten window."""
+        if exec_service is None or OrderSpec is None or ExecutionContext is None:
+            return False
+
+        positions = ctx.get("positions") or []
+        targets: List[Dict[str, Any]] = []
+        for pos in positions:
+            try:
+                sym = str(pos.get("sym") or pos.get("symbol") or "").strip()
+                qty_val = float(pos.get("qty") or pos.get("quantity") or 0.0)
+            except Exception:
+                continue
+            if not sym or abs(qty_val) < 1e-6:
+                continue
+            shares = int(round(abs(qty_val)))
+            if shares <= 0:
+                continue
+            targets.append({"sym": sym, "qty": shares, "side": "sell" if qty_val > 0 else "buy"})
+
+        if not targets:
+            self._log("risk_flatten_skipped", {"reason": "no_positions", "mins": flatten_minutes})
+            return False
+
+        last_prices = self._last_price_map(ctx)
+        try:
+            equity = float((ctx.get("account") or {}).get("equity") or 0.0)
+        except Exception:
+            equity = 0.0
+        ctx_exec = ExecutionContext(
+            account_id=getattr(self.get_client(), "account_id", None) or "SIM-LOCAL",
+            last_prices=last_prices,
+            equity=equity,
+            simulate=True,
+        )
+
+        placed: List[str] = []
+        errors: List[str] = []
+        for tgt in targets:
+            sym = tgt["sym"]
+            shares = int(tgt["qty"])
+            side_txt = tgt["side"]
+            side_enum = OrderSide.buy if side_txt == "buy" else OrderSide.sell
+            spec = OrderSpec(
+                symbol=sym,
+                side=side_enum,
+                order_type=OrderType.market,
+                limit_price=None,
+                size_type="shares",
+                size_value=float(shares),
+                tif=TimeInForce.day,
+                decision_id=None,
+            )
+            try:
+                order = exec_service.place_order(spec, ctx_exec)
+                try:
+                    status_txt = str(order.status.value)
+                except Exception:
+                    status_txt = "unknown"
+                self._logs.append({
+                    "ts": _utcnow_iso(),
+                    "mode": "auto",
+                    "action": "flatten",
+                    "symbol": sym,
+                    "side": side_txt,
+                    "qty": shares,
+                    "price": "",
+                    "reason": f"risk_flatten_{int(flatten_minutes)}m",
+                    "status": status_txt,
+                })
+                if _HAS_STORAGE:
+                    try:
+                        insert_action_log(
+                            "autopilot_act",
+                            mode="auto",
+                            symbol=sym,
+                            side="SELL" if side_txt == "sell" else "BUY",
+                            qty=shares,
+                            price=None,
+                            reason="risk_flatten",
+                            status=status_txt,
+                            extra={
+                                "order_id": getattr(order, "order_id", ""),
+                                "trigger": "flatten_before_close",
+                                "flatten_minutes": flatten_minutes,
+                            },
+                        )
+                    except Exception:
+                        pass
+                placed.append(sym)
+            except Exception as e:
+                msg = str(e)
+                self._logs.append({
+                    "ts": _utcnow_iso(),
+                    "mode": "auto",
+                    "action": "flatten",
+                    "symbol": sym,
+                    "side": side_txt,
+                    "qty": shares,
+                    "price": "",
+                    "reason": f"risk_flatten_error:{msg}",
+                    "status": "error",
+                })
+                if _HAS_STORAGE:
+                    try:
+                        insert_action_log(
+                            "autopilot_act",
+                            mode="auto",
+                            symbol=sym,
+                            side="SELL" if side_txt == "sell" else "BUY",
+                            qty=shares,
+                            price=None,
+                            reason="risk_flatten_error",
+                            status="error",
+                            extra={"error": msg, "flatten_minutes": flatten_minutes},
+                        )
+                    except Exception:
+                        pass
+                errors.append(sym)
+
+        try:
+            exec_service.try_fill_resting(last_prices)
+        except Exception:
+            pass
+
+        if placed:
+            self._log(
+                "risk_flatten_orders",
+                {"symbols": placed, "count": len(placed), "mins": flatten_minutes},
+            )
+            return True
+
+        if errors and not placed:
+            self._log(
+                "risk_flatten_errors",
+                {"symbols": errors, "mins": flatten_minutes},
+            )
+        return False
+
     def _act(self, ctx: Dict[str, Any], out: PlannerOutput) -> None:
         try:
             exec_service = self._get_execution()
@@ -3598,6 +3748,42 @@ class AutopilotManager:
         working_pos: Dict[str, float] = dict(pos)
         equity = float((ctx.get("account") or {}).get("equity") or 0.0)
         client = self.get_client()
+
+        try:
+            risk_ctx = ctx.get("risk") or {}
+        except Exception:
+            risk_ctx = {}
+        try:
+            flatten_minutes = int(risk_ctx.get("flatten_before_close_min") or 0)
+        except Exception:
+            flatten_minutes = 0
+        flatten_enabled = bool(risk_ctx.get("enabled", True)) and flatten_minutes > 0
+        try:
+            market_flags = ctx.get("market") or {}
+        except Exception:
+            market_flags = {}
+        flatten_flag = bool(market_flags.get("flatten_window"))
+        today_local = datetime.now().strftime("%Y-%m-%d")
+        if not flatten_flag and self._flatten_last_attempt_day and self._flatten_last_attempt_day != today_local:
+            self._flatten_last_attempt_day = None
+            self._flatten_last_attempt_ts = 0.0
+        if flatten_flag and flatten_enabled:
+            now_ts = float(_time.time())
+            should_attempt = (
+                self._flatten_last_attempt_day != today_local
+                or (now_ts - float(self._flatten_last_attempt_ts or 0.0)) >= 30.0
+            )
+            if should_attempt:
+                if exec_service is None or OrderSpec is None or ExecutionContext is None:
+                    self._log(
+                        "risk_flatten_skipped",
+                        {"reason": "execution_unavailable", "mins": flatten_minutes},
+                    )
+                else:
+                    self._force_flatten_positions(exec_service, ctx, flatten_minutes)
+                self._flatten_last_attempt_day = today_local
+                self._flatten_last_attempt_ts = now_ts
+            return
 
         decisions = list(getattr(out, "decisions", []) or [])
         if not decisions:
@@ -3621,16 +3807,6 @@ class AutopilotManager:
                     min_conf = float(raw_mc)
             except Exception:
                 pass
-
-        # purge expired idempotent entries
-        try:
-            import time as _time
-            now_idem = _time.time()
-            for k, exp in list(self._live_decisions.items()):
-                if exp <= now_idem:
-                    del self._live_decisions[k]
-        except Exception:
-            pass
 
         for idx, d in enumerate(decisions):
             sym = getattr(d, "sym", None) or getattr(d, "symbol", None) or (d.get("sym") if isinstance(d, dict) else None) or (d.get("symbol") if isinstance(d, dict) else None)
@@ -3686,44 +3862,6 @@ class AutopilotManager:
                         meta = self._lookup_score(sym, action, side)
                         self._record_decision(sym, action, side, "skip_existing", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), reason="existing_position")
                         continue
-            except Exception:
-                pass
-
-            # Idempotence: keep decisions alive until expiry; do not re-place while alive
-            def _idem_key() -> str:
-                try:
-                    entry = "market" if (getattr(d, "entry", None) or (d.get("entry") if isinstance(d, dict) else "market")) == "market" else "limit"
-                except Exception:
-                    entry = "market"
-                lim = getattr(d, "limit_price", None) or (d.get("limit_price") if isinstance(d, dict) else None)
-                st = getattr(d, "size_type", None) or (d.get("size_type") if isinstance(d, dict) else "shares")
-                sv = getattr(d, "size_value", None) or (d.get("size_value") if isinstance(d, dict) else 0)
-                tif_val = getattr(d, "time_in_force", None) or (d.get("time_in_force") if isinstance(d, dict) else "day")
-                return f"{sym}|{action}|{side}|{entry}|{lim}|{st}|{sv}|{tif_val}"
-
-            idem_key: Optional[str] = None
-            exp_ts: float = 0.0
-            try:
-                import time as _time
-                idem_key = _idem_key()
-                exp_sec = 0
-                try:
-                    exp_sec = int(getattr(d, "expires_sec", None) or (d.get("expires_sec") if isinstance(d, dict) else 120) or 120)
-                except Exception:
-                    exp_sec = 120
-                exp_ts = _time.time() + max(30, exp_sec)  # minimum 30s
-                alive_ts = self._live_decisions.get(idem_key)
-                if alive_ts and alive_ts > _time.time():
-                    self._logs.append({"ts": _utcnow_iso(), "mode": "auto", "action": action,
-                                       "symbol": sym, "side": side, "reason": "idempotent_suppress", "status": "skipped"})
-                    if _HAS_STORAGE:
-                        try:
-                            insert_action_log("autopilot_act", mode="auto", symbol=sym, side=side.upper(), reason="idempotent_suppress", status="skipped")
-                        except Exception:
-                            pass
-                    meta = self._lookup_score(sym, action, side)
-                    self._record_decision(sym, action, side, "idempotent", score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"))
-                    continue
             except Exception:
                 pass
 
@@ -3899,11 +4037,6 @@ class AutopilotManager:
                 if qty_delta:
                     delta_signed = qty_delta if side == "buy" else -qty_delta
                     working_pos[sym] = float(working_pos.get(sym) or 0.0) + delta_signed
-            try:
-                if idem_key is not None and exp_ts > 0:
-                    self._live_decisions[idem_key] = exp_ts
-            except Exception:
-                pass
 
             # Build explainability: signals used for this symbol, news tone, weights
             sig_used = []
@@ -3979,13 +4112,6 @@ class AutopilotManager:
             status_tag = "executed" if order_status == "filled" else "submitted"
             meta = self._lookup_score(sym, action, side)
             self._record_decision(sym, action, side, status_tag, score=meta.get("score"), keep=meta.get("keep"), threshold=meta.get("threshold"), order_id=order.order_id)
-
-            if order_status == "filled":
-                try:
-                    if idem_key is not None:
-                        self._live_decisions.pop(idem_key, None)
-                except Exception:
-                    pass
 
             prop = d.dict() if hasattr(d, "dict") else (d if isinstance(d, dict) else {})
             executed.append(prop)

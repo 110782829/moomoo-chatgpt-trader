@@ -204,10 +204,12 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .sticky-controls{position: sticky; top: 0; background: #0f1420; padding: 6px 0; z-index: 2; border-bottom: 1px solid var(--border);}
 .activity .sticky-controls{ background: transparent; border-bottom: 0; }
 .activity-modern{display:flex;flex-direction:column;gap:16px}
+.activity.activity-modern .panel{background:var(--card);border:1px solid var(--border);box-shadow:0 22px 42px rgba(2,6,23,.32)}
 .activity-main{display:flex;flex-direction:column;gap:18px}
 .activity-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .activity-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.activity-toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;padding:16px;border-radius:12px;background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(11,17,29,.92));border:1px solid rgba(148,163,184,.16);box-shadow:0 18px 34px rgba(2,6,23,.28)}
+.activity-title{margin:0;font-size:15px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.activity-toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;padding:16px;border-radius:12px;background:#0f1420;border:1px solid var(--border);box-shadow:0 18px 34px rgba(2,6,23,.32)}
 .activity-toolbar .field{display:flex;flex-direction:column;gap:6px}
 .activity-toolbar .field .label{font-size:12px;color:var(--muted);margin:0}
 .activity-toolbar .field .input,.activity-toolbar .field .select,.activity-toolbar .field .custom-trigger{margin-top:-2px}
@@ -220,28 +222,104 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .filter-chip .count{font-size:11px;opacity:.75}
 @media (max-width:600px){.activity-filters-row{flex-direction:column;align-items:flex-start}.activity-filters{margin-top:6px}}
 .activity-feed{display:flex;flex-direction:column;gap:12px}
-.activity-event{position:relative;display:grid;grid-template-columns:140px 1fr auto;gap:16px;padding:16px 18px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(15,23,42,.88));box-shadow:0 18px 38px rgba(2,6,23,.32);overflow:hidden}
-.activity-event::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:999px;background:rgba(148,163,184,.35)}
+.activity-event{position:relative;display:grid;grid-template-columns:190px 1fr;gap:18px;padding:18px 22px;border-radius:16px;border:1px solid var(--border);background:#0f1420;box-shadow:0 18px 38px rgba(2,6,23,.32);overflow:hidden;cursor:pointer;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.activity-event:hover{border-color:rgba(148,163,184,.45);box-shadow:0 22px 44px rgba(2,6,23,.45);transform:translateY(-1px)}
+.activity-event:focus-visible{outline:2px solid rgba(56,189,248,.6);outline-offset:3px}
+.activity-event::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:999px;background:rgba(148,163,184,.35)}
 @media (max-width:900px){.activity-event{grid-template-columns:1fr;align-items:flex-start}}
 .activity-event.good::before{background:rgba(34,197,94,.7)}
 .activity-event.bad::before{background:rgba(239,68,68,.7)}
 .activity-event.warn::before{background:rgba(250,204,21,.7)}
+.activity-event__meta{display:flex;flex-direction:column;gap:14px}
+.activity-event__stage{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-size:11px;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:rgba(226,232,240,.85);
+  font-weight:600;
+}
+.activity-event__stage .stage-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:4px 12px;
+  border-radius:999px;
+  background:linear-gradient(135deg, rgba(59,130,246,.25), rgba(14,165,233,.18));
+  border:1px solid rgba(125,211,252,.45);
+  box-shadow:none;
+  backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px);
+  flex-shrink:0;
+  opacity:.95;
+  min-width:0;
+  white-space:nowrap;
+  font-weight:700;
+  letter-spacing:.14em;
+}
 .activity-event__time{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .activity-event__time .ago{font-weight:700;color:var(--text);font-size:13px}
-.activity-event__body{display:flex;flex-direction:column;gap:6px}
-.activity-event__body .meta-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
-.activity-event__body .meta-top .stage{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text);padding:4px 8px;border-radius:999px;border:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.9)}
-.activity-event__body .meta-top .symbol{font-size:14px;font-weight:700;color:var(--text)}
-.activity-event__body .meta-top .side{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;text-transform:uppercase}
-.activity-event__body .meta-top .side.buy{background:rgba(34,197,94,.15);color:var(--green)}
-.activity-event__body .meta-top .side.sell{background:rgba(239,68,68,.15);color:var(--red)}
-.activity-event__body .meta-top .side.hold{background:rgba(148,163,184,.2);color:var(--muted)}
-.activity-event__body .meta-bottom{display:flex;flex-wrap:wrap;gap:6px;font-size:13px;color:var(--muted)}
-.activity-event__body .meta-bottom .action{font-weight:600;color:var(--text)}
-.activity-event__status{display:flex;flex-direction:column;align-items:flex-end;gap:8px;font-size:12px}
-@media (max-width:900px){.activity-event__status{align-items:flex-start}}
+.activity-event__body{display:flex;flex-direction:column;gap:10px;align-items:stretch}
+.activity-event__body.has-reasons{position:relative}
+.activity-event__body.has-reasons .activity-event__topline{position:absolute;top:0;right:0;width:100%;display:flex;justify-content:flex-end;pointer-events:none}
+.activity-event__body.has-reasons .activity-event__summary{pointer-events:auto}
+.activity-event__topline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end;width:100%}
+.activity-event__body .meta-title{font-size:15px;font-weight:600;color:var(--text);margin:0}
+.activity-event__summary{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-left:auto;justify-content:flex-end;font-size:12px;color:var(--muted);text-align:right}
+.activity-event__summary .symbol{font-size:14px;font-weight:700;color:var(--text);letter-spacing:.02em}
+.activity-event__summary .mono{font-variant-numeric:tabular-nums;color:var(--muted)}
+.activity-event__summary .side{font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;text-transform:uppercase}
+.activity-event__summary .side.buy{background:rgba(34,197,94,.15);color:var(--green)}
+.activity-event__summary .side.sell{background:rgba(239,68,68,.15);color:var(--red)}
+.activity-event__summary .status{
+  padding:0;
+  border-radius:0;
+  border:none;
+  background:none;
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--text);
+  text-decoration:none;
+  align-items:flex-end;
+}
+.activity-event__summary .status.good{color:var(--green)}
+.activity-event__summary .status.bad{color:var(--red)}
+.activity-event__summary .status.warn{color:var(--amber)}
+.activity-event__reasons{display:flex;flex-direction:column;gap:6px;margin-top:4px;align-items:flex-start;width:100%;max-width:420px;align-self:flex-start;margin-left:100px;margin-right:0;transform:none;order:-1}
+.activity-event__reasons-title{font-size:12px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;font-weight:600;display:inline-flex;align-items:center}
+.activity-event__reasons-list{margin:0;padding-left:18px;display:grid;gap:6px;font-size:12px;color:var(--muted);line-height:1.55;text-align:left}
+.activity-event__reasons-list li{list-style:disc}
+.activity-event__summary .status.neutral{color:rgba(226,232,240,.85)}
+@media (max-width:900px){.activity-event__meta{flex-direction:row;align-items:center;justify-content:space-between;gap:16px}.activity-event__stage{flex:0 0 auto}.activity-event{gap:16px}.activity-event__body.has-reasons .activity-event__topline{position:static;pointer-events:auto}.activity-event__topline{flex-direction:column;align-items:flex-start}.activity-event__summary{justify-content:flex-start}.activity-event__reasons{margin-top:0;margin-left:0;width:100%;max-width:none}}
+.explain-modal{width:min(960px,96vw);max-height:86vh;background:var(--panel);border-radius:18px;border:1px solid var(--border);box-shadow:0 32px 60px rgba(2,6,23,.6);display:flex;flex-direction:column;overflow:hidden}
+.explain-header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;padding:24px;border-bottom:1px solid rgba(148,163,184,.18);background:rgba(10,14,24,.96);box-shadow:inset 0 -1px 0 rgba(15,23,42,.8)}
+.explain-header h2{margin:0;font-size:22px}
+.explain-header .subtitle{margin:6px 0 0;font-size:13px;color:var(--muted)}
+.explain-body{flex:1 1 auto;overflow:auto;padding:24px;display:grid;grid-template-columns:minmax(0,2.1fr) minmax(0,1fr);gap:18px}
+@media (max-width:900px){.explain-body{grid-template-columns:1fr}}
+.explain-main,.explain-sidebar{display:flex;flex-direction:column;gap:18px}
+.explain-block{background:#0f1420;border:1px solid var(--border);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.explain-block__title{margin:0;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.explain-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.explain-card{padding:12px;border-radius:12px;border:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.92);display:flex;flex-direction:column;gap:6px}
+.explain-card .label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.explain-card .value{font-size:16px;font-weight:600}
+.explain-chips{display:flex;flex-wrap:wrap;gap:8px}
+.explain-chip{padding:6px 10px;border-radius:999px;font-size:12px;letter-spacing:.05em;text-transform:uppercase;background:rgba(148,163,184,.18);border:1px solid rgba(148,163,184,.32);color:var(--muted)}
+.explain-chip.good{background:rgba(34,197,94,.18);border-color:rgba(34,197,94,.32);color:var(--green)}
+.explain-chip.bad{background:rgba(239,68,68,.18);border-color:rgba(239,68,68,.32);color:var(--red)}
+.explain-chip.warn{background:rgba(250,204,21,.18);border-color:rgba(250,204,21,.32);color:var(--amber)}
+.explain-chip.neutral{background:rgba(148,163,184,.18);border-color:rgba(148,163,184,.32);color:var(--muted)}
+.explain-list{margin:0;padding-left:18px;display:grid;gap:8px;color:var(--muted);font-size:13px;line-height:1.55}
+.explain-list li{list-style:disc}
+.explain-raw details{background:#0b1220;border-radius:12px;border:1px solid var(--border);padding:12px}
+.explain-raw summary{cursor:pointer;font-weight:600;letter-spacing:.02em}
+.explain-raw pre{margin:12px 0 0;background:transparent;padding:0;font-size:12px;max-height:240px;overflow:auto;color:var(--muted)}
 .status.neutral{color:var(--text-dim)}
-.activity-empty{padding:24px;border:1px dashed rgba(148,163,184,.25);border-radius:12px;text-align:center;color:var(--muted);font-size:13px;background:rgba(15,23,42,.75)}
+.activity-empty{padding:24px;border:1px dashed rgba(148,163,184,.25);border-radius:12px;text-align:center;color:var(--muted);font-size:13px;background:#0f1420}
 .btn.ghost{background:transparent;border:1px solid rgba(148,163,184,.35);color:var(--text);padding:6px 12px;border-radius:10px;transition:background .18s ease,border-color .18s ease,color .18s ease}
 .btn.ghost:hover{background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.5)}
 .chart-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:6px}
@@ -336,8 +414,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .guardrail-entry .reason{font-size:13px;font-weight:600;color:var(--text)}
   .panel.thick{padding:22px}
   /* Autopilot toggle */
-  .autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(239,68,68,.45);background:linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.06));color:var(--red);transition:transform .06s ease,border-color .18s ease;width:170px}
-.autopilot-toggle.on{border-color:rgba(16,185,129,.45);color:var(--green);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
+  .autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(16,185,129,.45);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06));color:var(--green);transition:transform .06s ease,border-color .18s ease;width:170px}
+  .autopilot-toggle.on{border-color:rgba(16,185,129,.45);color:var(--green);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06))}
   .autopilot-toggle:active{transform:translateY(1px)}
 
   /* Align panels to KPI layout */
@@ -421,7 +499,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
 .strat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap: 8px}
 @media (max-width:980px){.strat-grid{grid-template-columns:1fr}}
-.strat{border:1px solid var(--border);border-radius:12px;background:#151d26;
+.strat{border:1px solid var(--border);border-radius:12px;background:var(--card);
   padding:12px; display:flex; align-items:flex-start; gap:12px; cursor:pointer; transition:transform .06s ease, border-color .18s ease; min-height:74px;}
   .strat:hover{ box-shadow:none; }
 
@@ -476,7 +554,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 
   /* Truncate long ids */
   .truncate{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.strat.on{ border-color: rgba(16,185,129,.45); box-shadow:none; background: rgba(16,185,129,.05); }
+.strat.on{ border-color: rgba(16,185,129,.45); box-shadow:none; background:var(--card); }
 .strat .dot{ width:10px; height:10px; margin-top:3px; }
 .strat .info{ flex:1 1 auto; }
 .strat .name{ font-weight:700; margin-bottom:2px; }
@@ -610,7 +688,7 @@ function statusTag(status?: string) {
   const s = String(status ?? '').toLowerCase();
   let cls = "status";
   if (["filled","done","completed","executed"].includes(s)) cls += " good";
-  else if (s.includes("hold")) cls += " warn";
+  else if (s.includes("hold")) cls += " bad";
   else if (["canceled","cancelled","rejected","expired","failed","error"].includes(s)) cls += " bad";
   else if (["open","pending","working","new","partially_filled","partial","accepted"].includes(s)) cls += " warn";
   return <span className={cls}>{status ?? ""}</span>;
@@ -1051,8 +1129,10 @@ function shortReason(r:any): string {
     return String(txt).length>120 ? String(txt).slice(0,120)+"…" : String(txt);
   }
 }
-async function openExplain(r:any) {
-  setExplainRow(r);
+async function openExplain(payload:any) {
+  const row = payload?.raw ?? payload;
+  const reasonItems = Array.isArray(payload?.reasonItems) ? payload.reasonItems : [];
+  setExplainRow({ raw: row, reasonItems, meta: payload });
   setExplainOpen(true);
   try {
     const [ctx, last, diff] = await Promise.all([
@@ -1061,9 +1141,9 @@ async function openExplain(r:any) {
       api.autopilotLastDiff?.().catch(()=>null),
     ]);
     (window as any).__autopilotLastDiff = diff;
-    setExplainData({ ctx, last, row: r });
+    setExplainData({ ctx, last, diff, row });
   } catch {
-    setExplainData({ row: r });
+    setExplainData({ row });
   }
 }
 
@@ -1443,7 +1523,7 @@ function shortDateLabel(iso?: string) {
             </div>
             <div className="panel compact">
               <h2 style={{marginTop:0}}>Account</h2>
-              <AccountCard connected={connected} activeAccount={activeAccount} />
+              <AccountCard connected={connected} activeAccount={activeAccount} positions={positions} />
             </div>
             <div className="panel compact">
               <h2 style={{marginTop:0}}>Current Stats</h2>
@@ -1521,12 +1601,7 @@ function shortDateLabel(iso?: string) {
       </div>
     </div>
             </div>
-
-
             </div>
-          <div className="panel thick">
-            <WatchlistTrends />
-          </div>
 {/* Positions – its own panel */}
           <div className="panel">
             <div className="row" style={{justifyContent:"space-between", alignItems:"center", marginTop:2}}>
@@ -1629,6 +1704,10 @@ function shortDateLabel(iso?: string) {
                 </tbody>
               </table>
             </div>
+          </div>
+          {/* Watchlist Pulse */}
+          <div className="panel thick">
+            <WatchlistTrends />
           </div>
         </section>
       )}
@@ -1865,7 +1944,7 @@ function shortDateLabel(iso?: string) {
             <h3>7d Rolling Avg PnL</h3>
             {rollingSeries.length ? (() => {
                   const series = rollingSeries;
-                  const W = 720; const H = 200; const P = 30;
+                  const W = 720; const H = 220; const P = 32;
                   const xs = series.map((_, idx) => idx);
                   const ys = series.map(row => Number(row.value ?? 0) || 0);
                   const minY = Math.min(0, ...ys);
@@ -2143,82 +2222,299 @@ function shortDateLabel(iso?: string) {
           position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
         }} onClick={()=>setExplainOpen(false)}>
-          <div className="panel" style={{width: "min(860px, 94vw)", maxHeight: "80vh", overflow: "auto"}} onClick={e=>e.stopPropagation()}>
-            <h2 style={{marginTop:0}}>Decision Details</h2>
-            <div className="help" style={{marginBottom:8}}>What the bot was thinking and why it acted</div>
+          <div className="explain-modal" onClick={e=>e.stopPropagation()}>
             {(() => {
               try {
-                const row:any = explainRow || {};
-                const extra:any = row.extra_json ? JSON.parse(row.extra_json) : (row.extra || {});
-                const sigs:any[] = Array.isArray(extra?.signals_used) ? extra.signals_used : [];
-                const tone = extra?.news_tone;
-                const conf = extra?.conf; const minc = extra?.min_conf;
-                const rationale = extra?.rationale || row?.rationale;
-                // policy from planner context if available in explainData
-                let pol:any = undefined;
-                try { pol = (explainData?.ctx || explainData?.context || {}).policy; } catch {}
-                const rc:any = extra?.rule_checks || null;
-                let polsum:any = undefined;
-                try { polsum = (explainData?.last?.last_output || {}).policy_summary; } catch {}
-                if (!sigs.length && !tone && conf==null) return null;
+                const payload: any = explainRow || {};
+                const row:any = payload.raw ?? payload;
+                const summaryItems: string[] = Array.isArray(payload.reasonItems) ? payload.reasonItems : [];
+                const parseExtra = () => {
+                  try { return row.extra_json ? JSON.parse(row.extra_json) : (row.extra || {}); }
+                  catch { return row.extra || {}; }
+                };
+                const extra:any = parseExtra() || {};
+                const formatNice = (text: string) => String(text || "")
+                  .replace(/[_-]+/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .replace(/\b(\w)/g, chr => chr.toUpperCase());
+                const toNumber = (value: any) => {
+                  if (value == null) return null;
+                  const n = Number(value);
+                  return Number.isFinite(n) ? n : null;
+                };
+
+                const symbol = String(row.symbol || row.sym || row.ticker || "").toUpperCase();
+                const side = String(row.side || row.order_side || row.direction || "").toUpperCase();
+                const qtyNum = toNumber(row.qty ?? row.quantity ?? row.size ?? row.volume);
+                const priceNum = toNumber(row.price ?? row.limit_price ?? row.avg_price ?? row.fill_price);
+                const statusRaw = row.status ?? row.result ?? row.outcome ?? "";
+                const actionRaw = row.action ?? row.event ?? row.type ?? row.decision ?? "";
+                const modeRaw = row.mode ?? row.phase ?? row.source ?? "";
+                const reasonRaw = row.reason ?? row.message ?? row.note ?? row.detail ?? row.description ?? "";
+                const rationale = extra?.rationale ?? row?.rationale ?? "";
+                const tsRaw = row.ts ?? row.time ?? row.timestamp ?? row.created_at ?? row.date ?? "";
+
+                let loggedAt = "";
+                if (tsRaw) {
+                  try {
+                    const d = new Date(tsRaw);
+                    if (!Number.isNaN(d.getTime())) loggedAt = d.toLocaleString();
+                  } catch {}
+                  if (!loggedAt) loggedAt = String(tsRaw);
+                }
+
+                const statusLabel = statusRaw ? formatNice(statusRaw) : "";
+                const actionLabel = actionRaw ? formatNice(actionRaw) : (payload?.actionLabel ? String(payload.actionLabel) : "");
+                const reasonText = reasonRaw ? String(reasonRaw).replace(/[_]+/g, " ").trim() : "";
+
+                const confidence = typeof extra?.conf === "number" ? extra.conf
+                  : (typeof extra?.confidence === "number" ? extra.confidence : null);
+                const minConfidence = typeof extra?.min_conf === "number" ? extra.min_conf
+                  : (typeof extra?.threshold === "number" ? extra.threshold : null);
+                const toneRaw = extra?.news_tone ?? extra?.tone ?? null;
+                const tone = toneRaw ? formatNice(toneRaw) : null;
+
+                let policy: any = undefined;
+                const ctxAny: any = explainData?.ctx ?? explainData?.context ?? null;
+                if (ctxAny) {
+                  if (ctxAny.policy) policy = ctxAny.policy;
+                  else if (ctxAny.last_input?.policy) policy = ctxAny.last_input.policy;
+                }
+                const policySummary = (() => {
+                  try { return explainData?.last?.last_output?.policy_summary ?? null; }
+                  catch { return null; }
+                })();
+
+                const ruleChecks: any = (extra?.rule_checks && typeof extra.rule_checks === "object") ? extra.rule_checks : null;
+                const signals: any[] = Array.isArray(extra?.signals_used) ? extra.signals_used : [];
+                const diff: any = explainData?.diff ?? (window as any).__autopilotLastDiff ?? null;
+                const diffCounts = diff ? {
+                  proposed: Array.isArray(diff.proposed) ? diff.proposed.length : 0,
+                  kept: Array.isArray(diff.kept) ? diff.kept.length : 0,
+                  executed: Array.isArray(diff.executed) ? diff.executed.length : 0,
+                  notes: diff.notes
+                } : null;
+
+                const summaryCards = [
+                  { label: "Action", value: actionLabel },
+                  { label: "Status", value: statusLabel },
+                  { label: "Symbol", value: symbol },
+                  { label: "Side", value: side },
+                  { label: "Quantity", value: qtyNum != null ? qtyNum.toLocaleString() : "" },
+                  { label: "Price", value: priceNum != null ? priceNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "" },
+                  { label: "Mode", value: modeRaw ? formatNice(modeRaw) : "" },
+                  { label: "Logged", value: loggedAt },
+                  { label: "Order Id", value: String(extra?.order_id || row.order_id || "") }
+                ].filter(card => card.value);
+
+                const highlightChips: Array<{ text: string; tone?: string }> = [];
+                if (policySummary) highlightChips.push({ text: String(policySummary), tone: "neutral" });
+                if (confidence != null) {
+                  const meets = minConfidence == null || confidence >= minConfidence;
+                  const confLabel = minConfidence != null
+                    ? `Confidence ${confidence.toFixed(2)} (min ${minConfidence.toFixed(2)})`
+                    : `Confidence ${confidence.toFixed(2)}`;
+                  highlightChips.push({ text: confLabel, tone: meets ? "good" : "warn" });
+                }
+                if (tone) {
+                  const toneLower = tone.toLowerCase();
+                  const toneClass = toneLower.includes("neg") ? "bad"
+                    : toneLower.includes("pos") ? "good"
+                    : "warn";
+                  highlightChips.push({ text: `News ${tone}`, tone: toneClass });
+                }
+
+                const policyChips: Array<{ text: string; tone?: string }> = [];
+                if (policy) {
+                  if (policy.reduce_only) policyChips.push({ text: "Reduce Only", tone: "warn" });
+                  if (policy.long_only) policyChips.push({ text: "Long Only", tone: "neutral" });
+                  if (policy.short_only) policyChips.push({ text: "Short Only", tone: "neutral" });
+                  if (policy.forbid_new) policyChips.push({ text: "No New Positions", tone: "warn" });
+                }
+
+                const ruleChips: Array<{ text: string; tone?: string }> = [];
+                if (ruleChecks) {
+                  const pushChip = (label: string, passed: boolean | null, goodLabel: string, badLabel: string, warn = false) => {
+                    if (passed == null) return;
+                    ruleChips.push({
+                      text: `${label}: ${passed ? goodLabel : badLabel}`,
+                      tone: warn ? "warn" : (passed ? "good" : "bad")
+                    });
+                  };
+                  pushChip("Strict Prefs", ruleChecks.strict_prefs_ok, "OK", "Blocked");
+                  pushChip("Policy Gate", ruleChecks.policy_ok, "OK", "Blocked");
+                  if (ruleChecks.near_earnings != null) {
+                    ruleChips.push({ text: `Earnings Window: ${ruleChecks.near_earnings ? "Close" : "Clear"}`, tone: ruleChecks.near_earnings ? "warn" : "neutral" });
+                  }
+                  pushChip("Valuation", ruleChecks.valuation_ok, "OK", "Rich");
+                  if (ruleChecks.conflict != null) {
+                    ruleChips.push({ text: `Conflict Index: ${ruleChecks.conflict ? "High" : "Low"}`, tone: ruleChecks.conflict ? "warn" : "neutral" });
+                  }
+                  if (ruleChecks.unusual_flow != null) {
+                    const strength = ruleChecks.unusual_flow_strength != null ? Number(ruleChecks.unusual_flow_strength).toFixed(2) : null;
+                    const text = `Unusual Flow: ${ruleChecks.unusual_flow ? `Detected${strength ? ` (${strength})` : ""}` : "Clear"}`;
+                    ruleChips.push({ text, tone: ruleChecks.unusual_flow ? "warn" : "neutral" });
+                  }
+                }
+
+                const signalChips = signals.slice(0, 8).map((sig: any) => {
+                  const strength = toNumber(sig?.strength);
+                  const strengthLabel = strength != null ? strength.toFixed(2) : "";
+                  const label = `${sig?.strategy ?? ""}${sig?.signal ? `:${sig.signal}` : ""}`.trim();
+                  return { text: `${label}${strengthLabel ? ` ${strengthLabel}` : ""}`, tone: strength != null && strength >= 0 ? "good" : "neutral" };
+                });
+
+                const diffPoints: string[] = [];
+                if (diffCounts) {
+                  if (diffCounts.proposed != null) diffPoints.push(`Proposed: ${diffCounts.proposed}`);
+                  if (diffCounts.kept != null) diffPoints.push(`Kept: ${diffCounts.kept}`);
+                  if (diffCounts.executed != null) diffPoints.push(`Executed: ${diffCounts.executed}`);
+                  if (diffCounts.notes) diffPoints.push(String(diffCounts.notes));
+                }
+
+                const summaryPoints = (() => {
+                  const baseList = summaryItems.length ? summaryItems : [];
+                  const fallback = baseList.length ? [] : [rationale, reasonText].filter(Boolean);
+                  const combined = (baseList.length ? baseList : fallback) as string[];
+                  const out: string[] = [];
+                  combined.forEach((val) => {
+                    const raw = typeof val === "string" ? val : String(val ?? "");
+                    const cleaned = raw.replace(/\s+/g, " ").trim();
+                    if (!cleaned) return;
+                    let sentence = cleaned;
+                    if (!/[.!?]$/.test(sentence)) sentence = `${sentence}.`;
+                    const key = sentence.toLowerCase();
+                    if (!out.some(existing => existing.toLowerCase() === key)) {
+                      out.push(sentence.charAt(0).toUpperCase() + sentence.slice(1));
+                    }
+                  });
+                  if (!out.length && statusLabel) {
+                    const fallbackSentence = `Status recorded as ${statusLabel}`;
+                    out.push(fallbackSentence.endsWith('.') ? fallbackSentence : `${fallbackSentence}.`);
+                  }
+                  return out.slice(0, 4);
+                })();
+
+                const subtitleParts = [] as string[];
+                if (symbol) subtitleParts.push(symbol);
+                if (side) subtitleParts.push(side);
+                if (statusLabel) subtitleParts.push(statusLabel);
+
                 return (
-                  <div className="panel compact" style={{background:"#0e1320", marginBottom:8}}>
-                    <div className="row" style={{gap:8, flexWrap:"wrap"}}>
-                      {polsum && <span className="badge" title="Policy summary">{String(polsum).slice(0,80)}</span>}
-                      {typeof conf === 'number' && typeof minc === 'number' && (
-                        <span className="badge" title="Confidence gate">conf {conf.toFixed(2)} ≥ {minc.toFixed(2)}</span>
-                      )}
-                      {tone && <span className="badge" title="News tone">news {String(tone)}</span>}
-                      {rationale && <span className="badge" title="Rationale">{String(rationale).slice(0,80)}</span>}
-                      {pol && pol.reduce_only && <span className="badge" title="Policy">reduce-only</span>}
-                      {pol && pol.long_only && <span className="badge" title="Policy">long-only</span>}
-                      {pol && pol.short_only && <span className="badge" title="Policy">short-only</span>}
-                      {pol && pol.forbid_new && <span className="badge" title="Policy">no-new</span>}
-                      {rc && <>
-                        {rc.strict_prefs_ok!=null && <span className="badge" title="Strict prefs">prefs {rc.strict_prefs_ok?"ok":"fail"}</span>}
-                        {rc.policy_ok!=null && <span className="badge" title="Policy check">policy {rc.policy_ok?"ok":"fail"}</span>}
-                        {rc.near_earnings!=null && <span className="badge" title="Earnings window">earn {rc.near_earnings?"near":"-"}</span>}
-                        {rc.valuation_ok!=null && <span className="badge" title="Valuation">val {rc.valuation_ok?"ok":"rich"}</span>}
-                        {rc.conflict!=null && <span className="badge" title="Conflict index">conflict {rc.conflict?"hi":"lo"}</span>}
-                        {rc.unusual_flow!=null && <span className="badge" title="Unusual flow">flow {rc.unusual_flow?Number(rc.unusual_flow_strength||0).toFixed(2):"-"}</span>}
-                      </>}
-                      {sigs.slice(0,6).map((s:any, i:number)=> (
-                        <span key={i} className="badge" title={`${s.strategy} ${s.signal}`}>{s.strategy}:{s.signal} {Number(s.strength||0).toFixed(2)}</span>
-                      ))}
+                  <>
+                    <div className="explain-header">
+                      <div>
+                        <h2>Decision Insights</h2>
+                        <div className="subtitle">{subtitleParts.length ? subtitleParts.join(" • ") : "Breakdown of the selected activity entry"}</div>
+                      </div>
+                      <button className="btn ghost" onClick={()=>setExplainOpen(false)}>Close</button>
                     </div>
-                  </div>
+                    <div className="explain-body">
+                      <div className="explain-main">
+                        {summaryCards.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Overview</div>
+                            <div className="explain-grid">
+                              {summaryCards.map((card, idx) => (
+                                <div key={idx} className="explain-card">
+                                  <span className="label">{card.label}</span>
+                                  <span className="value">{card.value}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {summaryPoints.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Decision Rationale</div>
+                            <ul className="explain-list">
+                              {summaryPoints.map((text, idx) => (
+                                <li key={`reason-${idx}`}>{text}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {diffPoints.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Autopilot Snapshot</div>
+                            <ul className="explain-list">
+                              {diffPoints.map((text, idx) => (
+                                <li key={`diff-${idx}`}>{text}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        <div className="explain-block explain-raw">
+                          <div className="explain-block__title">Raw data</div>
+                          <details>
+                            <summary>Expand raw payload</summary>
+                            <pre>{JSON.stringify(row, null, 2)}</pre>
+                            {Object.keys(extra || {}).length > 0 && <pre>{JSON.stringify(extra, null, 2)}</pre>}
+                            {(explainData?.ctx || explainData?.last || explainData?.diff) && (
+                              <pre>{JSON.stringify({ ctx: explainData?.ctx, last: explainData?.last, diff: explainData?.diff }, null, 2)}</pre>
+                            )}
+                          </details>
+                        </div>
+                      </div>
+
+                      <div className="explain-sidebar">
+                        {highlightChips.length + policyChips.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Highlights</div>
+                            <div className="explain-chips">
+                              {highlightChips.map((chip, idx) => (
+                                <span key={`hl-${idx}`} className={`explain-chip ${chip.tone ?? "neutral"}`}>{chip.text}</span>
+                              ))}
+                              {policyChips.map((chip, idx) => (
+                                <span key={`pol-${idx}`} className={`explain-chip ${chip.tone ?? "neutral"}`}>{chip.text}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {ruleChips.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Risk & Policy Checks</div>
+                            <div className="explain-chips">
+                              {ruleChips.map((chip, idx) => (
+                                <span key={`rule-${idx}`} className={`explain-chip ${chip.tone ?? "neutral"}`}>{chip.text}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {signalChips.length > 0 && (
+                          <div className="explain-block">
+                            <div className="explain-block__title">Signals</div>
+                            <div className="explain-chips">
+                              {signalChips.map((chip, idx) => (
+                                <span key={`sig-${idx}`} className={`explain-chip ${chip.tone ?? "neutral"}`}>{chip.text}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </>
                 );
-              } catch { return null; }
-            })()}
-            {(() => {
-              // Proposed vs Kept diff (best-effort)
-              try {
-                const diff:any = (window as any).__autopilotLastDiff || null;
-                if (!diff) return null;
-                const propSyms = (diff.proposed||[]).map((d:any)=>d.sym).filter(Boolean);
-                const keptSyms = (diff.kept||[]).map((d:any)=>d.sym).filter(Boolean);
+              } catch (err) {
                 return (
-                  <div className="panel compact" style={{background:"#0e1320", marginBottom:8}}>
-                    <div className="row" style={{gap:8, flexWrap:"wrap"}}>
-                      <span className="badge" title="Proposed count">proposed {propSyms.length}</span>
-                      <span className="badge" title="Kept after evaluator">kept {keptSyms.length}</span>
-                      {propSyms.length>0 && (
-                        <span className="badge" title="Proposed syms">{propSyms.slice(0,6).join(", ")}</span>
-                      )}
-                      {keptSyms.length>0 && (
-                        <span className="badge" title="Kept syms">{keptSyms.slice(0,6).join(", ")}</span>
-                      )}
+                  <>
+                    <div className="explain-header">
+                      <div>
+                        <h2>Decision Insights</h2>
+                        <div className="subtitle">Unable to render details for this entry.</div>
+                      </div>
+                      <button className="btn ghost" onClick={()=>setExplainOpen(false)}>Close</button>
                     </div>
-                  </div>
+                  </>
                 );
-              } catch { return null; }
+              }
             })()}
-            <pre style={{whiteSpace:"pre-wrap", background:"#0b1320", padding:"12px", borderRadius:"8px", border:"1px solid var(--border)"}}>
-{JSON.stringify(explainData || explainRow, null, 2)}
-            </pre>
-            <div className="row" style={{marginTop:12, justifyContent:"flex-end"}}>
-              <button className="btn" onClick={()=>setExplainOpen(false)}>Close</button>
-            </div>
           </div>
         </div>, document.body
       )}
@@ -2485,7 +2781,7 @@ export function NiceCombobox({
 
 
 
-function AccountCard({ connected, activeAccount }: { connected: boolean; activeAccount: { account_id: string | null; trd_env: string | null; account_type?: string | null } | null }) {
+function AccountCard({ connected, activeAccount, positions }: { connected: boolean; activeAccount: { account_id: string | null; trd_env: string | null; account_type?: string | null } | null; positions: any[]; }) {
   const [assets, setAssets] = useState<{ equity?: number | null; bp?: number | null; cash?: number | null } | null>(null);
 
   useEffect(() => {
@@ -2505,11 +2801,47 @@ function AccountCard({ connected, activeAccount }: { connected: boolean; activeA
     return () => clearInterval(timer);
   }, [connected, activeAccount?.account_id]);
 
-  const equity = assets?.equity ?? null;
-  const cash = assets?.cash ?? null;
-  const bp = assets?.bp ?? null;
-  const usage = bp != null && cash != null ? Math.min(1, Math.max(0, (bp - cash) / bp)) : null;
-  const leverage = equity != null && bp != null && equity !== 0 ? bp / equity : null;
+  const equity = assets?.equity != null ? Number(assets.equity) : null;
+  const cash = assets?.cash != null ? Number(assets.cash) : null;
+  const bp = assets?.bp != null ? Number(assets.bp) : null;
+
+  const grossExposure = useMemo(() => {
+    if (!Array.isArray(positions) || !positions.length) return 0;
+    return positions.reduce((sum: number, row: any) => {
+      const mvRaw = row?.mv ?? row?.market_value ?? row?.marketValue;
+      const mv = mvRaw != null ? Number(mvRaw) : null;
+      if (mv != null && Number.isFinite(mv) && mv !== 0) {
+        return sum + Math.abs(mv);
+      }
+      const qtyVal = row?.qty ?? row?.quantity;
+      const qty = qtyVal != null ? Number(qtyVal) : null;
+      if (qty == null || !Number.isFinite(qty) || Math.abs(qty) < 1e-6) return sum;
+      const priceCandidates = [row?.last, row?.avg_cost, row?.avg, row?.avg_cost_price];
+      const price = priceCandidates.map((p: any) => (p != null ? Number(p) : null)).find(p => p != null && Number.isFinite(p) && Math.abs(p as number) > 1e-6);
+      if (price == null) return sum;
+      return sum + Math.abs(Number(price) * qty);
+    }, 0);
+  }, [positions]);
+
+  const bpValue = bp != null && Number.isFinite(bp) ? Math.max(0, bp) : null;
+  const gross = Number.isFinite(grossExposure) ? Math.max(0, grossExposure) : 0;
+  const maxBuyingPower = bpValue != null ? bpValue + gross : (gross > 0 ? gross : null);
+  const usage = maxBuyingPower && maxBuyingPower > 0 ? Math.min(1, Math.max(0, gross / maxBuyingPower)) : null;
+  const leverage = equity != null && Number.isFinite(equity) && Math.abs(equity) > 1e-6
+    ? Math.max(0, gross / Math.abs(equity))
+    : (gross > 0 ? Infinity : null);
+
+  const formatMoney = (value: number | null) => {
+    if (value == null || !Number.isFinite(value)) return "—";
+    return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const usageLabel = usage != null ? `${Math.round(usage * 100)}% used` : "—";
+  const leverageLabel = leverage != null && Number.isFinite(leverage)
+    ? `${leverage.toFixed(2)}x`
+    : leverage === Infinity
+      ? "∞"
+      : "—";
 
   return (
     <div className="stack">
@@ -2517,22 +2849,22 @@ function AccountCard({ connected, activeAccount }: { connected: boolean; activeA
         <div className="acctgrid">
           <div className="acctcell">
             <div className="label">Equity</div>
-            <div className="value">{equity != null ? `$${Number(equity).toFixed(2)}` : "—"}</div>
+            <div className="value">{formatMoney(equity)}</div>
           </div>
           <div className="acctcell">
             <div className="label">Cash</div>
-            <div className="value">{cash != null ? `$${Number(cash).toFixed(2)}` : "—"}</div>
+            <div className="value">{formatMoney(cash)}</div>
           </div>
           <div className="acctcell">
             <div className="label">Buying Power</div>
-            <div className="value">{bp != null ? `$${Number(bp).toFixed(2)}` : "—"}</div>
+            <div className="value">{formatMoney(bp)}</div>
           </div>
           <div className="acctcell lever">
             <div className="label">Leverage</div>
             <div className="usage">
-              <div className="bar"><div className="fill" style={{width: usage != null ? `${(usage*100).toFixed(0)}%` : "0%"}}></div></div>
-              <span className="delta neutral">{usage != null ? `${(usage*100).toFixed(0)}%` : "—"}</span>
-              <div className="value">{leverage != null ? `${leverage.toFixed(2)}x` : "—"}</div>
+              <div className="bar"><div className="fill" style={{width: usage != null ? `${Math.round(usage*100)}%` : "0%"}}></div></div>
+              <span className="delta neutral">{usageLabel}</span>
+              <div className="value">{leverageLabel}</div>
             </div>
           </div>
         </div>
@@ -2569,7 +2901,6 @@ function ActivityLog(props: {
 
   function deriveCategory(mode: string, action: string, status: string, reason: string) {
     const text = `${mode} ${action} ${status} ${reason}`.toLowerCase();
-    if (text.includes("hold")) return "Hold";
     if (text.includes("guardrail")) return "Guardrail";
     if (text.includes("validator")) return "Validator";
     if (text.includes("evaluator")) return "Evaluator";
@@ -2579,13 +2910,48 @@ function ActivityLog(props: {
     return mode ? mode : "System";
   }
 
-  function deriveTone(status: string, action: string, reason: string): "good" | "bad" | "warn" | "neutral" {
-    const combined = `${status} ${action} ${reason}`.toLowerCase();
-    if (combined.includes("hold")) return "neutral";
-    if (combined.includes("reject") || combined.includes("drop") || combined.includes("fail") || combined.includes("error") || combined.includes("cancel")) return "bad";
-    if (combined.includes("exec") || combined.includes("fill") || combined.includes("accept") || combined.includes("complete") || combined.includes("sent")) return "good";
-    if (combined.includes("pending") || combined.includes("plan") || combined.includes("queue") || combined.includes("proposed")) return "warn";
-    return "neutral";
+  function parseExtra(row: any) {
+    if (!row) return {};
+    try {
+      if (row.extra_json) {
+        return JSON.parse(row.extra_json);
+      }
+    } catch {}
+    if (row.extra && typeof row.extra === "object") {
+      return row.extra;
+    }
+    return {};
+  }
+
+  function classifyStatus(status: string, reason: string, extra: any, action?: string): { label: string; tone: "good" | "bad" | "warn" | "neutral" } {
+    const statusLower = (status || "").toLowerCase();
+    const reasonLower = (reason || "").toLowerCase();
+    const actionLower = (action || "").toLowerCase();
+    const extraText = extra && typeof extra === "object"
+      ? Object.values(extra).map(v => String(v ?? "")).join(" ").toLowerCase()
+      : "";
+    const combined = `${actionLower} ${statusLower} ${reasonLower} ${extraText}`;
+    if (/(fill|filled|executed|complete|success|done|sent)/.test(combined)) {
+      return { label: "Filled", tone: "good" };
+    }
+    if (/(cancel)/.test(combined)) {
+      return { label: "Canceled", tone: "warn" };
+    }
+    if (/(pending|working|planned|accepted|submitted|queued|open|waiting|in flight)/.test(combined)) {
+      return { label: "Pending", tone: "warn" };
+    }
+    if (/(reject|blocked|error|fail|denied|forbid|unable)/.test(combined)) {
+      return { label: "Rejected", tone: "bad" };
+    }
+    if (/(skip|skipped|noop|ignored|paused|standby)/.test(combined)) {
+      return { label: "Skipped", tone: "neutral" };
+    }
+    return { label: statusLower ? titleize(statusLower) : "", tone: "neutral" };
+  }
+
+  function tidyReason(reason: string) {
+    if (!reason) return "";
+    return reason.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   }
 
   function relativeLabel(ts: any) {
@@ -2619,6 +2985,245 @@ function ActivityLog(props: {
     }
   }
 
+  function normalizeKey(text: string) {
+    return text ? text.replace(/[_:\-]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase() : "";
+  }
+
+  function toSentence(value: any) {
+    const raw = value == null ? "" : String(value).replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+    let sentence = raw;
+    if (!/[.!?]$/.test(sentence)) sentence = `${sentence}.`;
+    const first = sentence.charAt(0);
+    if (first && first === first.toLowerCase() && first !== first.toUpperCase()) {
+      sentence = first.toUpperCase() + sentence.slice(1);
+    }
+    return sentence;
+  }
+
+  function formatQty(qty: number | null) {
+    if (qty == null || !Number.isFinite(qty) || Math.abs(qty) < 1e-6) return "";
+    return Math.abs(qty).toLocaleString();
+  }
+
+  function formatPrice(price: number | null) {
+    if (price == null || !Number.isFinite(price)) return "";
+    return Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function buildReasonItems({
+    row,
+    extra,
+    actionStr,
+    statusLabel,
+    baseReason,
+    friendlyReason,
+    sideUpper,
+    symbol,
+    qty,
+    price,
+  }:{
+    row: any;
+    extra: any;
+    actionStr: string;
+    statusLabel: string;
+    baseReason: string;
+    friendlyReason: string;
+    sideUpper: string;
+    symbol: string;
+    qty: number | null;
+    price: number | null;
+  }) {
+    const items: string[] = [];
+    const push = (text: any) => {
+      const sentence = toSentence(text);
+      if (!sentence) return;
+      const key = sentence.toLowerCase();
+      if (!items.some(existing => existing.toLowerCase() === key)) {
+        items.push(sentence);
+      }
+    };
+
+    const extras = extra && typeof extra === "object" ? extra : {};
+    const reasonKey = normalizeKey(friendlyReason || baseReason);
+    const actionKey = normalizeKey(actionStr);
+    const statusKey = normalizeKey(statusLabel);
+    const genericReasons = new Set(["order", "order augmented", "order_augmented", "ok", "", "filled"]);
+    const isGenericReason = genericReasons.has(reasonKey) || reasonKey.startsWith("order ");
+
+    const rawRationale = typeof extras.rationale === "string"
+      ? extras.rationale
+      : (typeof row?.rationale === "string" ? row.rationale : "");
+    if (rawRationale) {
+      push(rawRationale);
+    }
+
+    const ensureReasonFallback = () => {
+      if (!rawRationale && baseReason && !isGenericReason) {
+        push(baseReason);
+      }
+    };
+
+    if (actionKey === "planner proposed") {
+      const count = Number(extras?.n ?? extras?.count ?? extras?.total ?? 0);
+      const policy = extras?.policy ?? extras?.policy_name ?? extras?.strategy;
+      if (count > 0 || policy) {
+        const policyLabel = policy ? titleize(String(policy)) : "";
+        const label = count > 0
+          ? `Planner proposed ${count} candidate${count === 1 ? "" : "s"}${policyLabel ? ` via ${policyLabel}` : ""}`
+          : `Planner used ${policyLabel || "strategy"} to propose trades`;
+        push(label);
+      }
+      const decisions = Array.isArray(extras?.decisions) ? extras.decisions : [];
+      const focus = decisions
+        .map((d: any) => String(d?.sym || d?.symbol || d?.ticker || "").toUpperCase())
+        .filter(Boolean)
+        .slice(0, 3);
+      if (focus.length) {
+        push(`Focus symbols: ${focus.join(", ")}`);
+      }
+    } else if (actionKey === "validator result") {
+      const kept = Number(extras?.n ?? extras?.kept ?? 0);
+      const dropped = Number(extras?.dropped ?? 0);
+      const transformed = Number(extras?.transformed ?? 0);
+      if (kept > 0) push(`Validator approved ${kept} proposal${kept === 1 ? "" : "s"}`);
+      if (dropped > 0) push(`Filtered out ${dropped} for risk or rule violations`);
+      if (transformed > 0) push(`Transformed ${transformed} entries before execution`);
+      ensureReasonFallback();
+    } else if (actionKey === "evaluator result") {
+      const kept = Number(extras?.n ?? extras?.kept ?? 0);
+      const dropped = Number(extras?.dropped ?? 0);
+      const threshold = Number(extras?.threshold ?? extras?.min_conf ?? 0);
+      if (kept > 0) push(`Evaluator cleared ${kept} trade${kept === 1 ? "" : "s"}`);
+      if (dropped > 0) push(`Rejected ${dropped} below quality threshold`);
+      if (threshold > 0) push(`Evaluator threshold set at ${threshold.toFixed(2)}`);
+      ensureReasonFallback();
+    } else if (actionKey === "autopilot") {
+      if (reasonKey.includes("signals reweighted")) {
+        push("Signals reweighted using recent performance");
+      } else if (reasonKey.includes("planner poll")) {
+        push("Planner polling for new decisions");
+      } else {
+        ensureReasonFallback();
+      }
+    } else if (actionKey === "autopilot act") {
+      if (!rawRationale) {
+        if (reasonKey.includes("guardrail")) {
+          const detail = extras?.msg || extras?.error;
+          push(detail ? `Guardrail blocked the trade: ${detail}` : "Guardrail blocked the trade");
+        } else if (reasonKey === "risk flatten") {
+          const mins = Number(extras?.flatten_minutes ?? extras?.mins ?? extras?.minutes ?? 0);
+          push(mins > 0 ? `Risk flatten triggered within ${mins}-minute window` : "Risk flatten triggered before close");
+        } else if (reasonKey.includes("risk flatten error")) {
+          const msg = extras?.error || extras?.msg || baseReason;
+          push(`Flatten order failed: ${msg}`);
+        } else if (reasonKey.includes("skip existing long")) {
+          push("Skipped because a long position is already open");
+        } else if (reasonKey.includes("skip existing short")) {
+          push("Skipped because a short position is already open");
+        } else if (reasonKey.includes("skip")) {
+          ensureReasonFallback();
+        } else if (reasonKey.includes("protective stop")) {
+          push("Protective stop order placed to cap downside");
+        } else if (reasonKey.includes("protective tp")) {
+          push("Take-profit order staged to lock in gains");
+        } else if (reasonKey.includes("no execution service")) {
+          push("Execution service unavailable; plan recorded only");
+        } else if (!isGenericReason) {
+          ensureReasonFallback();
+        }
+      }
+      if (statusKey === "rejected") {
+        const msg = extras?.msg || extras?.error;
+        if (msg) push(`Rejection detail: ${msg}`);
+      }
+    } else {
+      ensureReasonFallback();
+    }
+
+    const conf = typeof extras?.conf === "number"
+      ? extras.conf
+      : (typeof extras?.confidence === "number" ? extras.confidence : null);
+    const minConf = typeof extras?.min_conf === "number"
+      ? extras.min_conf
+      : (typeof extras?.threshold === "number" ? extras.threshold : null);
+    if (conf != null) {
+      let text = `Signal confidence ${conf.toFixed(2)}`;
+      if (minConf != null) {
+        text += ` (min ${minConf.toFixed(2)})`;
+        text += conf >= minConf ? " — threshold met." : " — below threshold.";
+      } else {
+        text += ".";
+      }
+      push(text);
+    }
+
+    const signals = Array.isArray(extras?.signals_used) ? extras.signals_used
+      : (Array.isArray(extras?.signals) ? extras.signals : []);
+    if (signals.length) {
+      const parts = signals.slice(0, 3).map((sig: any) => {
+        const name = titleize(String(sig?.signal || sig?.strategy || sig?.name || sig || ""));
+        const strengthRaw = sig?.strength ?? sig?.score ?? sig?.value ?? sig?.weight;
+        const strength = Number(strengthRaw);
+        return Number.isFinite(strength) && Math.abs(strength) > 1e-6
+          ? `${name} ${strength.toFixed(2)}`
+          : name;
+      }).filter(Boolean);
+      if (parts.length) {
+        push(`Key signals: ${parts.join(", ")}`);
+      }
+    }
+
+    const toneRaw = extras?.news_tone ?? extras?.tone;
+    if (toneRaw) {
+      push(`News tone ${titleize(String(toneRaw))}`);
+    }
+
+    const hasStop = Boolean(extras?.has_stop || extras?.aug_stop);
+    const hasTake = Boolean(extras?.has_take || extras?.aug_take);
+    if (hasStop || hasTake) {
+      const parts: string[] = [];
+      if (hasStop) parts.push("stop");
+      if (hasTake) parts.push("take-profit");
+      push(`Protective ${parts.join(" & ")} orders prepared`);
+    }
+
+    if (extras?.trigger) {
+      push(`Triggered by ${titleize(String(extras.trigger))}`);
+    }
+
+    if (extras?.next_action && !normalizeKey(extras.next_action).includes("hold")) {
+      push(`Next action: ${titleize(String(extras.next_action))}`);
+    }
+
+    const sideWord = sideUpper
+      ? (sideUpper.startsWith("B") ? "Buy" : sideUpper.startsWith("S") ? "Sell" : titleize(sideUpper))
+      : "";
+    const qtyText = formatQty(qty);
+    const priceText = formatPrice(price);
+    if (sideWord && symbol) {
+      let summary = `${sideWord} ${symbol}`;
+      if (qtyText) summary += ` (${qtyText} sh)`;
+      if (priceText) summary += ` @ ${priceText}`;
+      if (statusLabel) summary += ` — ${statusLabel}`;
+      push(summary);
+    } else if (statusLabel && !statusKey.includes(sideWord.toLowerCase())) {
+      push(`Outcome: ${statusLabel}`);
+    }
+
+    if (items.length < 2 && !rawRationale && !isGenericReason && baseReason) {
+      push(baseReason);
+    }
+    if (items.length < 2 && statusLabel) {
+      push(`Status recorded as ${statusLabel}`);
+    }
+    if (items.length < 3 && actionStr) {
+      push(`Action type: ${titleize(actionStr)}`);
+    }
+
+    return items.slice(0, 4);
+  }
+
   const normalized = useMemo(() => {
     return logs.map((row, idx) => {
       const rawTs = row?.ts ?? row?.time ?? row?.timestamp ?? row?.created_at ?? row?.date ?? "";
@@ -2630,27 +3235,58 @@ function ActivityLog(props: {
       const sideRaw = row?.side ?? row?.order_side ?? row?.direction ?? "";
       const qtyRaw = row?.qty ?? row?.quantity ?? row?.size ?? row?.volume ?? null;
       const priceRaw = row?.price ?? row?.limit_price ?? row?.avg_price ?? row?.fill_price ?? null;
-      const hold = /hold/i.test(String(actionRaw)) || /hold/i.test(String(statusRaw)) || /hold/i.test(String(row?.decision ?? "")) || /hold/i.test(String(reasonRaw));
-      const baseStatus = hold ? "Hold" : String(statusRaw || "");
-      const actionText = String(actionRaw || (hold ? "Hold" : ""));
-      const statusText = baseStatus || actionText || "";
-      const category = titleize(deriveCategory(String(modeRaw || ""), actionText, statusText, String(reasonRaw || "")));
-      const tone = deriveTone(statusText, actionText, String(reasonRaw || ""));
-      const statusLabel = statusText ? titleize(statusText) : "—";
-      const actionLabel = actionText ? titleize(actionText) : "";
+      const extraObj = parseExtra(row);
+      const statusStr = statusRaw != null ? String(statusRaw) : "";
+      const actionStr = actionRaw != null ? String(actionRaw) : "";
+      const baseReason = reasonRaw != null ? String(reasonRaw) : "";
+      const friendlyReason = tidyReason(baseReason);
+      const reasonDisplay = friendlyReason || baseReason;
+      const trimmedReason = reasonDisplay.length > 220 ? `${reasonDisplay.slice(0, 220)}…` : reasonDisplay;
       const symbol = symbolRaw ? String(symbolRaw).toUpperCase() : "";
-      const sideUpper = typeof sideRaw === "string" ? String(sideRaw).toUpperCase() : "";
+      let sideUpper = typeof sideRaw === "string" ? String(sideRaw).toUpperCase() : "";
+      let qty: number | null = null;
+      if (qtyRaw != null) {
+        const q = Number(qtyRaw);
+        if (Number.isFinite(q) && Math.abs(q) >= 1e-6) qty = q;
+      }
+      let price: number | null = null;
+      if (priceRaw != null) {
+        const p = Number(priceRaw);
+        if (Number.isFinite(p) && Math.abs(p) > 1e-6) price = p;
+      }
       let sideClass = "";
       if (sideUpper.startsWith("B")) sideClass = "buy";
       else if (sideUpper.startsWith("S")) sideClass = "sell";
-      else if (sideUpper.startsWith("H")) sideClass = "hold";
       else if (sideUpper) sideClass = sideUpper.toLowerCase();
-      const qtyNum = qtyRaw != null ? Number(qtyRaw) : null;
-      const qty = qtyNum != null && Number.isFinite(qtyNum) ? qtyNum : null;
-      const priceNum = priceRaw != null ? Number(priceRaw) : null;
-      const price = priceNum != null && Number.isFinite(priceNum) ? priceNum : null;
-      const reason = reasonRaw ? String(reasonRaw) : "";
-      const trimmedReason = reason.length > 220 ? `${reason.slice(0, 220)}…` : reason;
+
+      const statusInfo = classifyStatus(statusStr, baseReason, extraObj, actionStr);
+      let statusLabel = statusInfo.label || (statusStr ? titleize(statusStr) : "—");
+      let actionLabel = actionStr ? titleize(actionStr) : "";
+      if (!actionLabel) {
+        actionLabel = statusLabel;
+      }
+      let tone: "good" | "bad" | "warn" | "neutral" = statusInfo.tone;
+      const category = titleize(deriveCategory(String(modeRaw || ""), actionLabel, statusLabel, reasonDisplay));
+
+      const combinedText = `${actionStr} ${statusStr} ${baseReason} ${JSON.stringify(extraObj)}`.toLowerCase();
+      if (!/filled/i.test(statusLabel) && /(fill|executed|done)/.test(combinedText)) {
+        statusLabel = "Filled";
+        tone = "good";
+      }
+
+      const reasonItems = buildReasonItems({
+        row,
+        extra: extraObj,
+        actionStr,
+        statusLabel,
+        baseReason: reasonDisplay,
+        friendlyReason,
+        sideUpper,
+        symbol,
+        qty,
+        price,
+      });
+
       return {
         key: row?.id ?? `${rawTs || "row"}-${idx}`,
         raw: row,
@@ -2658,8 +3294,9 @@ function ActivityLog(props: {
         exact: exactLabel(rawTs),
         symbol,
         modeLabel: titleize(String(modeRaw || "")),
-        actionLabel: actionLabel || statusLabel,
+        actionLabel,
         reason: trimmedReason,
+        reasonItems,
         status: statusLabel,
         tone,
         category,
@@ -2682,7 +3319,7 @@ function ActivityLog(props: {
 
   const categoryOptions = useMemo(() => {
     const keys = Array.from(categoryCounts.keys());
-    const order = ["Autopilot", "Planner", "Execution", "Validator", "Evaluator", "Guardrail", "Hold", "System", "Other"];
+    const order = ["Autopilot", "Planner", "Execution", "Validator", "Evaluator", "Guardrail", "System", "Other"];
     keys.sort((a, b) => {
       const ia = order.indexOf(a);
       const ib = order.indexOf(b);
@@ -2716,7 +3353,7 @@ function ActivityLog(props: {
       <div className="panel activity-main">
         <div className="activity-header">
           <div>
-            <h2 className="title-lg" style={{marginTop:0}}>Activity Stream</h2>
+            <h3 className="activity-title">Activity Stream</h3>
             <span className="help">Updated {logsAt || "—"}{logsLoading ? " • refreshing…" : ""}</span>
           </div>
           <div className="activity-header-actions">
@@ -2790,28 +3427,63 @@ function ActivityLog(props: {
               : null;
             const toneClass = entry.tone !== "neutral" ? entry.tone : "";
             const sideClass = entry.sideClass ? entry.sideClass.toLowerCase() : "";
+            const stageLabel = (entry.category || "Update").toUpperCase();
+            const pillLabelRaw = entry.actionLabel || entry.status || stageLabel;
+            const pillLabel = String(pillLabelRaw || "").toUpperCase();
+            const showStageLabel = stageLabel && stageLabel !== pillLabel;
+            const showOrderSummary = !!(entry.symbol || entry.side || qtyLabel || priceLabel || entry.status);
+            const statusTone = entry.tone !== "neutral" ? entry.tone : "neutral";
+            const hasReasons = Boolean((entry.reasonItems && entry.reasonItems.length) || entry.reason);
+            const handleRowOpen = () => onExplain(entry);
+            const handleRowKey: React.KeyboardEventHandler<HTMLDivElement> = (evt) => {
+              if (evt.key === "Enter" || evt.key === " ") {
+                evt.preventDefault();
+                handleRowOpen();
+              }
+            };
             return (
-              <div key={entry.key} className={`activity-event ${toneClass}`}>
-                <div className="activity-event__time">
-                  <span className="ago">{entry.when || "—"}</span>
-                  <span className="exact">{entry.exact}</span>
-                </div>
-                <div className="activity-event__body">
-                  <div className="meta-top">
-                    <span className="stage">{entry.category || "Update"}</span>
-                    {entry.symbol && <span className="symbol">{entry.symbol}</span>}
-                    {entry.side && <span className={`side ${sideClass}`}>{entry.side}</span>}
-                    {qtyLabel && <span className="mono">Qty {qtyLabel}</span>}
-                    {priceLabel && <span className="mono">@ {priceLabel}</span>}
+              <div
+                key={entry.key}
+                className={`activity-event ${toneClass}`}
+                role="button"
+                tabIndex={0}
+                onClick={handleRowOpen}
+                onKeyDown={handleRowKey}
+              >
+                <div className="activity-event__meta">
+                  <div className="activity-event__stage">
+                    <span className="stage-pill">{pillLabel}</span>
+                    {showStageLabel ? <span>{stageLabel}</span> : null}
                   </div>
-                  <div className="meta-bottom">
-                    <span className="action">{entry.actionLabel || "—"}</span>
-                    {entry.reason && <span className="reason">{entry.reason}</span>}
+                  <div className="activity-event__time">
+                    <span className="ago">{entry.when || "—"}</span>
+                    <span className="exact">{entry.exact}</span>
                   </div>
                 </div>
-                <div className="activity-event__status">
-                  <span className={`status ${entry.tone !== "neutral" ? entry.tone : "neutral"}`}>{entry.status}</span>
-                  <button className="btn ghost" onClick={() => onExplain(entry.raw)}>Explain</button>
+                <div className={`activity-event__body${hasReasons ? " has-reasons" : ""}`}>
+                  {showOrderSummary && (
+                    <div className="activity-event__topline">
+                      <div className="activity-event__summary">
+                        {entry.symbol && <span className="symbol">{entry.symbol}</span>}
+                        {entry.side && <span className={`side ${sideClass}`}>{entry.side}</span>}
+                        {qtyLabel && <span className="mono">Qty {qtyLabel}</span>}
+                        {priceLabel && <span className="mono">@ {priceLabel}</span>}
+                        <span className={`status ${statusTone}`}>{entry.status}</span>
+                      </div>
+                    </div>
+                  )}
+                  {hasReasons ? (
+                    <div className="activity-event__reasons">
+                      <span className="activity-event__reasons-title">Reasons:</span>
+                      <ul className="activity-event__reasons-list">
+                        {(entry.reasonItems && entry.reasonItems.length ? entry.reasonItems : [entry.reason])
+                          .filter(Boolean)
+                          .map((text, idx) => (
+                            <li key={idx}>{text}</li>
+                          ))}
+                      </ul>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );

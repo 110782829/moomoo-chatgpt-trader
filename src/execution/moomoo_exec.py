@@ -297,22 +297,68 @@ class MoomooExecutionService(ExecutionService):
             poss = client.get_positions() or []
         except Exception:
             poss = []
+        def _to_float(val: Any) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                if isinstance(val, str):
+                    txt = val.strip()
+                    if not txt:
+                        return None
+                    txt = txt.replace(",", "")
+                    return float(txt)
+                return float(val)
+            except Exception:
+                return None
+
+        def _first_float(record: Dict[str, Any], keys: Iterable[str]) -> Optional[float]:
+            for k in keys:
+                v = _to_float(record.get(k))
+                if v is not None:
+                    return v
+            return None
+
         out: List[Dict[str, Any]] = []
         for p in poss:
             code = p.get("code") or p.get("stock_code") or p.get("symbol")
             if not code:
                 continue
-            qty = float(p.get("qty") or p.get("qty_total") or p.get("qty_today") or 0.0)
-            avg = float(p.get("cost_price") or p.get("avg_cost_price") or 0.0)
-            if qty == 0:
+            qty_val = _first_float(p, ["qty", "qty_total", "qty_today", "position_qty", "position_qty_s", "can_sell_qty"])
+            avg_val = _first_float(p, ["cost_price", "avg_cost_price", "cost", "cost_price_real_time"])
+            if qty_val is None or qty_val == 0:
                 continue
+            qty = float(qty_val)
+            last_px = _first_float(p, ["nominal_price", "last_price", "real_time_price", "market_price", "price", "latest_price"]) or None
+            mv_val = _first_float(p, ["market_val", "market_value", "marketValue"])
+            if mv_val is None:
+                if last_px is not None:
+                    mv_val = last_px * qty
+                elif avg_val is not None:
+                    mv_val = avg_val * qty
+            upl_val = _first_float(p, [
+                "pl_val",
+                "pl_val_real_time",
+                "unrealized_pl",
+                "pl_value",
+                "floating_pl",
+                "pl_val_today",
+            ])
+            # Some APIs report P/L per share; fall back to price delta * qty when available
+            if upl_val is None and last_px is not None and avg_val is not None:
+                upl_val = (last_px - avg_val) * qty
+            rpl_today = _first_float(p, [
+                "today_realized_pl",
+                "realized_pl_val_today",
+                "pl_realized_today",
+                "realized_pl",
+            ]) or 0.0
             out.append({
                 "symbol": str(code),
                 "qty": int(qty),
-                "avg_cost": avg,
-                "last": None,
-                "mv": None,
-                "upl": None,
-                "rpl_today": 0.0,
+                "avg_cost": float(avg_val or 0.0),
+                "last": last_px,
+                "mv": mv_val,
+                "upl": upl_val,
+                "rpl_today": rpl_today,
             })
         return out

@@ -3540,7 +3540,7 @@ def autopilot_weekly():
     executed_statuses = {"filled", "executed", "completed", "done", "ok", "success"}
     pending_statuses = {"submitted", "pending", "open", "accepted", "planned", "partially_filled", "partial", "working"}
     blocked_statuses = {"blocked", "guardrail"}
-    skipped_statuses = {"skipped", "idempotent", "planned_no_exec", "skip_existing"}
+    skipped_statuses = {"skipped", "planned_no_exec", "skip_existing"}
     drop_statuses = {"validator_dropped", "evaluator_dropped"}
 
     decision_counts: Counter = Counter()
