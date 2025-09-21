@@ -8,13 +8,18 @@ export default function SettingsWatchlist({ toast }: any) {
   const [symbols, setSymbols] = useState<string[]>([]);
   const [newSymbol, setNewSymbol] = useState("");
   const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
 
   useEffect(() => { (async () => {
     try {
       const d = await api.getDiscovery();
       setDiscEnabled(!!d.enabled);
       setDiscOnly(!!d.only);
-      setSymbols(Array.isArray(d.preview) ? d.preview : Array.isArray(d.seed) ? d.seed : []);
+      const reportList = Array.isArray(d?.report?.top_symbols) ? d.report.top_symbols : [];
+      const previewList = Array.isArray(d.preview) ? d.preview : [];
+      const seedList = Array.isArray(d.seed) ? d.seed : [];
+      const next = reportList.length ? reportList : (previewList.length ? previewList : seedList);
+      setSymbols(next.map((sym:any) => String(sym || '').toUpperCase()));
     } catch {}
   })(); }, []);
 
@@ -33,10 +38,25 @@ export default function SettingsWatchlist({ toast }: any) {
     try {
       await api.putDiscovery({ enabled: discEnabled, only: discOnly, seed: symbols });
       const d = await api.getDiscovery();
-      setSymbols(Array.isArray(d.preview) ? d.preview : symbols);
+      const reportList = Array.isArray(d?.report?.top_symbols) ? d.report.top_symbols : [];
+      const previewList = Array.isArray(d.preview) ? d.preview : [];
+      const next = reportList.length ? reportList : previewList;
+      setSymbols((next && next.length ? next : symbols).map((sym:any) => String(sym || '').toUpperCase()));
       toast.show("Watchlist saved.");
     } catch(e:any){ toast.show(String(e)); }
     finally { setSaving(false); }
+  }
+
+  async function runDiscovery() {
+    setRunning(true);
+    try {
+      await api.runDiscoveryNow();
+      toast.show("Discovery search running.");
+    } catch (e: any) {
+      toast.show(String(e));
+    } finally {
+      setRunning(false);
+    }
   }
 
   return (
@@ -101,8 +121,9 @@ export default function SettingsWatchlist({ toast }: any) {
           </tbody>
         </table>
       </div>
-      <div className="row" style={{ marginTop: 8, justifyContent: "flex-end" }}>
-        <button className="btn brand" onClick={save} disabled={saving}>{saving?"Saving…":"Save Watchlist"}</button>
+      <div className="row" style={{ marginTop: 8, justifyContent: "flex-end", gap: 8 }}>
+        <button className="btn" onClick={runDiscovery} disabled={running || saving}>{running?"Running…":"Run Discovery"}</button>
+        <button className="btn brand" onClick={save} disabled={saving || running}>{saving?"Saving…":"Save Watchlist"}</button>
       </div>
     </div>
   );

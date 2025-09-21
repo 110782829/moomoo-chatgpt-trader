@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime, timezone
 import time as _time
@@ -204,6 +205,20 @@ class AutopilotManager:
         except Exception:
             self._fast_mode = False
 
+        self._discovery_last_run_day: Optional[str] = None
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.discovery_report")  # type: ignore[name-defined]
+                if raw:
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        day = str(data.get("run_day") or "").strip()
+                        if day:
+                            self._discovery_last_run_day = day
+            except Exception:
+                self._discovery_last_run_day = None
+        self._discovery_last_attempt_ts: float = 0.0
+
         # Risk: flatten-before-close enforcement trackers
         self._flatten_last_attempt_day: Optional[str] = None
         self._flatten_last_attempt_ts: float = 0.0
@@ -250,6 +265,57 @@ class AutopilotManager:
         self._recent_guardrails.insert(0, row)
         if len(self._recent_guardrails) > 12:
             del self._recent_guardrails[12:]
+
+    def _maybe_refresh_discovery(self, client) -> None:
+        if not _HAS_STORAGE:
+            return
+        try:
+            start_hour = int(os.getenv("AUTOPILOT_DISCOVERY_RUN_HOUR", "6") or "6")
+        except Exception:
+            start_hour = 6
+        now_local = datetime.now()
+        if now_local.hour < start_hour:
+            return
+        today = now_local.strftime("%Y-%m-%d")
+        if self._discovery_last_run_day == today:
+            return
+        try:
+            raw = get_setting("autopilot.discovery_report")  # type: ignore[name-defined]
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    run_day = str(data.get("run_day") or "").strip()
+                    if run_day == today:
+                        self._discovery_last_run_day = run_day
+                        return
+        except Exception:
+            pass
+        try:
+            from core.market_data import _data_source  # type: ignore
+            data_source = _data_source()
+        except Exception:
+            data_source = "yfinance"
+        if data_source in ("futu", "moomoo"):
+            if client is None or not getattr(client, "connected", False):
+                return
+        now_ts = _time.time()
+        if now_ts - self._discovery_last_attempt_ts < 120.0:
+            return
+        self._discovery_last_attempt_ts = now_ts
+        try:
+            from autopilot.discovery_job import run_daily_discovery  # type: ignore
+            report = run_daily_discovery(client, force=False, reason="auto")  # type: ignore[arg-type]
+            if isinstance(report, dict):
+                run_day = str(report.get("run_day") or "").strip()
+                if run_day:
+                    self._discovery_last_run_day = run_day
+                if report.get("top_symbols"):
+                    self._log(
+                        "discovery_refresh",
+                        {"n": len(report.get("top_symbols", [])), "elapsed_ms": report.get("elapsed_ms")},
+                    )
+        except Exception as e:
+            self._log("discovery_refresh_error", {"error": str(e)})
 
     def _decision_snapshot(self, limit: int = 6) -> Dict[str, List[Dict[str, Any]]]:
         snap: Dict[str, List[Dict[str, Any]]] = {}
@@ -338,6 +404,16 @@ class AutopilotManager:
             last_kept = list(self._last_evaluated[:6])
         except Exception:
             last_kept = []
+        discovery_report: Optional[Dict[str, Any]] = None
+        if _HAS_STORAGE:
+            try:
+                raw = get_setting("autopilot.discovery_report")  # type: ignore[name-defined]
+                if raw:
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        discovery_report = data
+            except Exception:
+                discovery_report = None
         return {
             "on": self._running and self._task is not None and not self._task.done(),
             "last_tick": self.last_tick_ts,
@@ -349,6 +425,7 @@ class AutopilotManager:
             "recent_guardrails": guardrails_snapshot,
             "last_proposed": last_proposed,
             "last_kept": last_kept,
+            "discovery_report": discovery_report,
         }
 
     def get_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -776,6 +853,11 @@ class AutopilotManager:
         if bars_ttl <= 0:
             bars_ttl = int(os.getenv("AUTOPILOT_BARS_TTL_SEC", "60") or "60")
 
+        try:
+            self._maybe_refresh_discovery(c)
+        except Exception:
+            pass
+
         # Universe selection: discovery (preferred) or watchlist fallback
         # Discovery can be toggled via settings 'autopilot.discovery_enabled' or env AUTOPILOT_DISCOVERY=1
         discovery_enabled = False
@@ -801,13 +883,25 @@ class AutopilotManager:
         if os.getenv("AUTOPILOT_DISCOVERY_ONLY", None) is not None:
             discovery_only = os.getenv("AUTOPILOT_DISCOVERY_ONLY", "0").strip().lower() not in ("0","false","no")
         if discovery_enabled:
-            try:
-                from autopilot.discovery import discover_symbols  # type: ignore
-                discovered = discover_symbols(c, limit=int(os.getenv("AUTOPILOT_TOP_N", "8") or "8"), ktype=ktype_val) if c else []
-                if discovered:
-                    watchlist = discovered
-            except Exception:
-                watchlist = []
+            discovered: List[str] = []
+            if _HAS_STORAGE:
+                try:
+                    raw = get_setting("autopilot.discovery_watchlist")  # type: ignore[name-defined]
+                    if raw:
+                        import json as _json
+                        v = _json.loads(raw)
+                        if isinstance(v, list):
+                            discovered = [str(s).strip().upper() for s in v if s]
+                except Exception:
+                    discovered = []
+            if not discovered:
+                try:
+                    from autopilot.discovery import discover_symbols  # type: ignore
+                    discovered = discover_symbols(c, limit=int(os.getenv("AUTOPILOT_TOP_N", "8") or "8"), ktype=ktype_val) if c else []
+                except Exception:
+                    discovered = []
+            if discovered:
+                watchlist = discovered
         # If discovery-only is ON but we have no broker client or we discovered nothing,
         # allow fallback to a static watchlist so Autopilot can still run in SIM/offline.
         try:

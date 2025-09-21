@@ -170,6 +170,11 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .report-card{display:flex;flex-direction:column;gap:16px;height:100%}
 .report-card h3{margin-bottom:0}
 .report-card .chart-meta,.report-card .report-stats,.report-card .report-table{margin-top:0}
+.report-card__header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.report-card__header h3{margin:0}
+.report-card__title{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}
+.report-card__timestamp{display:flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:rgba(148,163,184,.7);line-height:1;border-top:1px solid rgba(148,163,184,.2);padding-top:4px;margin-top:2px}
+.report-card__timestamp::before{content:"";width:4px;height:4px;border-radius:999px;background:rgba(125,211,252,.85);box-shadow:0 0 0 1px rgba(37,99,235,.35)}
 .report-layout>.span-12{grid-column:span 12/span 12}
 .report-layout>.span-8{grid-column:span 8/span 8}
 .report-layout>.span-6{grid-column:span 6/span 6}
@@ -371,7 +376,7 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .legend-dot{display:inline-block;width:10px;height:10px;border-radius:999px;margin-right:6px;background:rgba(148,163,184,.3)}
 .legend-dot.entry{background:var(--green)}
 .legend-dot.exit{background:var(--amber)}
-.funnel-bars{display:grid;gap:12px;margin-top:6px}
+.funnel-bars{display:flex;flex-direction:column;gap:16px;margin-top:6px;min-height:240px;justify-content:space-between}
 .funnel-bar-row{display:grid;grid-template-columns:1fr minmax(0,1fr) auto;gap:12px;align-items:center}
 .funnel-bar-label{display:flex;flex-direction:column;gap:2px}
 .funnel-bar-label .label{text-transform:uppercase;font-size:11px;letter-spacing:.08em;color:var(--muted)}
@@ -390,7 +395,8 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .strategy-tile .meta .name{text-transform:uppercase;font-size:11px;color:var(--muted);letter-spacing:.08em}
 .strategy-tile .meta .value{font-size:18px;font-weight:600}
 .strategy-tile .meta .share{font-size:11px;color:var(--muted)}
-.symbol-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+.symbol-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:1fr;gap:8px}
+@media (max-width:720px){.symbol-grid{grid-template-columns:1fr;grid-auto-rows:auto}}
 .symbol-card{display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--border);background:#0f1420;min-height:140px}
 .symbol-card .header{display:flex;justify-content:space-between;align-items:center}
 .symbol-card .ticker{font-size:16px;font-weight:700}
@@ -402,16 +408,42 @@ small.code{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;background
 .dot-progress{display:flex;gap:4px;margin-top:6px}
 .dot-progress span{width:10px;height:10px;border-radius:3px;background:rgba(148,163,184,.18);box-shadow:inset 0 0 0 1px rgba(148,163,184,.25)}
 .dot-progress span.active{background:linear-gradient(135deg, rgba(96,165,250,.8), rgba(14,165,233,.7));box-shadow:none}
-.timeline{position:relative;display:flex;flex-direction:column;gap:12px;padding-left:18px;margin-top:6px}
-.timeline::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:1px;background:rgba(148,163,184,.22)}
-.timeline-item{position:relative;padding-left:10px}
-.timeline-item::before{content:"";position:absolute;left:-10px;top:6px;width:12px;height:12px;border-radius:50%;background:linear-gradient(180deg,rgba(248,113,113,.6),rgba(244,114,182,.45));box-shadow:0 0 0 3px rgba(10,14,24,1)}
-.timeline-item .title{font-weight:600;font-size:13px}
-.timeline-item .meta{font-size:12px;color:var(--muted);margin-top:2px}
-.guardrail-list{display:grid;gap:8px;margin-top:6px}
-.guardrail-entry{padding:10px;border-radius:10px;border:1px solid rgba(148,163,184,.18);background:rgba(12,18,30,.9);display:flex;flex-direction:column;gap:4px}
-.guardrail-entry .row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
-.guardrail-entry .reason{font-size:13px;font-weight:600;color:var(--text)}
+.discovery-report{display:flex;flex-direction:column;gap:14px;margin-top:8px;flex:1}
+.discovery-report .section-pager{margin-top:auto;padding-top:4px}
+.discovery-report__summary{font-size:13px;line-height:1.5;color:var(--muted)}
+.discovery-report__highlights{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.discovery-highlight{position:relative;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border-radius:12px;border:1px solid rgba(148,163,184,.18);background:linear-gradient(140deg, rgba(14,116,144,.14), rgba(30,64,175,.12));box-shadow:inset 0 1px 0 rgba(148,163,184,.18)}
+.discovery-highlight::before{content:"";flex:0 0 8px;height:8px;margin-top:4px;border-radius:999px;background:radial-gradient(circle at 50% 50%, rgba(94,234,212,.9), rgba(22,163,74,.7))}
+.discovery-highlight span{font-size:12px;line-height:1.45;color:var(--muted)}
+.discovery-report__grid{display:grid;gap:10px}
+.discovery-card{position:relative;display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:14px;background:linear-gradient(165deg, rgba(12,18,30,.95), rgba(15,23,42,.88));border:1px solid rgba(148,163,184,.18);overflow:hidden}
+.discovery-card::after{content:"";position:absolute;inset:-40% auto auto -30%;width:180px;height:180px;background:radial-gradient(circle at 30% 30%, rgba(56,189,248,.2), transparent 65%);opacity:.6;pointer-events:none}
+.discovery-card__header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;position:relative;z-index:1}
+.discovery-card__id{display:flex;flex-direction:column;gap:4px}
+.discovery-card__id .ticker{font-size:18px;font-weight:700;letter-spacing:.02em}
+.discovery-card__id .tone{align-self:flex-start;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.08em;background:rgba(148,163,184,.15);color:var(--muted)}
+.discovery-score{font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#bae6fd;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px;text-decoration-color:rgba(56,189,248,.75)}
+.discovery-score.high{color:var(--green);text-decoration-color:rgba(34,197,94,.65)}
+.discovery-score.low{color:var(--red);text-decoration-color:rgba(248,113,113,.65)}
+.discovery-card__price-row{display:flex;justify-content:space-between;align-items:center;gap:12px;position:relative;z-index:1}
+.discovery-card__price-row .price{font-size:16px;font-weight:600;color:var(--text)}
+.discovery-card__price-row .change{font-size:13px;font-weight:600;padding:4px 8px;border-radius:8px;background:rgba(148,163,184,.12);color:var(--text)}
+.discovery-card__price-row .change.up{color:var(--green);background:rgba(34,197,94,.12)}
+.discovery-card__price-row .change.down{color:var(--red);background:rgba(248,113,113,.12)}
+.discovery-card__price-row .change.flat{color:var(--muted)}
+.discovery-card__metrics{display:flex;flex-wrap:wrap;gap:10px 18px;position:relative;z-index:1;margin-top:4px}
+.discovery-metric{display:flex;flex-direction:column;gap:2px;padding:0;border:0;background:none;min-width:92px}
+.discovery-metric .label{text-transform:uppercase;font-size:10px;letter-spacing:.12em;color:rgba(148,163,184,.7)}
+.discovery-metric .value{font-size:14px;font-weight:600;color:#e0f2fe}
+.discovery-card__news{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5;color:var(--muted);position:relative;z-index:1;padding:10px;border-radius:10px;background:rgba(15,23,42,.72);border:1px solid rgba(148,163,184,.14)}
+.discovery-card__news .news-text{flex:1 1 180px;min-width:0}
+.discovery-card__news .tone-badge{padding:4px 10px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;background:rgba(45,212,191,.12);color:#5eead4;border:1px solid rgba(45,212,191,.35)}
+.section-pager{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px}
+.section-pager__info{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+.pager-btn{padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:#0e1320;color:var(--text);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:background .18s ease,color .18s ease,transform .06s ease}
+.pager-btn:hover:not([disabled]){background:var(--hover)}
+.pager-btn:active:not([disabled]){transform:translateY(1px)}
+.pager-btn:disabled{opacity:.45;cursor:not-allowed}
   .panel.thick{padding:22px}
   /* Autopilot toggle */
   .autopilot-toggle{display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;padding:7px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(16,185,129,.45);background:linear-gradient(135deg, rgba(16,185,129,.18), rgba(16,185,129,.06));color:var(--green);transition:transform .06s ease,border-color .18s ease;width:170px}
@@ -712,6 +744,18 @@ function useToast() {
 // ---------- App ----------
 enum Tab { Settings=0, Status=1, Activity=2, Reports=3, Assistant=4 }
 
+const SYMBOLS_PER_PAGE = 8;
+const DISCOVERY_PER_PAGE = 3;
+const ATTR_STRATEGIES = [
+  { key: "macd_cross", label: "MACD Cross", color: "#60a5fa" },
+  { key: "bb_breakout", label: "Bollinger Breakout", color: "#38bdf8" },
+  { key: "stoch_rsi_extreme", label: "Stochastic RSI Extreme", color: "#a855f7" },
+  { key: "ma_trend", label: "MA Trend", color: "#34d399" },
+  { key: "rsi_extreme", label: "RSI Extreme", color: "#f472b6" },
+  { key: "news", label: "News", color: "#fbbf24" },
+] as const;
+const ATTR_EXTRA_COLORS = ["#818cf8", "#f97316", "#c084fc", "#0ea5e9"];
+
 export default function App() {
   const toast = useToast();
   const [tab, setTab] = useLocalStorage<Tab>("ui.tab", Tab.Settings);
@@ -752,6 +796,8 @@ export default function App() {
   const [lastDiff, setLastDiff] = useState<any|null>(null);
   const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
   const watchlistFetchAt = useRef(0);
+  const [symbolPage, setSymbolPage] = useState(0);
+  const [discoveryPage, setDiscoveryPage] = useState(0);
 
   // logs
   const [logs, setLogs] = useState<any[]>([]);
@@ -1242,11 +1288,28 @@ function shortDateLabel(iso?: string) {
   };
 
   const attribution: Record<string, number> = (weekly as any)?.attribution || {};
-  const attrEntries = Object.entries(attribution)
+  const attrExtras = Object.entries(attribution)
+    .filter(([key]) => !ATTR_STRATEGIES.some(item => item.key === key))
     .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))
-    .slice(0, 8);
-  const attrTotal = attrEntries.reduce((sum, [, val]) => sum + Number(val ?? 0), 0);
-  const attrPalette = ["#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#a855f7", "#38bdf8", "#f97316", "#818cf8"];
+    .slice(0, Math.max(0, 8 - ATTR_STRATEGIES.length))
+    .map(([key, val], idx) => ({
+      key,
+      label: key
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, c => c.toUpperCase()),
+      value: Number(val ?? 0) || 0,
+      color: ATTR_EXTRA_COLORS[idx % ATTR_EXTRA_COLORS.length],
+    }));
+  const attrEntries = [
+    ...ATTR_STRATEGIES.map(item => ({
+      key: item.key,
+      label: item.label,
+      color: item.color,
+      value: Number(attribution[item.key] ?? 0) || 0,
+    })),
+    ...attrExtras,
+  ];
+  const attrTotal = attrEntries.reduce((sum, entry) => sum + (Number(entry.value) || 0), 0);
 
   const watchlistOrder = new Map<string, number>();
   watchlistSymbols.forEach((sym, idx) => {
@@ -1279,55 +1342,96 @@ function shortDateLabel(iso?: string) {
 
   const pnlLast30 = pnlData.slice(-30);
   let runningTotal = 0;
-  const cumulativeSeries = pnlLast30.map(row => {
+  const equitySeries = pnlLast30.map(row => {
     const raw = Number(row?.realized_pnl ?? 0);
     const value = Number.isFinite(raw) ? raw : 0;
     runningTotal += value;
     return { date: row?.date, value: runningTotal };
   });
-  const cumulativeChange = cumulativeSeries.length ? cumulativeSeries[cumulativeSeries.length - 1].value : 0;
-  const cumulativeMax = cumulativeSeries.length
-    ? cumulativeSeries.reduce((max, row) => Math.max(max, Number(row.value ?? 0) || 0), Number.NEGATIVE_INFINITY)
-    : 0;
-  const cumulativeMin = cumulativeSeries.length
-    ? cumulativeSeries.reduce((min, row) => Math.min(min, Number(row.value ?? 0) || 0), Number.POSITIVE_INFINITY)
-    : 0;
-  const rollingSeries = pnlLast30.map((row, idx) => {
-    const start = Math.max(0, idx - 6);
-    const window = pnlLast30.slice(start, idx + 1);
-    const total = window.reduce((sum, cur) => {
-      const raw = Number(cur?.realized_pnl ?? 0);
-      return sum + (Number.isFinite(raw) ? raw : 0);
-    }, 0);
-    const avg = window.length ? total / window.length : 0;
-    return { date: row?.date, value: avg };
-  });
-  const rollingLatest = rollingSeries.length ? rollingSeries[rollingSeries.length - 1].value : null;
-  const rollingHigh = rollingSeries.length
-    ? rollingSeries.reduce((max, row) => Math.max(max, Number(row.value ?? 0) || 0), Number.NEGATIVE_INFINITY)
-    : 0;
-  const rollingLow = rollingSeries.length
-    ? rollingSeries.reduce((min, row) => Math.min(min, Number(row.value ?? 0) || 0), Number.POSITIVE_INFINITY)
-    : 0;
-
-  const decisionReasons: Record<string, string[]> = (weekly as any)?.decision_reasons || {};
-  const reasonCounts: Record<string, number> = {};
-  Object.values(decisionReasons).forEach(list => {
-    if (Array.isArray(list)) {
-      list.forEach(reason => {
-        const key = String(reason || "").trim();
-        if (key) reasonCounts[key] = (reasonCounts[key] || 0) + 1;
-      });
-    }
-  });
-  const reasonEntries = Object.entries(reasonCounts)
-    .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))
-    .slice(0, 6);
+  const equityValues = equitySeries.map(row => Number(row.value ?? 0) || 0);
+  const equityChange = equityValues.length ? equityValues[equityValues.length - 1] : 0;
+  const equityPeak = equityValues.length ? Math.max(...equityValues) : null;
+  const equityDrawdown = (() => {
+    if (!equityValues.length) return 0;
+    let peak = equityValues[0];
+    let maxDrop = 0;
+    equityValues.forEach(val => {
+      peak = Math.max(peak, val);
+      const drop = peak - val;
+      if (drop > maxDrop) maxDrop = drop;
+    });
+    return maxDrop;
+  })();
+  const dailyActivity: any[] = Array.isArray((weekly as any)?.daily_activity) ? (weekly as any).daily_activity : [];
+  const activitySeries = dailyActivity.map(row => ({
+    date: row?.date,
+    value: Number(row?.executed ?? 0) || 0,
+  }));
+  const activityValues = activitySeries.map(row => Number(row.value ?? 0) || 0);
+  const activityLatest = activityValues.length ? activityValues[activityValues.length - 1] : null;
+  const activityPeak = activityValues.length ? Math.max(...activityValues) : null;
+  const activityAverage = activityValues.length
+    ? activityValues.reduce((sum, val) => sum + val, 0) / activityValues.length
+    : null;
 
   const dailyRows = pnlLast7.slice().reverse();
-  const guardrailEvents = Array.isArray((autoStatus as any)?.recent_guardrails)
-    ? ((autoStatus as any).recent_guardrails as any[])
+  const discoveryReport: any = (autoStatus as any)?.discovery_report || {};
+  const discoveryItems: any[] = Array.isArray(discoveryReport?.items) ? discoveryReport.items : [];
+  const discoveryHighlights: string[] = Array.isArray(discoveryReport?.gpt?.highlights)
+    ? discoveryReport.gpt.highlights.filter((h: any) => typeof h === 'string' && h.trim())
     : [];
+  const discoverySummary: string = String(discoveryReport?.gpt?.summary || discoveryReport?.summary || '').trim();
+  const discoveryUpdatedLabel = useMemo(() => {
+    const runAtRaw = typeof discoveryReport?.run_at === 'string' ? discoveryReport.run_at.trim() : '';
+    if (runAtRaw) {
+      const dt = new Date(runAtRaw);
+      if (!Number.isNaN(dt.getTime())) {
+        const now = new Date();
+        const sameDay = dt.toDateString() === now.toDateString();
+        const opts: Intl.DateTimeFormatOptions = sameDay
+          ? { hour: 'numeric', minute: '2-digit' }
+          : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+        return dt.toLocaleString(undefined, opts);
+      }
+    }
+    const runDayRaw = typeof discoveryReport?.run_day === 'string' ? discoveryReport.run_day.trim() : '';
+    if (runDayRaw) {
+      const dt = new Date(runDayRaw);
+      if (!Number.isNaN(dt.getTime())) {
+        return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      }
+      return runDayRaw;
+    }
+    return '—';
+  }, [discoveryReport?.run_at, discoveryReport?.run_day]);
+  const symbolPageCount = Math.max(0, Math.ceil(symbolRows.length / SYMBOLS_PER_PAGE));
+  const discoveryPageCount = Math.max(0, Math.ceil(discoveryItems.length / DISCOVERY_PER_PAGE));
+  const clampedSymbolPage = Math.min(symbolPage, Math.max(symbolPageCount - 1, 0));
+  const clampedDiscoveryPage = Math.min(discoveryPage, Math.max(discoveryPageCount - 1, 0));
+  const symbolPageItems = symbolRows.slice(
+    clampedSymbolPage * SYMBOLS_PER_PAGE,
+    clampedSymbolPage * SYMBOLS_PER_PAGE + SYMBOLS_PER_PAGE,
+  );
+  const discoveryPageItems = discoveryItems.slice(
+    clampedDiscoveryPage * DISCOVERY_PER_PAGE,
+    clampedDiscoveryPage * DISCOVERY_PER_PAGE + DISCOVERY_PER_PAGE,
+  );
+
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(symbolRows.length / SYMBOLS_PER_PAGE) - 1);
+    setSymbolPage(prev => {
+      const next = prev > maxPage ? maxPage : prev;
+      return next === prev ? prev : next;
+    });
+  }, [symbolRows.length]);
+
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(discoveryItems.length / DISCOVERY_PER_PAGE) - 1);
+    setDiscoveryPage(prev => {
+      const next = prev > maxPage ? maxPage : prev;
+      return next === prev ? prev : next;
+    });
+  }, [discoveryItems.length]);
 
 // ---------- Render ----------
   return (
@@ -1859,9 +1963,9 @@ function shortDateLabel(iso?: string) {
               </div>
             </div>
           <div className="card card-lg report-card span-6">
-            <h3>30d Cumulative PnL</h3>
-            {cumulativeSeries.length ? (() => {
-                  const series = cumulativeSeries;
+            <h3>Equity Curve (30d)</h3>
+            {equitySeries.length ? (() => {
+                  const series = equitySeries;
                   const W = 720; const H = 220; const P = 32;
                   const xs = series.map((_, idx) => idx);
                   const ys = series.map(row => Number(row.value ?? 0) || 0);
@@ -1920,30 +2024,30 @@ function shortDateLabel(iso?: string) {
                     <span>{shortDateLabel(endDate)}</span>
                   </div>
                   <div className="chart-legend">
-                    <span><span className="legend-dot" style={{background:'rgba(96,165,250,0.85)'}}></span>Cumulative PnL</span>
+                    <span><span className="legend-dot" style={{background:'rgba(96,165,250,0.85)'}}></span>Realized equity</span>
                   </div>
                 </div>
               );
-            })() : <div className="help">Not enough realized PnL history yet.</div>}
+            })() : <div className="help">Not enough realized trade history to chart equity.</div>}
             <div className="chart-meta">
               <div className="stat-pill">
                 <span className="label">Net change</span>
-                <span className="value" style={{color: (cumulativeChange ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeChange)}</span>
+                <span className="value" style={{color: (equityChange ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(equityChange)}</span>
               </div>
               <div className="stat-pill">
-                <span className="label">High watermark</span>
-                <span className="value" style={{color: (cumulativeMax ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeMax)}</span>
+                <span className="label">Peak equity</span>
+                <span className="value" style={{color: (equityPeak ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(equityPeak)}</span>
               </div>
               <div className="stat-pill">
-                <span className="label">Low watermark</span>
-                <span className="value" style={{color: (cumulativeMin ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(cumulativeMin)}</span>
+                <span className="label">Max drawdown</span>
+                <span className="value" style={{color: equityDrawdown > 0 ? 'var(--red)' : 'var(--muted)'}}>{formatUsd(equityDrawdown > 0 ? -equityDrawdown : 0)}</span>
               </div>
             </div>
           </div>
           <div className="card card-lg report-card span-6">
-            <h3>7d Rolling Avg PnL</h3>
-            {rollingSeries.length ? (() => {
-                  const series = rollingSeries;
+            <h3>Autopilot Executions (7d)</h3>
+            {activitySeries.length ? (() => {
+                  const series = activitySeries;
                   const W = 720; const H = 220; const P = 32;
                   const xs = series.map((_, idx) => idx);
                   const ys = series.map(row => Number(row.value ?? 0) || 0);
@@ -1978,47 +2082,47 @@ function shortDateLabel(iso?: string) {
                     <div className="report-chart">
                       <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:'#0f1420', border:'1px solid var(--border)', borderRadius:10}}>
                         <defs>
-                          <linearGradient id="rollLine" x1="0" y1="0" x2="1" y2="0">
+                          <linearGradient id="execLine" x1="0" y1="0" x2="1" y2="0">
                             <stop offset="0%" stopColor="rgba(168,85,247,1)" />
                             <stop offset="100%" stopColor="rgba(244,114,182,1)" />
                           </linearGradient>
-                          <linearGradient id="rollArea" x1="0" y1="0" x2="0" y2="1">
+                          <linearGradient id="execArea" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="0%" stopColor="rgba(168,85,247,0.35)" />
                             <stop offset="100%" stopColor="rgba(15,23,42,0.05)" />
                           </linearGradient>
                         </defs>
                         <path d={`M ${P} ${zeroY} L ${W - P} ${zeroY}`} stroke="rgba(148,163,184,.35)" strokeWidth="1" strokeDasharray="4 6" fill="none" />
-                        {areaPath ? <path d={areaPath} fill="url(#rollArea)" stroke="none" /> : null}
-                        <path d={linePath} stroke="url(#rollLine)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                        {areaPath ? <path d={areaPath} fill="url(#execArea)" stroke="none" /> : null}
+                        <path d={linePath} stroke="url(#execLine)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                         {series.map((row, idx) => {
                           const X = getX(xs[idx]);
                           const Y = getY(ys[idx]);
-                          const positive = ys[idx] >= 0;
-                          return <circle key={row?.date || idx} cx={X} cy={Y} r={3} fill={positive ? 'var(--green)' : 'var(--red)'} stroke="#0f1420" strokeWidth="1.2"/>;
+                          const highlight = ys[idx] >= (activityAverage ?? 0);
+                          return <circle key={row?.date || idx} cx={X} cy={Y} r={3} fill={highlight ? 'var(--green)' : 'var(--brand)'} stroke="#0f1420" strokeWidth="1.2"/>;
                         })}
                       </svg>
                       <div className="chart-axis">
                         <span>{shortDateLabel(startDate)}</span>
-                    <span>{shortDateLabel(endDate)}</span>
-                  </div>
-                  <div className="chart-legend">
-                    <span><span className="legend-dot" style={{background:'rgba(168,85,247,0.85)'}}></span>Rolling average</span>
-                  </div>
-                </div>
-              );
-            })() : <div className="help">Not enough realized PnL history yet.</div>}
+                        <span>{shortDateLabel(endDate)}</span>
+                      </div>
+                      <div className="chart-legend">
+                        <span><span className="legend-dot" style={{background:'rgba(168,85,247,0.85)'}}></span>Executions</span>
+                      </div>
+                    </div>
+                  );
+                })() : <div className="help">No execution activity captured over the past week.</div>}
             <div className="chart-meta">
               <div className="stat-pill">
-                <span className="label">Latest average</span>
-                <span className="value" style={{color: (rollingLatest ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{rollingLatest == null ? '—' : formatUsd(rollingLatest)}</span>
+                <span className="label">Latest day</span>
+                <span className="value">{activityLatest==null ? '—' : activityLatest.toLocaleString()}</span>
               </div>
               <div className="stat-pill">
-                <span className="label">Best avg</span>
-                <span className="value" style={{color: (rollingHigh ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(rollingHigh)}</span>
+                <span className="label">7d average</span>
+                <span className="value">{activityAverage==null ? '—' : activityAverage.toFixed(1)}</span>
               </div>
               <div className="stat-pill">
-                <span className="label">Soft floor</span>
-                <span className="value" style={{color: (rollingLow ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'}}>{formatUsd(rollingLow)}</span>
+                <span className="label">Peak day</span>
+                <span className="value">{activityPeak==null ? '—' : activityPeak.toLocaleString()}</span>
               </div>
             </div>
           </div>
@@ -2055,14 +2159,17 @@ function shortDateLabel(iso?: string) {
             <h3>Strategy Attribution (7d)</h3>
             {attrEntries.length ? (
               <div className="strategy-grid">
-                {attrEntries.map(([name, val], idx) => {
-                    const value = Number(val ?? 0);
+                {attrEntries.map((entry, idx) => {
+                    const value = Number(entry.value ?? 0);
                     const share = attrTotal > 0 ? Math.max(0, value / attrTotal) : 0;
                     const circumference = 2 * Math.PI * 19;
                     const offset = circumference * (1 - Math.min(1, share));
-                    const color = attrPalette[idx % attrPalette.length];
+                    const color = entry.color || ATTR_EXTRA_COLORS[idx % ATTR_EXTRA_COLORS.length];
+                    const shareLabel = attrTotal > 0
+                      ? formatPct(share * 100, share >= 0.1 ? 0 : 1)
+                      : "—";
                     return (
-                      <div key={name} className="strategy-tile">
+                      <div key={entry.key || entry.label} className="strategy-tile">
                         <div className="strategy-radial">
                           <svg viewBox="0 0 44 44">
                             <circle className="bg" cx="22" cy="22" r="19" />
@@ -2076,10 +2183,10 @@ function shortDateLabel(iso?: string) {
                               strokeDashoffset={offset}
                             />
                           </svg>
-                          <span>{formatPct(share * 100, share >= 0.1 ? 0 : 1)}</span>
+                          <span>{shareLabel}</span>
                         </div>
                         <div className="meta">
-                          <span className="name">{name}</span>
+                          <span className="name">{entry.label}</span>
                           <span className="value">{value.toFixed(2)}</span>
                           <span className="share">of total PnL</span>
                         </div>
@@ -2094,8 +2201,9 @@ function shortDateLabel(iso?: string) {
           <div className="card card-lg report-card span-6">
             <h3>Symbol Follow-through (7d)</h3>
             {symbolRows.length ? (
-              <div className="symbol-grid">
-                {symbolRows.map(row => {
+              <>
+                <div className="symbol-grid">
+                  {symbolPageItems.map(row => {
                     const ratio = row.proposed ? Math.max(0, Math.min(1, row.executed / row.proposed)) : (row.executed > 0 ? 1 : 0);
                     const statusClass = ratio >= 1 ? 'ahead' : ratio > 0 ? 'active' : 'idle';
                     const dots = 10;
@@ -2118,53 +2226,132 @@ function shortDateLabel(iso?: string) {
                       </div>
                     );
                 })}
-              </div>
+                </div>
+                {symbolPageCount > 1 ? (
+                  <div className="section-pager">
+                    <button
+                      type="button"
+                      className="pager-btn"
+                      onClick={() => setSymbolPage(prev => Math.max(0, prev - 1))}
+                      disabled={clampedSymbolPage <= 0}
+                    >
+                      Prev
+                    </button>
+                    <span className="section-pager__info">{clampedSymbolPage + 1} / {symbolPageCount}</span>
+                    <button
+                      type="button"
+                      className="pager-btn"
+                      onClick={() => setSymbolPage(prev => Math.min(symbolPageCount - 1, prev + 1))}
+                      disabled={clampedSymbolPage >= symbolPageCount - 1}
+                    >
+                      Next
+                    </button>
+                  </div>
+                ) : null}
+              </>
             ) : (
               <div className="help">No planner proposals recorded in the past week.</div>
             )}
           </div>
           <div className="card card-lg report-card span-6">
-            <h3>Guardrail &amp; Planner Notes (7d)</h3>
-            {guardrailEvents.length ? (
-              <>
-                <div className="help" style={{ fontWeight: 600 }}>Recent guardrail triggers</div>
-                <div className="guardrail-list">
-                  {guardrailEvents.map((evt, idx) => (
-                    <div key={`${evt?.ts || idx}-${idx}`} className="guardrail-entry">
-                      <div className="row">
-                        <span>{evt?.sym || evt?.symbol || '—'}</span>
-                        <span>{timeAgo(evt?.ts)}</span>
+            <div className="report-card__header">
+              <div className="report-card__title">
+                <h3>Discovery Report</h3>
+                <span className="report-card__timestamp">Updated {discoveryUpdatedLabel}</span>
+              </div>
+            </div>
+            {discoveryItems.length ? (
+              <div className="discovery-report">
+                {discoverySummary ? (
+                  <div className="discovery-report__summary">{discoverySummary}</div>
+                ) : null}
+                {discoveryHighlights.length ? (
+                  <div className="discovery-report__highlights">
+                    {discoveryHighlights.slice(0, 4).map((text, idx) => (
+                      <div key={`${text}-${idx}`} className="discovery-highlight">
+                        <span>{text}</span>
                       </div>
-                      <div className="reason">{evt?.reason || evt?.status || 'Guardrail tripped'}</div>
-                      <div className="row" style={{ justifyContent: 'flex-start', gap: 12 }}>
-                        {evt?.action && <span>action {evt.action}</span>}
-                        {evt?.side && <span>{String(evt.side).toUpperCase()}</span>}
+                    ))}
+                  </div>
+                ) : null}
+                <div className="discovery-report__grid">
+                  {discoveryPageItems.map((item, idx) => {
+                    const changeVal = Number(item?.change_1d_pct ?? 0);
+                    const atrVal = Number(item?.atr_pct ?? 0);
+                    const relVolVal = item?.rel_vol != null ? Number(item.rel_vol) : null;
+                    const scoreVal = item?.score != null ? Number(item.score) : null;
+                    const score = scoreVal != null && Number.isFinite(scoreVal) ? scoreVal.toFixed(2) : '—';
+                    const price = item?.px != null ? `$${Number(item.px).toFixed(2)}` : '—';
+                    const toneRaw = String(item?.news_tone || '').trim();
+                    const toneLabel = toneRaw ? toneRaw.replace(/^./, c => c.toUpperCase()) : '';
+                    const changeLabel = formatPct(item?.change_1d_pct, Math.abs(changeVal) >= 10 ? 0 : 1);
+                    const changeClass = changeVal > 0 ? 'up' : changeVal < 0 ? 'down' : 'flat';
+                    const relVolLabel = relVolVal != null && Number.isFinite(relVolVal) ? `${relVolVal.toFixed(2)}×` : '—';
+                    const scoreTier = scoreVal != null ? (scoreVal >= 7 ? 'high' : scoreVal < 4 ? 'low' : '') : '';
+                    return (
+                      <div key={`${item?.symbol || 'sym'}-${idx}`} className="discovery-card">
+                        <div className="discovery-card__header">
+                          <div className="discovery-card__id">
+                            <span className="ticker">{item?.symbol || '—'}</span>
+                            {toneLabel ? <span className="tone">{toneLabel}</span> : null}
+                          </div>
+                          <span className={`discovery-score${scoreTier ? ` ${scoreTier}` : ''}`}>Score {score}</span>
+                        </div>
+                        <div className="discovery-card__price-row">
+                          <span className="price">{price}</span>
+                          <span className={`change ${changeClass}`}>{changeLabel}</span>
+                        </div>
+                        <div className="discovery-card__metrics">
+                          <div className="discovery-metric">
+                            <span className="label">ATR swing</span>
+                            <span className="value">{formatPct(item?.atr_pct, Math.abs(atrVal) >= 10 ? 0 : 1)}</span>
+                          </div>
+                          <div className="discovery-metric">
+                            <span className="label">Relative vol</span>
+                            <span className="value">{relVolLabel}</span>
+                          </div>
+                          <div className="discovery-metric">
+                            <span className="label">Day range</span>
+                            <span className="value">{formatPct(item?.change_1d_pct, Math.abs(changeVal) >= 10 ? 0 : 1)}</span>
+                          </div>
+                        </div>
+                        {item?.news_summary ? (
+                          <div className="discovery-card__news">
+                            <span className="news-text">{item.news_summary}</span>
+                            {toneLabel ? <span className="tone-badge">{toneLabel}</span> : null}
+                          </div>
+                        ) : null}
                       </div>
-                    </div>
-                  ))}
+                    );
+                })}
                 </div>
-              </>
-            ) : null}
-            {reasonEntries.length ? (
-              <>
-                <div className="help" style={{ fontWeight: 600, marginTop: guardrailEvents.length ? 12 : 0 }}>Planner drop reasons</div>
-                <div className="timeline">
-                  {reasonEntries.map(([reason, count], idx) => (
-                    <div key={reason || idx} className="timeline-item">
-                      <div className="title">{reason}</div>
-                      <div className="meta">{count} events</div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-            {!guardrailEvents.length && !reasonEntries.length ? (
-              guardrailCount > 0 ? (
-                <div className="help">Guardrails triggered {guardrailCount.toLocaleString()} times over the past week.</div>
-              ) : (
-                <div className="help">No guardrail actions logged over the past week.</div>
-              )
-            ) : null}
+                {discoveryPageCount > 1 ? (
+                  <div className="section-pager">
+                    <button
+                      type="button"
+                      className="pager-btn"
+                      onClick={() => setDiscoveryPage(prev => Math.max(0, prev - 1))}
+                      disabled={clampedDiscoveryPage <= 0}
+                    >
+                      Prev
+                    </button>
+                    <span className="section-pager__info">{clampedDiscoveryPage + 1} / {discoveryPageCount}</span>
+                    <button
+                      type="button"
+                      className="pager-btn"
+                      onClick={() => setDiscoveryPage(prev => Math.min(discoveryPageCount - 1, prev + 1))}
+                      disabled={clampedDiscoveryPage >= discoveryPageCount - 1}
+                    >
+                      Next
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="help">
+                Discovery has not produced a report yet. Save a seed list in Settings → Watchlist or wait for the daily refresh.
+              </div>
+            )}
           </div>
           <div className="card card-lg report-card span-12">
             <h3>Daily Realized PnL (7d)</h3>

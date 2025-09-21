@@ -3206,14 +3206,17 @@ def autopilot_discovery_get():
     seed = _get_json_setting("autopilot.discovery_seed", None)
     if not isinstance(seed, list):
         seed = []
-    # Optional live preview (best-effort)
     preview: List[str] = []
-    try:
-        from autopilot.discovery import discover_symbols  # type: ignore
-        preview = discover_symbols(get_client(), limit=10, ktype="K_DAY")  # type: ignore[arg-type]
-    except Exception:
-        preview = []
-    return {"enabled": enabled, "only": only, "seed": seed, "preview": preview}
+    report = _get_json_setting("autopilot.discovery_report", {})
+    if isinstance(report, dict):
+        top = report.get("top_symbols")
+        if isinstance(top, list):
+            preview = [str(s).strip().upper() for s in top if isinstance(s, str)]
+    if not preview:
+        cached = _get_json_setting("autopilot.discovery_watchlist", [])
+        if isinstance(cached, list):
+            preview = [str(s).strip().upper() for s in cached if isinstance(s, str)]
+    return {"enabled": enabled, "only": only, "seed": seed, "preview": preview, "report": report if isinstance(report, dict) else {}}
 
 
 @autopilot_router.put("/discovery")
@@ -3224,12 +3227,44 @@ def autopilot_discovery_put(body: DiscoveryUpdate):
     if body.only is not None:
         _set_json_setting("autopilot.discovery_only", bool(body.only))
         insert_action_log("discovery_update", mode=_two_mode(), reason="only_toggle", status="ok", extra={"only": bool(body.only)})  # type: ignore[name-defined]
+    refreshed: Optional[Dict[str, Any]] = None
     if isinstance(body.seed, list):
         # normalize seed to US.TICKER
         symbols = list({_normalize_symbol(x) for x in body.seed if str(x).strip()})
         _set_json_setting("autopilot.discovery_seed", symbols)
         insert_action_log("discovery_update", mode=_two_mode(), reason="seed_update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+        try:
+            from autopilot.discovery_job import run_daily_discovery  # type: ignore
+            refreshed = run_daily_discovery(get_client(), force=True, reason="manual_seed")  # type: ignore[arg-type]
+        except Exception:
+            refreshed = None
+    if refreshed:
+        return {**autopilot_discovery_get(), "report": refreshed}
     return autopilot_discovery_get()
+
+
+@autopilot_router.post("/discovery/run")
+def autopilot_discovery_run():
+    try:
+        from autopilot.discovery_job import run_daily_discovery  # type: ignore
+    except Exception as e:  # pragma: no cover - module import issues surface to user
+        raise HTTPException(status_code=500, detail=f"Discovery job unavailable: {e}")
+
+    try:
+        report = run_daily_discovery(get_client(), force=True, reason="manual_run")  # type: ignore[arg-type]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Discovery run failed: {e}")
+
+    # Return the latest discovery state, merging the fresh report if available.
+    state = autopilot_discovery_get()
+    if isinstance(report, dict) and report:
+        try:
+            state["report"] = report
+        except Exception:
+            pass
+    return state
 
 
 # ---- Planner settings (min confidence, top_n) ----

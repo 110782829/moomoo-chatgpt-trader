@@ -6,8 +6,10 @@ Uses a seed list (settings overrideable) and computes features from recent bars
 via core.market_data.get_bars_safely, then ranks by volatility and activity.
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Sequence
 import os
+import json
+from datetime import datetime, timezone
 
 DEFAULT_SEED = [
     # Mega-cap tech and liquid names
@@ -62,52 +64,91 @@ def _score(feat: Dict[str, float]) -> float:
     return s
 
 
-def _load_seed(get_setting) -> List[str]:  # type: ignore
-    try:
-        raw = get_setting("autopilot.discovery_seed")
-        if raw:
-            import json
-            v = json.loads(raw)
-            if isinstance(v, list) and v:
-                out = []
-                for s in v:
-                    s = str(s or "").strip().upper()
-                    if not s:
-                        continue
-                    out.append(s if "." in s else f"US.{s}")
-                return out
-    except Exception:
-        pass
-    return DEFAULT_SEED
+def _normalize_symbols(symbols: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for raw in symbols:
+        sym = str(raw or "").strip().upper()
+        if not sym:
+            continue
+        if "." not in sym:
+            sym = f"US.{sym}"
+        if sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    return out
 
 
-def discover_symbols(client, limit: int = 20, ktype: str = "K_DAY", seed_cap: int = 60) -> List[str]:
-    """
-    Returns a ranked list of US.TICKER symbols discovered from a seed
-    (settings override or DEFAULT_SEED), scored by ATR%, 1d change, and rel volume.
-    """
+def _load_seed_override() -> List[str]:
     try:
         from core.storage import get_setting  # type: ignore
+    except Exception:  # pragma: no cover
+        return []
+    try:
+        raw = get_setting("autopilot.discovery_seed")
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if isinstance(data, Sequence):
+            return _normalize_symbols(data)
     except Exception:
-        get_setting = None  # type: ignore
+        return []
+    return []
 
-    seed = DEFAULT_SEED
-    if get_setting is not None:
-        seed = _load_seed(get_setting)
 
-    # trim seed so discovery is fast
-    seed = seed[: int(os.getenv("AUTOPILOT_DISCOVERY_SEED_CAP", str(seed_cap)) or seed_cap)]
-
+def compute_symbol_universe(
+    client,
+    symbols: Sequence[str],
+    *,
+    ktype: str = "K_DAY",
+    lookback: int = 60,
+) -> List[Dict[str, Any]]:
+    """
+    Return feature dicts for the provided symbols with discovery score metadata.
+    Each entry: {"symbol", "score", "features": {...}, "source": str}
+    """
     from core.market_data import get_bars_safely
-    feats: List[Tuple[str, Dict[str, float]]] = []
-    for sym in seed:
+
+    universe: List[Dict[str, Any]] = []
+    for sym in _normalize_symbols(symbols):
         try:
-            bars, _src = get_bars_safely(client, sym, ktype, 60)
-            f = _features_from_bars(bars or [])
-            if f:
-                feats.append((sym, f))
+            bars, source = get_bars_safely(client, sym, ktype, lookback)
         except Exception:
             continue
+        feats = _features_from_bars(bars or [])
+        if not feats:
+            continue
+        score = _score(feats)
+        universe.append({
+            "symbol": sym,
+            "score": score,
+            "features": feats,
+            "source": source,
+        })
+    universe.sort(key=lambda row: float(row.get("score") or 0.0), reverse=True)
+    return universe
 
-    ranked = sorted(feats, key=lambda t: _score(t[1]), reverse=True)
-    return [sym for sym, _ in ranked[:limit]]
+
+def discover_symbols(
+    client,
+    limit: int = 20,
+    *,
+    ktype: str = "K_DAY",
+    seed_cap: int = 60,
+    seed: Sequence[str] | None = None,
+) -> List[str]:
+    """Backward-compatible helper to surface a ranked list of discovery symbols."""
+    if seed is None:
+        override = _load_seed_override()
+        seed = override or DEFAULT_SEED
+    seed = list(seed)[: int(os.getenv("AUTOPILOT_DISCOVERY_SEED_CAP", str(seed_cap)) or seed_cap)]
+    ranked = compute_symbol_universe(client, seed, ktype=ktype, lookback=60)
+    return [row["symbol"] for row in ranked[:limit]]
+
+
+def stamp_now() -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "run_at": now.isoformat(),
+        "run_day": now.astimezone().strftime("%Y-%m-%d"),
+    }

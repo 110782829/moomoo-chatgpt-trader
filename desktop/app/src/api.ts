@@ -21,6 +21,10 @@ export async function SEND<T>(path: string, body?: any, method: "POST" | "PUT" |
   return r.json() as Promise<T>;
 }
 
+type DiscoveryReport = {
+  top_symbols?: unknown;
+} & Record<string, unknown>;
+
 const api = {
   connect: (host: string, port: number, client_id: number) => SEND("/connect", { host, port, client_id }),
   accountsActive: () => GET<{ account_id: string | null; trd_env: string | null; account_type?: string | null }>("/accounts/active"),
@@ -58,8 +62,16 @@ const api = {
   getAutoStyle: () => GET<{ raw: string; summary: string }>("/autopilot/style"),
   postAutoStyle: (text: string) => SEND<{ raw: string; summary: string }>("/autopilot/style", { text }),
   deleteAutoStyle: () => SEND<{ raw: string; summary: string }>("/autopilot/style", undefined, "DELETE"),
-  getDiscovery: () => GET<{ enabled: boolean; only: boolean; seed: string[]; preview: string[] }>("/autopilot/discovery"),
+  getDiscovery: () =>
+    GET<{
+      enabled: boolean;
+      only: boolean;
+      seed: string[];
+      preview: string[];
+      report?: DiscoveryReport | null;
+    }>("/autopilot/discovery"),
   putDiscovery: (payload: { enabled?: boolean; only?: boolean; seed?: string[] }) => SEND("/autopilot/discovery", payload, "PUT"),
+  runDiscoveryNow: () => SEND("/autopilot/discovery/run", {}, "POST"),
   getWatchlistSnapshot: (params?: { limit?: number; interval?: string; bars?: number; since_hours?: number }) =>
     GET<{ generated_at: string; symbols: any[] }>("/autopilot/watchlist_snapshot", params),
   getNewsSettings: () => GET<{ enabled: boolean; ttl_sec: number; provider?: string }>("/autopilot/news"),
