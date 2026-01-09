@@ -1,25 +1,57 @@
 """
-Wrapper client for the moomoo/Futu OpenAPI for stock trading.
-
-This module provides high-level methods for logging in, retrieving account info,
-and placing orders. It interacts with the OpenD session and Futu API via our wrapper.
+Wrapper client for the moomoo OpenAPI for stock trading.
 """
 
 from typing import List, Optional, Dict, Any
 import os
 import pandas as pd
+import logging
+from datetime import datetime, timedelta
 
-from core.futu_client import (
-    FUTU_AVAILABLE,
-    TradeContext,
-    OpenQuoteContext,
-    TrdEnv,
-    TrdSide,
-    OrderType,
-    SubType,
-    RET_OK,
-)
+MOOMOO_AVAILABLE = False
 
+try:
+    from moomoo import (
+        OpenQuoteContext,
+        RET_OK,
+        TrdEnv,
+        TrdSide,
+        OrderType,
+        SubType,
+        TickerHandlerBase,
+    )
+    try:
+        from moomoo import OpenUSTradeContext as TradeContext
+    except Exception:
+        try:
+            from moomoo import OpenSecTradeContext as TradeContext
+        except Exception:
+            try:
+                from moomoo import OpenTradeContext as TradeContext
+            except Exception:
+                TradeContext = None  # type: ignore
+    MOOMOO_AVAILABLE = True
+except Exception:
+    class _DummyEnv:
+        SIMULATE = "SIMULATE"
+        REAL = "REAL"
+
+    class _DummyCtx:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("moomoo-api not installed. Install on Python 3.10/3.11 via `pip install moomoo-api`.")
+
+    OpenQuoteContext = _DummyCtx  # type: ignore
+    TradeContext = _DummyCtx      # type: ignore
+    TrdEnv = _DummyEnv            # type: ignore
+    class TrdSide: BUY="BUY"; SELL="SELL"  # type: ignore
+    class OrderType: NORMAL="NORMAL"; MARKET="MARKET"  # type: ignore
+    class SubType: QUOTE="QUOTE"; K_1M="K_1M"  # type: ignore
+    class TickerHandlerBase:
+        pass
+    RET_OK = 0                                     # type: ignore
+
+
+log = logging.getLogger(__name__)
 
 # ---------------- utilities ---------------- #
 
@@ -41,16 +73,11 @@ class MoomooClient:
     MAX_QTY = float(os.getenv("MAX_QTY", "1000"))
     SIM_ONLY = os.getenv("SIM_ONLY", "1") == "1"
 
-    def __init__(self, host: str, port: int) -> None:
-        """
-        Initialize the MoomooClient with the host and port of the OpenD gateway.
-
-        Args:
-            host (str): Hostname or IP address of the OpenD gateway.
-            port (int): Port number of the OpenD gateway.
-        """
+    def __init__(self, host: str, port: int, client_id: int = 1) -> None:
+        """Initialize the client with host/port and optional client_id."""
         self.host = host
         self.port = port
+        self.client_id = int(client_id)
         self.connected: bool = False
         self.account_id: int | None = None
 
@@ -58,9 +85,9 @@ class MoomooClient:
         self.trading_ctx = None
         self.quote_ctx = None  # type: ignore
 
-        if not FUTU_AVAILABLE:
+        if not MOOMOO_AVAILABLE:
             raise RuntimeError(
-                "futu-api not available. Install on Python 3.10/3.11 via `pip install futu-api`."
+                "moomoo-api not available. Install on Python 3.10/3.11 via `pip install moomoo-api`."
             )
         self.env = TrdEnv.SIMULATE
 
@@ -71,14 +98,24 @@ class MoomooClient:
         if self.connected:
             return
         if TradeContext is None:
-            raise RuntimeError("Trade context class not found in futu (USTrade/SecTrade).")
+            raise RuntimeError("Trade context class not found in moomoo (USTrade/SecTrade).")
 
         # Trade context
-        self.trading_ctx = TradeContext(host=self.host, port=self.port)
+        try:
+            self.trading_ctx = TradeContext(host=self.host, port=self.port, client_id=self.client_id)
+        except TypeError:
+            # older moomoo builds may not accept client_id
+            self.trading_ctx = TradeContext(host=self.host, port=self.port)
 
         # Quote context (optional; best-effort)
         try:
-            self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
+            try:
+                self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port, client_id=self.client_id)
+            except TypeError:
+                self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
+            # Start quote context for push data
+            self.quote_ctx.set_handler(TickerHandlerBase())
+            self.quote_ctx.start()
         except Exception:
             self.quote_ctx = None
 
@@ -96,6 +133,11 @@ class MoomooClient:
 
         try:
             if self.quote_ctx is not None:
+                # Stop quote context if active
+                try:
+                    self.quote_ctx.stop()
+                except Exception:
+                    pass
                 self.quote_ctx.close()
         finally:
             self.quote_ctx = None
@@ -104,7 +146,7 @@ class MoomooClient:
 
     # -------- accounts -------- #
 
-    def list_accounts(self) -> List[str]:
+    def list_accounts(self) -> List[Dict[str, str]]:
         if not self.connected:
             raise RuntimeError("Not connected to OpenD")
 
@@ -119,25 +161,61 @@ class MoomooClient:
                 ret, df = self.trading_ctx.get_acc_list(**kwargs)  # type: ignore[arg-type]
                 if ret != RET_OK:
                     raise RuntimeError(f"get_acc_list failed: {df}")
-                # Extract account IDs
                 recs = _df_to_records(df)
-                ids: List[str] = []
+                entries: List[Dict[str, str]] = []
                 for r in recs:
                     acc = r.get("acc_id") or r.get("accCode") or r.get("account_id")
+                    env_raw = str(r.get("trd_env") or r.get("env") or "").upper()
+                    type_raw = r.get("acc_type") or r.get("accType") or r.get("market") or r.get("trd_market")
                     if acc is not None:
-                        ids.append(str(acc))
-                # fallback if schema is unexpected
-                if not ids:
+                        entries.append({
+                            "account_id": str(acc),
+                            "trd_env": "REAL" if env_raw == "REAL" else "SIMULATE",
+                            "account_type": str(type_raw or ""),
+                        })
+                if not entries:
                     for r in recs:
                         for v in r.values():
                             if isinstance(v, (str, int)):
-                                ids.append(str(v))
+                                entries.append({"account_id": str(v), "trd_env": "SIMULATE"})
                                 break
-                return ids
+                return entries
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"get_acc_list incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"get_acc_list incompatible with this moomoo build: {last_err}")
+
+    def get_account_info(self, account_id: str) -> Dict[str, Any]:
+        """Return account info for acc_id."""
+        if not self.connected:
+            raise RuntimeError("Not connected to OpenD")
+
+        tried = [
+            {"trd_env": self.env, "acc_id": account_id},
+            {"env": self.env, "acc_id": account_id},
+            {"acc_id": account_id},
+            {},
+        ]
+        errors: List[str] = []
+        for name in ("accinfo_query", "get_accinfo"):
+            fn = getattr(self.trading_ctx, name, None)
+            if not callable(fn):
+                errors.append(f"{name} not available")
+                continue
+            for kwargs in tried:
+                try:
+                    ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(df)
+                    recs = _df_to_records(df)
+                    if recs:
+                        return recs[0]
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"{name}{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        raise RuntimeError("; ".join(errors))
 
     def set_account(self, account_id: str, trd_env) -> None:
         """
@@ -151,6 +229,56 @@ class MoomooClient:
         except ValueError:
             raise RuntimeError(f"Invalid account_id: {account_id}")
         self.env = trd_env
+
+    def unlock_trade(self, passcode: str) -> Dict[str, Any]:
+        """Unlock trading via passcode."""
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        if not passcode:
+            raise RuntimeError("passcode empty")
+        acc_records: List[Dict[str, Any]] = []
+        if self.account_id is None:
+            try:
+                ret, df = self.trading_ctx.get_acc_list()
+                if ret == RET_OK:
+                    acc_records = _df_to_records(df)
+                    for r in acc_records:
+                        acc = r.get("acc_id") or r.get("accCode") or r.get("account_id")
+                        env_raw = str(r.get("trd_env") or r.get("env") or "").upper()
+                        if acc is not None:
+                            self.account_id = int(str(acc))
+                            self.env = TrdEnv.SIMULATE if env_raw != "REAL" else TrdEnv.REAL
+                            break
+            except Exception as e:
+                raise RuntimeError(f"get_acc_list failed: {e}")
+            if self.account_id is None:
+                raise RuntimeError("No account available")
+        else:
+            try:
+                ret, df = self.trading_ctx.get_acc_list()
+                if ret == RET_OK:
+                    acc_records = _df_to_records(df)
+            except Exception:
+                pass
+
+        # If no real accounts exist, unlocking is unnecessary.
+        has_real = any(str(r.get("trd_env") or r.get("env") or "").upper() == "REAL" for r in acc_records)
+        if not has_real:
+            return {"detail": "unlock_trade ok"}
+
+        last_err: Any = None
+        for kwargs in ( {"password": passcode}, {"password_md5": passcode} ):
+            try:
+                ret, msg = self.trading_ctx.unlock_trade(**kwargs)  # type: ignore[arg-type]
+            except TypeError as e:
+                last_err = e
+                continue
+            except Exception as e:
+                raise RuntimeError(f"unlock_trade failed: {e}")
+            if ret == RET_OK:
+                return {"detail": msg or "unlock_trade ok"}
+            last_err = msg
+        raise RuntimeError(f"unlock_trade failed: {last_err}")
 
     # -------- read data -------- #
 
@@ -176,7 +304,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"position_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"position_list_query incompatible with this moomoo build: {last_err}")
 
     def get_orders(self) -> List[Dict[str, Any]]:
         if not self.connected:
@@ -184,6 +312,8 @@ class MoomooClient:
         if not self.account_id:
             raise RuntimeError("No account selected")
 
+        # 1) Active/unfinished orders
+        active: List[Dict[str, Any]] = []
         tried = [
             {"trd_env": self.env, "acc_id": self.account_id},
             {"env": self.env, "acc_id": self.account_id},
@@ -194,13 +324,48 @@ class MoomooClient:
         for kwargs in tried:
             try:
                 ret, df = self.trading_ctx.order_list_query(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"order_list_query failed: {df}")
-                return _df_to_records(df)
+                if ret == RET_OK:
+                    active = _df_to_records(df)
+                    break
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"order_list_query incompatible with this futu build: {last_err}")
+
+        # 2) Recent history (fallback to last 3 days)
+        hist: List[Dict[str, Any]] = []
+        try:
+            from datetime import datetime, timedelta
+            start = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%d")
+            end = datetime.utcnow().strftime("%Y-%m-%d")
+            fn = getattr(self.trading_ctx, "history_order_list_query", None)
+            if callable(fn):
+                for kwargs in tried:
+                    try:
+                        params = {"start": start, "end": end} | kwargs
+                        ret, df = fn(**params)  # type: ignore[arg-type]
+                        if ret == RET_OK:
+                            hist = _df_to_records(df)
+                            break
+                    except TypeError:
+                        continue
+        except Exception:
+            pass
+
+        if not active and last_err is not None and not hist:
+            # surface incompatibility if both queries failed
+            raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
+
+        # Merge and deduplicate by order_id when present
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for rec in (list(active) + list(hist)):
+            oid = str(rec.get("order_id") or rec.get("orderId") or rec.get("orderID") or rec.get("id") or "")
+            key = oid or (str(rec.get("code") or rec.get("stock_code") or "") + ":" + str(rec.get("create_time") or rec.get("time") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(rec)
+        return merged
 
     def get_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:
@@ -224,7 +389,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"order_list_query incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"order_list_query incompatible with this moomoo build: {last_err}")
 
     # -------- NEW: fills (deals) -------- #
 
@@ -237,27 +402,33 @@ class MoomooClient:
         if not self.account_id:
             raise RuntimeError("No account selected")
 
+        start = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        end = datetime.utcnow().strftime("%Y-%m-%d")
         tried = [
-            {"trd_env": self.env, "acc_id": self.account_id},
-            {"env": self.env, "acc_id": self.account_id},
-            {"acc_id": self.account_id},
+            {"trd_env": self.env, "acc_id": int(self.account_id)},
+            {"env": self.env, "acc_id": int(self.account_id)},
+            {"acc_id": int(self.account_id)},
             {},
         ]
-        last_err = None
-        for kwargs in tried:
-            try:
-                # Some builds expose 'deal_list_query'
-                fn = getattr(self.trading_ctx, "deal_list_query", None)
-                if not callable(fn):
-                    raise RuntimeError("deal_list_query not available in this futu build")
-                ret, df = fn(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"deal_list_query failed: {df}")
-                return _df_to_records(df)
-            except TypeError as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"deal_list_query incompatible with this futu build: {last_err}")
+        funcs = []
+        fn = getattr(self.trading_ctx, "deal_list_query", None)
+        if callable(fn):
+            funcs.append((fn, {"code": "", "order_id": 0}))
+        fn = getattr(self.trading_ctx, "history_deal_list_query", None)
+        if callable(fn):
+            funcs.append((fn, {"code": "", "start": start, "end": end}))
+        if not funcs:
+            raise RuntimeError("deal retrieval not supported")
+        for fn, base in funcs:
+            for kwargs in tried:
+                params = base | kwargs
+                try:
+                    ret, df = fn(**params)  # type: ignore[arg-type]
+                    if ret == RET_OK:
+                        return _df_to_records(df)
+                except TypeError:
+                    continue
+        raise RuntimeError("deal query failed")
 
     # -------- trade ops -------- #
 
@@ -268,6 +439,10 @@ class MoomooClient:
         side: str,
         order_type: str = "MARKET",
         price: Optional[float] = None,
+        aux_price: Optional[float] = None,
+        trail_type: Optional[str] = None,
+        trail_value: Optional[float] = None,
+        trail_spread: Optional[float] = None,
     ) -> Dict[str, Any]:
         if not self.connected:
             raise RuntimeError("Not connected")
@@ -277,8 +452,7 @@ class MoomooClient:
         # safety rails
         if self.SIM_ONLY and self.env != TrdEnv.SIMULATE:
             raise RuntimeError("Real trading disabled by server config (SIM_ONLY=1)")
-        if qty > self.MAX_QTY:
-            raise RuntimeError(f"Quantity {qty} exceeds server limit MAX_QTY={self.MAX_QTY}")
+        # Do not raise on large qty; chunk below
 
         symbol = symbol.strip()
         code = symbol if "." in symbol else f"US.{symbol.upper()}"
@@ -286,37 +460,81 @@ class MoomooClient:
         side_enum = TrdSide.BUY if side.upper() == "BUY" else TrdSide.SELL
 
         ot = order_type.upper()
+        # Map to SDK enum; support extended types when available
         if ot == "MARKET":
-            order_type_enum = OrderType.MARKET
+            order_type_enum = getattr(OrderType, "MARKET", OrderType.NORMAL)
             if price is None:
-                price = 0  # many builds ignore price for market
+                price = 0
         elif ot == "LIMIT":
             if price is None:
                 raise RuntimeError("price is required for LIMIT orders")
-            # many builds treat NORMAL as 'limit'
-            order_type_enum = OrderType.NORMAL
+            order_type_enum = getattr(OrderType, "NORMAL", OrderType.NORMAL)
+        elif ot in {"STOP", "STOP_MARKET"}:
+            # Stop market: requires aux_price (trigger)
+            if aux_price is None:
+                raise RuntimeError("aux_price is required for STOP orders")
+            order_type_enum = getattr(OrderType, "STOP", getattr(OrderType, "NORMAL", OrderType.NORMAL))
+            # For many builds price can be 0 for STOP market
+            if price is None:
+                price = 0
+        elif ot in {"STOP_LIMIT"}:
+            if aux_price is None or price is None:
+                raise RuntimeError("STOP_LIMIT requires aux_price (trigger) and price (limit)")
+            order_type_enum = getattr(OrderType, "STOP_LIMIT", getattr(OrderType, "NORMAL", OrderType.NORMAL))
+        elif ot in {"TRAILING_STOP", "TRAILING_STOP_LIMIT"}:
+            # trail_type: 'AMOUNT' or 'PERCENT' depending on SDK
+            tt = trail_type or None
+            tv = float(trail_value) if trail_value is not None else None
+            ts = float(trail_spread) if trail_spread is not None else None
+            if tv is None:
+                raise RuntimeError("trailing orders require trail_value")
+            # Map enums if available
+            order_type_enum = getattr(OrderType, ot, getattr(OrderType, "NORMAL", OrderType.NORMAL))
         else:
-            order_type_enum = OrderType.NORMAL
+            # Fallback to LIMIT for unknown types
+            order_type_enum = getattr(OrderType, "NORMAL", OrderType.NORMAL)
 
+        base = dict(code=code, price=price, qty=qty, trd_side=side_enum,
+                    order_type=order_type_enum)
+        if aux_price is not None:
+            base["aux_price"] = float(aux_price)
+        if trail_type is not None:
+            base["trail_type"] = trail_type
+        if trail_value is not None:
+            base["trail_value"] = float(trail_value)
+        if trail_spread is not None:
+            base["trail_spread"] = float(trail_spread)
         tried = [
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum, trd_env=self.env, acc_id=self.account_id),
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum, env=self.env, acc_id=self.account_id),
-            dict(code=code, price=price, qty=qty, trd_side=side_enum,
-                 order_type=order_type_enum),
+            dict(base, **{ "trd_env": self.env, "acc_id": self.account_id }),
+            dict(base, **{ "env": self.env, "acc_id": self.account_id }),
+            dict(base),
         ]
-        last_err = None
-        for kwargs in tried:
-            try:
-                ret, df = self.trading_ctx.place_order(**kwargs)  # type: ignore[arg-type]
-                if ret != RET_OK:
-                    raise RuntimeError(f"place_order failed: {df}")
-                return {"status": "ok", "result": _df_to_records(df)}
-            except TypeError as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"place_order incompatible with this futu build: {last_err}")
+        def _place_once(quantity: float):
+            last_err = None
+            for kwargs in tried:
+                try:
+                    kwargs2 = dict(kwargs)
+                    kwargs2["qty"] = quantity
+                    ret, df = self.trading_ctx.place_order(**kwargs2)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(f"place_order failed: {df}")
+                    return _df_to_records(df)
+                except TypeError as e:
+                    last_err = e
+                    continue
+            raise RuntimeError(f"place_order incompatible with this moomoo build: {last_err}")
+
+        # Chunk large quantities to respect MAX_QTY without failing
+        maxq = float(getattr(self, "MAX_QTY", 1000.0) or 1000.0)
+        if qty <= maxq:
+            return {"status": "ok", "result": _place_once(qty)}
+        remaining = float(qty)
+        combined: list[dict] = []
+        while remaining > 0:
+            qchunk = maxq if remaining > maxq else remaining
+            combined.extend(_place_once(qchunk))
+            remaining -= qchunk
+        return {"status": "ok", "result": combined}
 
     def cancel_order(self, order_id: str | int) -> Dict[str, Any]:
         if not self.connected:
@@ -347,9 +565,9 @@ class MoomooClient:
         # ---- Fallback: modify_order(CANCEL) with required qty/price ----
         try:
             try:
-                from futu import ModifyOrderOp  # type: ignore
+                from moomoo import ModifyOrderOp  # type: ignore
             except Exception:
-                from futu.common.constant import ModifyOrderOp  # type: ignore
+                from moomoo.common.constant import ModifyOrderOp  # type: ignore
         except Exception as e:
             raise RuntimeError(f"modify_order not available: {e}")
 
@@ -390,7 +608,7 @@ class MoomooClient:
                 last_err = e
                 continue
 
-        raise RuntimeError(f"modify_order CANCEL incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"modify_order CANCEL incompatible with this moomoo build: {last_err}")
 
     # -------- quotes -------- #
 
@@ -401,8 +619,6 @@ class MoomooClient:
             raise RuntimeError("Quote context not available")
 
         codes = [s if "." in s else f"US.{s.upper()}" for s in symbols]
-        from core.futu_client import SubType
-
         tried = [
             {"codes": codes, "subtype_list": [SubType.QUOTE], "is_first_push": True},
             {"code_list": codes, "subtype_list": [SubType.QUOTE], "is_first_push": True},
@@ -417,7 +633,7 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"subscribe incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"subscribe incompatible with this moomoo build: {last_err}")
 
     def get_quote_latest(self, symbol: str) -> Dict[str, Any]:
         if not self.connected:
@@ -448,4 +664,101 @@ class MoomooClient:
             except TypeError as e:
                 last_err = e
                 continue
-        raise RuntimeError(f"get_stock_quote incompatible with this futu build: {last_err}")
+        raise RuntimeError(f"get_stock_quote incompatible with this moomoo build: {last_err}")
+
+    # -------- account assets (best-effort) -------- #
+    def get_account_assets(self) -> Dict[str, Any]:
+        """Return a snapshot of account assets.
+        Tries accinfo_query then get_accinfo across moomoo builds.
+        """
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        if not self.account_id:
+            raise RuntimeError("No account selected")
+
+        def normalize(recs: List[Dict[str, Any]]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {"equity": 0.0, "bp": 0.0, "cash": 0.0, "unsettled_cash": 0.0}
+            def f(r: Dict[str, Any], *keys, default=0.0):
+                for k in keys:
+                    if k in r and r[k] is not None:
+                        try:
+                            return float(r[k])
+                        except Exception:
+                            pass
+                return float(default)
+            for r in recs:
+                out["equity"] += f(r, "total_assets", "net_assets", "total_asset")
+                # Include a wide set of possible keys used across moomoo builds for buying power
+                out["bp"] += f(
+                    r,
+                    "power", "buying_power", "available_funds", "availableBuyingPower",
+                    "buying_power_stk", "overnight_buying_power", "available_buying_power",
+                    "pdt_buying_power", "day_trading_buying_power", "cash_available_for_trade",
+                )
+                cash = f(r, "cash", "cash_usd", "available_cash")
+                unsettled = f(r, "uncleared_cash", "unclearedCash", "unsettled_cash")
+                out["cash"] += cash + unsettled
+                out["unsettled_cash"] += unsettled
+            out["raw"] = recs
+            # API may omit fields or currencies
+            # Fallback: if bp is missing but cash is present, use cash as a proxy for bp for preview purposes
+            try:
+                if (out.get("bp") or 0.0) <= 0.0 and (out.get("cash") or 0.0) > 0.0:
+                    out["bp"] = float(out.get("cash") or 0.0)
+            except Exception:
+                pass
+            return out
+
+        errors: List[str] = []
+
+        # try accinfo_query
+        fn = getattr(self.trading_ctx, "accinfo_query", None)
+        if callable(fn):
+            tried = [
+                {"trd_env": self.env, "acc_id": self.account_id},
+                {"env": self.env, "acc_id": self.account_id},
+                {"acc_id": self.account_id},
+                {},
+            ]
+            for kwargs in tried:
+                try:
+                    ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(df)
+                    recs = _df_to_records(df)
+                    if recs:
+                        return normalize(recs)
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"accinfo_query{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        else:
+            errors.append("accinfo_query not available")
+
+        # fallback get_accinfo
+        fn = getattr(self.trading_ctx, "get_accinfo", None)
+        if callable(fn):
+            tried = [
+                {"trd_env": self.env, "acc_id": self.account_id},
+                {"env": self.env, "acc_id": self.account_id},
+                {"acc_id": self.account_id},
+                {},
+            ]
+            for kwargs in tried:
+                try:
+                    ret, df = fn(**kwargs)  # type: ignore[arg-type]
+                    if ret != RET_OK:
+                        raise RuntimeError(df)
+                    recs = _df_to_records(df)
+                    if recs:
+                        return normalize(recs)
+                    raise RuntimeError("empty data")
+                except Exception as e:
+                    msg = f"get_accinfo{kwargs} failed: {e}"
+                    log.warning(msg)
+                    errors.append(msg)
+        else:
+            errors.append("get_accinfo not available")
+
+        raise RuntimeError("; ".join(errors))

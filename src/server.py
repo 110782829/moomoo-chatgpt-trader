@@ -1,21 +1,57 @@
-from fastapi import FastAPI, HTTPException
+'''
+Start command: uvicorn --app-dir src server:app --reload --port 8000
+'''
+import re
+from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional, Dict, Any 
 import os
 import json
 from datetime import datetime
 from pathlib import Path
+from collections import Counter, defaultdict
 
 from fastapi.middleware.cors import CORSMiddleware
+import yfinance as yf
+
+try:
+    from dotenv import load_dotenv
+    # Load default .env from current working directory
+    load_dotenv()
+    # Also try project-root .env relative to this file (src/.. /.env)
+    try:
+        ROOT_ENV = Path(__file__).resolve().parent.parent / ".env"
+        if ROOT_ENV.exists():
+            load_dotenv(dotenv_path=str(ROOT_ENV), override=False)
+    except Exception:
+        pass
+except Exception:
+    pass
+
+try:
+    from execution.container import init_execution, get_execution, set_mode
+except Exception:
+    init_execution = lambda *a, **k: None  # type: ignore
+    def get_execution():
+        return None
+    def set_mode(_: str) -> None:
+        pass
+try:
+    from routers import exec_orders as exec_orders_router
+except Exception:
+    exec_orders_router = None  # type: ignore
+
 
 # --- Internal modules ---
 from core.market_data import get_bars_safely
 from core.moomoo_client import MoomooClient
-from core.futu_client import TrdEnv
-from core.session import load_session, save_session, clear_session
+from core.deals import fetch_deals
+from moomoo import TrdEnv
+from core.session import load_session, save_session, clear_session, reconnect_from_session
 from risk.limits import enforce_order_limits
 
-# Optional automation (scheduler + storage + strategy step)
+# Automation (scheduler + storage + strategy step)
 try:
     from core.storage import (
         init_db,
@@ -62,6 +98,9 @@ except Exception as _ge:
 # ---------- App + CORS ----------
 
 app = FastAPI(title="Moomoo ChatGPT Trader API")
+init_execution(app)  # initialize execution container (broker-backed)
+if exec_orders_router is not None:
+    app.include_router(exec_orders_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +109,815 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------- Assistant Chat (OpenAI-backed) ----------
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    include_context: Optional[bool] = True
+
+
+def _assistant_context_lines() -> List[str]:
+    """Gather a detailed snapshot of account state, positions, and settings for chat context."""
+    ctx_lines: List[str] = []
+    account_added = False
+    positions_added = False
+    orders_added = False
+    eq = bp = cash = uc = pnl = 0.0
+
+    def _fmt_qty(val: float) -> str:
+        aval = abs(val)
+        if aval >= 100:
+            return f"{aval:.0f}"
+        if aval >= 10:
+            return f"{aval:.1f}"
+        if aval >= 1:
+            return f"{aval:.2f}"
+        return f"{aval:.3f}"
+
+    try:
+        mgr = _get_autopilot()
+    except Exception:
+        mgr = None
+
+    if mgr is not None:
+        try:
+            st = mgr.status()
+        except Exception:
+            st = {}
+        if isinstance(st, dict) and st:
+            stats = st.get("stats") or {}
+            parts: List[str] = []
+            parts.append(f"status={'on' if st.get('on') else 'off'}")
+            up = stats.get("uptime")
+            if isinstance(up, str) and up:
+                parts.append(f"uptime={up}")
+            ticks = stats.get("ticks")
+            if isinstance(ticks, int) and ticks >= 0:
+                parts.append(f"ticks={ticks}")
+            dec = stats.get("decisions_today")
+            if isinstance(dec, int) and dec >= 0:
+                parts.append(f"decisions_today={dec}")
+            avg_ms = stats.get("avg_think_ms")
+            if isinstance(avg_ms, (int, float)) and avg_ms:
+                parts.append(f"avg_think_ms={int(round(float(avg_ms)))}")
+            rej = stats.get("rejected")
+            if isinstance(rej, int) and rej >= 0:
+                parts.append(f"rejects={rej}")
+            streak = st.get("reject_streak")
+            if isinstance(streak, int) and streak > 0:
+                parts.append(f"reject_streak={streak}")
+            last_tick = st.get("last_tick")
+            if isinstance(last_tick, str) and last_tick:
+                parts.append(f"last_tick={last_tick}")
+            ctx_lines.append("autopilot_stats: " + " ".join(parts))
+
+        last_in = getattr(mgr, "last_input", {}) or {}
+        acct = last_in.get("account") if isinstance(last_in, dict) else {}
+        pos = last_in.get("positions") if isinstance(last_in, dict) else []
+        orders = last_in.get("orders") if isinstance(last_in, dict) else []
+        if isinstance(acct, dict) and acct:
+            try:
+                eq = float(acct.get("equity") or 0.0)
+                bp = float(acct.get("bp") or 0.0)
+                cash = float(acct.get("cash") or 0.0)
+                uc = float(acct.get("unsettled_cash") or 0.0)
+                pnl = float(acct.get("pnl_today") or 0.0)
+                ctx_lines.append(
+                    f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f} pnl_today=${pnl:,.0f}"
+                )
+                account_added = True
+            except Exception:
+                pass
+
+        mv_map: Dict[str, float] = {}
+        try:
+            universe = last_in.get("universe") if isinstance(last_in, dict) else []
+            if isinstance(universe, list):
+                for u in universe:
+                    if not isinstance(u, dict):
+                        continue
+                    sym = str(u.get("sym") or "")
+                    if not sym:
+                        continue
+                    try:
+                        mv_map[sym] = float(u.get("px") or 0.0)
+                    except Exception:
+                        mv_map[sym] = 0.0
+        except Exception:
+            mv_map = {}
+
+        if isinstance(pos, list) and pos:
+            rows: List[str] = []
+            for p in pos:
+                if not isinstance(p, dict):
+                    continue
+                sym = str(p.get("sym") or p.get("symbol") or "")
+                if not sym:
+                    continue
+                try:
+                    qty = float(p.get("qty") or 0.0)
+                except Exception:
+                    qty = 0.0
+                try:
+                    avg_px = float(p.get("avg") or p.get("avg_cost") or 0.0)
+                except Exception:
+                    avg_px = 0.0
+                px = mv_map.get(sym, avg_px)
+                mv = abs(qty) * px if px else 0.0
+                side = "LONG" if qty >= 0 else "SHORT"
+                qty_txt = _fmt_qty(qty)
+                entry = f"{sym} {side} {qty_txt}"
+                if px:
+                    entry += f" @ {px:.2f}"
+                if mv:
+                    entry += f" (${mv:,.0f})"
+                rows.append(entry)
+            if rows:
+                ctx_lines.append("positions: " + "; ".join(rows[:8]))
+                positions_added = True
+
+        if isinstance(orders, list) and orders:
+            open_rows: List[str] = []
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                sym = str(o.get("sym") or o.get("symbol") or "")
+                status = str(o.get("status") or o.get("order_status") or "").lower()
+                if status in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                    continue
+                side = str(o.get("side") or o.get("trd_side") or "").upper()
+                try:
+                    remaining = float(o.get("remaining") or 0.0)
+                except Exception:
+                    remaining = 0.0
+                if remaining <= 0:
+                    try:
+                        qty_o = float(o.get("qty") or o.get("order_qty") or 0.0)
+                    except Exception:
+                        qty_o = 0.0
+                else:
+                    qty_o = remaining
+                try:
+                    filled = float(o.get("filled") or o.get("dealt_qty") or 0.0)
+                except Exception:
+                    filled = 0.0
+                try:
+                    price = float(o.get("price") or o.get("limit_price") or o.get("avg_fill_price") or 0.0)
+                except Exception:
+                    price = 0.0
+                if not sym:
+                    continue
+                entry = f"{sym} {side or '-'} {int(round(abs(qty_o)))}"
+                if filled > 0:
+                    entry += f" ({int(round(filled))} filled)"
+                if price:
+                    entry += f" @ {price:.2f}"
+                if status:
+                    entry += f" [{status}]"
+                open_rows.append(entry)
+            if open_rows:
+                ctx_lines.append("open_orders: " + "; ".join(open_rows[:8]))
+                orders_added = True
+
+        last_notes = getattr(mgr, "last_notes", None)
+        if last_notes:
+            ctx_lines.append("notes: " + str(last_notes)[:240])
+
+    # Broker/execution fallbacks for account + positions + orders
+    try:
+        c = get_client()
+    except Exception:
+        c = None
+    if c is not None and getattr(c, "connected", False):
+        if not account_added:
+            try:
+                ai = c.get_account_assets()
+                eq = float(ai.get("equity") or 0.0)
+                bp = float(ai.get("bp") or ai.get("buying_power") or 0.0)
+                cash = float(ai.get("cash") or 0.0)
+                uc = float(ai.get("unsettled_cash") or 0.0)
+                ctx_lines.append(f"account: equity=${eq:,.0f} bp=${bp:,.0f} cash=${cash:,.0f} unsettled=${uc:,.0f}")
+                account_added = True
+            except Exception:
+                pass
+        if not positions_added:
+            try:
+                P = c.get_positions() or []
+                rows = []
+                for r in P:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "")
+                    if not sym:
+                        continue
+                    qty = float(r.get("qty") or r.get("qty_total") or r.get("qty_today") or 0.0)
+                    avg = float(r.get("cost_price") or r.get("avg_cost_price") or 0.0)
+                    side = "LONG" if qty >= 0 else "SHORT"
+                    entry = f"{sym} {side} {_fmt_qty(qty)}"
+                    if avg:
+                        entry += f" @ {avg:.2f}"
+                    rows.append(entry)
+                if rows:
+                    ctx_lines.append("positions: " + "; ".join(rows[:8]))
+                    positions_added = True
+            except Exception:
+                pass
+        if not orders_added:
+            try:
+                O = c.get_orders() or []
+                oo = []
+                for r in O:
+                    if not isinstance(r, dict):
+                        continue
+                    stat = str(r.get("order_status") or r.get("status") or "").lower()
+                    if stat in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                        continue
+                    sym = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "")
+                    if not sym:
+                        continue
+                    side = str(r.get("trd_side") or r.get("side") or "").upper()
+                    qty = float(r.get("qty") or r.get("initial_qty") or 0.0)
+                    price = float(r.get("price") or r.get("order_price") or 0.0)
+                    entry = f"{sym} {side or '-'} {int(round(abs(qty)))}"
+                    if price:
+                        entry += f" @ {price:.2f}"
+                    entry += f" [{stat or 'open'}]"
+                    oo.append(entry)
+                if oo:
+                    ctx_lines.append("open_orders: " + "; ".join(oo[:8]))
+                    orders_added = True
+            except Exception:
+                pass
+
+    try:
+        exec_service = get_execution()
+    except Exception:
+        exec_service = None
+    if exec_service is not None:
+        if not positions_added:
+            try:
+                P2 = exec_service.list_positions() or []
+                rows = []
+                for r in P2:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("symbol") or r.get("sym") or "")
+                    if not sym:
+                        continue
+                    qty = float(r.get("qty") or 0.0)
+                    price = float(r.get("avg_cost") or r.get("avg") or 0.0)
+                    entry = f"{sym} {'LONG' if qty >= 0 else 'SHORT'} {_fmt_qty(qty)}"
+                    if price:
+                        entry += f" @ {price:.2f}"
+                    rows.append(entry)
+                if rows:
+                    ctx_lines.append("positions(sim): " + "; ".join(rows[:8]))
+                    positions_added = True
+            except Exception:
+                pass
+        if not orders_added:
+            try:
+                O2 = exec_service.list_orders(limit=50) or []
+                oo2 = []
+                for o in O2:
+                    if not isinstance(o, dict):
+                        continue
+                    st = str(o.get("status") or "").lower()
+                    if st in {"filled", "done", "cancelled", "canceled", "rejected", "expired", "failed"}:
+                        continue
+                    sym = str(o.get("symbol") or "")
+                    if not sym:
+                        continue
+                    side = str(o.get("side") or "").upper()
+                    qty = float(o.get("requested_qty") or o.get("qty") or 0.0)
+                    px = o.get("limit_price") or o.get("avg_fill_price") or 0.0
+                    entry = f"{sym} {side or '-'} {int(round(abs(qty)))}"
+                    if px:
+                        entry += f" @ {px:.2f}"
+                    entry += f" [{st or 'open'}]"
+                    oo2.append(entry)
+                if oo2:
+                    ctx_lines.append("open_orders(sim): " + "; ".join(oo2[:8]))
+                    orders_added = True
+            except Exception:
+                pass
+
+    # Settings snapshot (DB)
+    try:
+        prefs_db = _get_json_setting("autopilot.prefs", {}) or {}
+        bits = []
+        if prefs_db.get("stop_loss_pct") is not None:
+            bits.append(f"stop {prefs_db.get('stop_loss_pct')}%")
+        if prefs_db.get("take_profit_pct") is not None:
+            bits.append(f"tp {prefs_db.get('take_profit_pct')}%")
+        if prefs_db.get("measured_move_atr_mult") is not None:
+            bits.append(f"mm {prefs_db.get('measured_move_atr_mult')}x ATR")
+        if prefs_db.get("target_winrate_pct") is not None:
+            bits.append(f"winrate {prefs_db.get('target_winrate_pct')}%")
+        if prefs_db.get("target_rr") is not None:
+            bits.append(f"rr {prefs_db.get('target_rr')}")
+        if prefs_db.get("max_dd_pct") is not None:
+            bits.append(f"max_dd {prefs_db.get('max_dd_pct')}%")
+        if bits:
+            ctx_lines.append("prefs(db): " + ", ".join(bits))
+    except Exception:
+        pass
+
+    try:
+        mc_db = _get_json_setting("autopilot.min_confidence", None)
+        tn_db = _get_json_setting("autopilot.top_n", None)
+        sp_db = _get_json_setting("autopilot.strict_prefs", None)
+        planner_bits = []
+        if mc_db is not None:
+            planner_bits.append(f"min_conf {mc_db}")
+        if tn_db is not None:
+            planner_bits.append(f"top_n {tn_db}")
+        if sp_db is not None:
+            planner_bits.append("strict_prefs" if sp_db else "strict_prefs=off")
+        if planner_bits:
+            ctx_lines.append("planner(db): " + ", ".join(planner_bits))
+    except Exception:
+        pass
+
+    try:
+        news_enabled = _get_json_setting("autopilot.use_news", None)
+        news_ttl = _get_json_setting("autopilot.news_ttl_sec", None)
+        provider = _get_json_setting("autopilot.news_provider", None)
+        toggles = []
+        if news_enabled is not None:
+            toggles.append(f"news={'on' if news_enabled else 'off'}")
+        sigs = _get_json_setting("autopilot.signals.enabled", None)
+        if sigs is not None:
+            toggles.append(f"signals={'on' if sigs else 'off'}")
+        auto_w = _get_json_setting("autopilot.signals.auto_weight", None)
+        if auto_w is not None:
+            toggles.append(f"auto_weight={'on' if auto_w else 'off'}")
+        disc = _get_json_setting("autopilot.discovery_enabled", None)
+        if disc is not None:
+            toggles.append(f"discovery={'on' if disc else 'off'}")
+        disc_only = _get_json_setting("autopilot.discovery_only", None)
+        if disc_only is not None:
+            toggles.append(f"discovery_only={'on' if disc_only else 'off'}")
+        if toggles:
+            ctx_lines.append("toggles(db): " + ", ".join(toggles))
+        if news_ttl or provider:
+            ctx_lines.append(
+                "news_settings: "
+                + ("ttl=" + str(int(news_ttl)) + "s " if news_ttl else "")
+                + ("provider=" + str(provider) if provider else "")
+            )
+    except Exception:
+        pass
+
+    try:
+        weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
+        if isinstance(weights_raw, dict) and weights_raw:
+            items = list(weights_raw.items())
+            items.sort(key=lambda kv: float(kv[1] or 0), reverse=True)
+            top = ", ".join([f"{k}={float(v):.2f}" for k, v in items[:6]])
+            if top:
+                ctx_lines.append("weights(db): " + top)
+    except Exception:
+        pass
+
+    try:
+        style = _get_json_setting("autopilot.style_summary", "") or ""
+        if style:
+            lines = [s.strip() for s in _style_lines(style) if s.strip()]
+            if lines:
+                ctx_lines.append("style_summary: " + " | ".join(lines[:8]))
+    except Exception:
+        pass
+
+    try:
+        wl = _get_json_setting("autopilot.discovery_seed", None)
+        if isinstance(wl, list) and wl:
+            ctx_lines.append("watchlist: " + ", ".join([str(s) for s in wl[:12]]))
+    except Exception:
+        pass
+
+    try:
+        data_line = []
+        kt = _get_json_setting("autopilot.ktype", None)
+        if kt:
+            data_line.append(f"ktype={kt}")
+        ttl = _get_json_setting("autopilot.bars_ttl_sec", None)
+        if ttl:
+            data_line.append(f"bars_ttl={ttl}s")
+        deals = _get_json_setting("autopilot.deals_sync_sec", None)
+        if deals:
+            data_line.append(f"deals_sync={deals}s")
+        src = _get_json_setting("autopilot.data_source", None)
+        if src:
+            data_line.append(f"source={src}")
+        if data_line:
+            ctx_lines.append("data_settings: " + " ".join(data_line))
+    except Exception:
+        pass
+
+    try:
+        risk_cfg = _risk_load() or {}
+        if isinstance(risk_cfg, dict) and risk_cfg:
+            risk_bits = [f"enabled={'on' if risk_cfg.get('enabled', True) else 'off'}"]
+            if risk_cfg.get("max_usd_per_trade"):
+                risk_bits.append(f"max_usd={float(risk_cfg.get('max_usd_per_trade')):,.0f}")
+            if risk_cfg.get("max_open_positions"):
+                risk_bits.append(f"max_positions={int(risk_cfg.get('max_open_positions'))}")
+            if risk_cfg.get("max_daily_loss_usd"):
+                risk_bits.append(f"max_daily_loss=${float(risk_cfg.get('max_daily_loss_usd')):,.0f}")
+            flatten = risk_cfg.get("flatten_before_close_min")
+            if flatten:
+                risk_bits.append(f"flatten_before_close={int(flatten)}m")
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if isinstance(hours, dict) and hours.get("start") and hours.get("end"):
+                risk_bits.append(f"hours_pt={hours.get('start')}–{hours.get('end')}")
+            ctx_lines.append("risk: " + " ".join(risk_bits))
+    except Exception:
+        pass
+
+    return [line for line in ctx_lines if line]
+
+@app.post("/assistant/chat")
+def assistant_chat(body: ChatRequest):
+    # Build a concise context block for the assistant
+    ctx_lines: List[str] = _assistant_context_lines() if body.include_context else []
+
+    # Memory: load conversation + persistent memory
+    chat_log: list[dict] = []
+    memory_text: str = ""
+    style_summary_text: str = ""
+    try:
+        chat_log = _get_json_setting("assistant.chat", []) or []
+        mem = _get_json_setting("assistant.memory", "") or ""
+        memory_text = str(mem)
+    except Exception:
+        chat_log = []
+        memory_text = ""
+
+    system = (
+        "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
+        "- Be concise and clear (2–6 sentences).\n"
+        "- You operate the live trading autopilot, with full awareness of state and settings.\n"
+        "- The backend already executed any user commands listed in Operator notes.\n"
+        "  Confirm those updates as actions you just performed and describe the new state.\n"
+        "  Never claim you cannot change settings that were just applied.\n"
+        "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
+        "- Do not place orders here; focus on explanations, risk and next steps.\n"
+        "- Prefer concrete steps (levels, stops/takes, what to monitor)."
+    )
+    if memory_text:
+        system += "\nPersistent user memory (instructions/preferences):\n" + memory_text
+    if ctx_lines:
+        system += "\nContext:\n" + "\n".join(ctx_lines)
+
+    # Build chat call
+    try:
+        # Apply simple commands (live settings changes)
+        _actions: list[str] = []
+        try:
+            joined = "\n".join([m.content for m in body.messages if m.role == 'user'])
+            _actions = _apply_simple_commands(joined)
+        except Exception:
+            _actions = []
+
+        # Persist this turn in chat log
+        now = datetime.utcnow().isoformat()
+        for m in body.messages[-3:]:  # store last 3 inputs each call to reduce bloat
+            chat_log.append({"ts": now, "role": m.role, "content": m.content})
+        # Keep last 80 messages total
+        chat_log = chat_log[-200:]
+        _set_json_setting("assistant.chat", chat_log)
+
+        # If commands applied, append operator notes to system so model acknowledges
+        if _actions:
+            try:
+                system += "\n(Operator notes: " + ", ".join(_actions) + ")\n"
+            except Exception:
+                pass
+
+        # Build ChatGPT-like memory by including tail of conversation
+        tail = _conversation_tail(16)
+        new_msgs = [{"role": m.role, "content": m.content} for m in body.messages]
+        messages = [{"role": "system", "content": system}] + tail + new_msgs
+        out = _openai_chat_msgs(messages)
+        if not out:
+            raise RuntimeError("assistant unavailable")
+        reply = out.strip()
+
+        # Update memory by extracting trading directives from recent turns (skip chit-chat)
+        mem_changed = False
+        try:
+            prev_memory = str(_get_json_setting("assistant.memory", "") or "")
+        except Exception:
+            prev_memory = ""
+        try:
+            prev_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+        except Exception:
+            prev_style = ""
+        memory_text = prev_memory
+        style_summary_text = prev_style
+        try:
+            recent_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
+            if recent_user:
+                summary = _extract_style_directives(recent_user)
+                if summary:
+                    _set_json_setting("assistant.memory", summary)
+                    try:
+                        memory_text = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        memory_text = summary
+                    if memory_text != prev_memory:
+                        mem_changed = True
+                    merged = _merge_lines(prev_style, summary)
+                    cleaned = _clean_style_summary(merged)
+                    style_summary_text = cleaned
+                    if cleaned != prev_style:
+                        _set_json_setting("autopilot.style_summary", cleaned)
+                        mem_changed = True
+        except Exception:
+            pass
+
+        try:
+            memory_text = str(_get_json_setting("assistant.memory", "") or "")
+        except Exception:
+            memory_text = memory_text or ""
+        try:
+            style_summary_text = str(_get_json_setting("autopilot.style_summary", "") or "")
+        except Exception:
+            style_summary_text = style_summary_text or ""
+        if memory_text != prev_memory or style_summary_text != prev_style:
+            mem_changed = True
+
+        # Persist assistant reply to chat log so history survives reloads
+        try:
+            log2 = _get_json_setting("assistant.chat", []) or []
+            log2.append({"ts": datetime.utcnow().isoformat(), "role": "assistant", "content": reply, "saved": bool(mem_changed), "settingsApplied": bool(_actions and len(_actions)>0)})
+            log2 = log2[-200:]
+            _set_json_setting("assistant.chat", log2)
+        except Exception:
+            pass
+
+        if _actions:
+            reply = "Applied: " + ", ".join(_actions) + "\n\n" + reply
+        return {
+            "reply": reply,
+            "memory": memory_text,
+            "actions": _actions,
+            "mem_saved": bool(mem_changed),
+            "style_summary": style_summary_text,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/assistant/chat_stream")
+def assistant_chat_stream(q: str, include_context: bool = True):
+    # Build the same system prompt & context
+    body = ChatRequest(messages=[ChatMessage(role="user", content=q)], include_context=include_context)
+    # Reuse logic from non-stream for context + memory + commands
+    ctx_lines: List[str] = _assistant_context_lines() if include_context else []
+
+    chat_log = _get_json_setting("assistant.chat", []) or []
+    memory_text = str(_get_json_setting("assistant.memory", "") or "")
+    system = (
+        "You are the trading assistant for the Moomoo ChatGPT Trading Bot in this app.\n"
+        "- Be concise and clear (2–6 sentences).\n"
+        "- You operate the live trading autopilot, with full awareness of state and settings.\n"
+        "- The backend already executed any user commands listed in Operator notes.\n"
+        "  Confirm those updates as actions you just performed and describe the new state.\n"
+        "  Never claim you cannot change settings that were just applied.\n"
+        "- Use the context to answer concretely (e.g., show weights, prefs, toggles).\n"
+        "- Do not place orders here; focus on explanations, risk and next steps.\n"
+        "- Prefer concrete steps (levels, stops/takes, what to monitor)."
+    )
+    if memory_text:
+        system += "\nPersistent user memory (instructions/preferences):\n" + memory_text
+    if ctx_lines:
+        system += "\nContext:\n" + "\n".join(ctx_lines)
+
+    # Apply commands immediately
+    actions = _apply_simple_commands(q or "")
+    if actions:
+        system += "\n(Operator notes: " + ", ".join(actions) + ")\n"
+
+    # Persist turn
+    try:
+        now = datetime.utcnow().isoformat()
+        chat_log.append({"ts": now, "role": "user", "content": q})
+        chat_log = chat_log[-200:]
+        _set_json_setting("assistant.chat", chat_log)
+    except Exception:
+        pass
+
+    def _gen():
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        if not api_key:
+            yield "data: assistant unavailable\n\n"
+            yield "data: __END__\n\n"
+            return
+        import requests, json as _json
+        import time as _t
+        started = _t.time()
+        tail = _conversation_tail(16)
+        payload = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}] + tail + [{"role": "user", "content": q}],
+            "temperature": 0.2,
+            "stream": True,
+        }
+        try:
+            with requests.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, stream=True, timeout=float(os.getenv("OPENAI_TIMEOUT", "15"))) as r:
+                r.raise_for_status()
+                full = []
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data = line[len("data: "):]
+                        if data.strip() == "[DONE]":
+                            break
+                        try:
+                            obj = _json.loads(data)
+                            delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if delta:
+                                full.append(delta)
+                                yield f"data: {delta}\n\n"
+                        except Exception:
+                            continue
+                # Summarize to memory after completion
+                mem_changed = False
+                memory_snapshot = ""
+                style_snapshot = ""
+                try:
+                    try:
+                        prev_memory = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        prev_memory = ""
+                    try:
+                        prev_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+                    except Exception:
+                        prev_style = ""
+                    memory_snapshot = prev_memory
+                    style_snapshot = prev_style
+                    joined_user = "\n".join([str(m.get("content")) for m in chat_log[-40:] if m.get("role") == "user"])[:4000]
+                    if joined_user:
+                        summary = _extract_style_directives(joined_user)
+                        if summary:
+                            _set_json_setting("assistant.memory", summary)
+                            try:
+                                memory_snapshot = str(_get_json_setting("assistant.memory", "") or "")
+                            except Exception:
+                                memory_snapshot = summary
+                            if memory_snapshot != prev_memory:
+                                mem_changed = True
+                            merged = _merge_lines(prev_style, summary)
+                            cleaned = _clean_style_summary(merged)
+                            if cleaned != prev_style:
+                                _set_json_setting("autopilot.style_summary", cleaned)
+                                mem_changed = True
+                            style_snapshot = cleaned
+                    try:
+                        memory_snapshot = str(_get_json_setting("assistant.memory", "") or "")
+                    except Exception:
+                        memory_snapshot = memory_snapshot or ""
+                    try:
+                        current_style = str(_get_json_setting("autopilot.style_summary", "") or "")
+                        if not style_snapshot:
+                            style_snapshot = current_style
+                    except Exception:
+                        style_snapshot = style_snapshot or ""
+                    if memory_snapshot != prev_memory or style_snapshot != prev_style:
+                        mem_changed = True
+                    # Persist assistant reply to chat log
+                    try:
+                        text = "".join(full)
+                        now = datetime.utcnow().isoformat()
+                        log = _get_json_setting("assistant.chat", []) or []
+                        log.append({"ts": now, "role": "assistant", "content": text, "saved": bool(mem_changed), "settingsApplied": bool(actions and len(actions)>0)})
+                        log = log[-200:]
+                        _set_json_setting("assistant.chat", log)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                if mem_changed:
+                    try:
+                        payload = {}
+                        if memory_snapshot:
+                            payload["memory"] = memory_snapshot
+                        if style_snapshot:
+                            payload["style_summary"] = style_snapshot
+                        if payload:
+                            yield "data: __MEM_SAVED__|" + _json.dumps(payload) + "\n\n"
+                        else:
+                            yield "data: __MEM_SAVED__\n\n"
+                    except Exception:
+                        pass
+                # Emit actions applied (for client-side label) if there were commands
+                try:
+                    if actions:
+                        yield "data: __ACTIONS__|" + _json.dumps(actions) + "\n\n"
+                except Exception:
+                    pass
+        except Exception:
+            yield "data: (stream error)\n\n"
+            yield "data: __END__\n\n"
+            return
+        yield "data: __END__\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+@app.get("/assistant/memory")
+def assistant_memory_get():
+    memory = _get_json_setting("assistant.memory", "") or ""
+    chat = _get_json_setting("assistant.chat", []) or []
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    try:
+        cleaned = _clean_style_summary(style)
+        if cleaned != style:
+            _set_json_setting("autopilot.style_summary", cleaned)
+            style = cleaned
+    except Exception:
+        pass
+    return {"memory": memory, "style_summary": style, "chat_len": len(chat)}
+
+@app.delete("/assistant/memory")
+def assistant_memory_delete():
+    _set_json_setting("assistant.memory", "")
+    _set_json_setting("assistant.chat", [])
+    return assistant_memory_get()
+
+@app.post("/assistant/preset")
+def assistant_preset(body: dict):
+    preset = str(body.get("preset") or "").lower().strip()
+    presets = {
+        "al_brooks": "- al brooks price action (focus micro-trend, second entries, avoid midday chop)",
+        "trend_follow": "- trend follow (momentum bias; add on pullbacks; avoid counter-trend opens)",
+        "mean_revert": "- mean reversion (fade extremes; smaller size in high IV)",
+        "long_bias": "- long bias (prefer buys)",
+        "short_bias": "- short bias (prefer sells)",
+    }
+    if preset not in presets:
+        raise HTTPException(status_code=400, detail="unknown preset")
+    memory = _get_json_setting("assistant.memory", "") or ""
+    memory2 = _merge_lines(memory, presets[preset])
+    _set_json_setting("assistant.memory", memory2)
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    _set_json_setting("autopilot.style_summary", _merge_lines(style, presets[preset]))
+    return assistant_memory_get()
+
+@app.get("/assistant/chat_log")
+def assistant_chat_log(limit: int = 200):
+    log = _get_json_setting("assistant.chat", []) or []
+    try:
+        if isinstance(log, list):
+            return {"messages": log[-int(limit):]}
+    except Exception:
+        pass
+    return {"messages": []}
+
+# ---- Style summary quick edit endpoints ----
+@app.get("/assistant/style_lines")
+def assistant_style_lines():
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    return {"lines": _style_lines(style)}
+
+@app.post("/assistant/style_lines")
+def assistant_style_add(body: dict):
+    add = body.get("add") or []
+    cur = _get_json_setting("autopilot.style_summary", "") or ""
+    new = _merge_lines(cur, "\n".join([str(x) for x in add if str(x).strip()]))
+    _set_json_setting("autopilot.style_summary", _clean_style_summary(new))
+    return assistant_style_lines()
+
+@app.delete("/assistant/style_lines")
+def assistant_style_delete(body: dict):
+    idxs = body.get("indexes") or []
+    texts = body.get("texts") or []
+    style = _get_json_setting("autopilot.style_summary", "") or ""
+    L = _style_lines(style)
+    rm_idx = {int(i) for i in (idxs or []) if isinstance(i, int) or str(i).isdigit()}
+    rm_text = {str(t).strip().lower() for t in (texts or []) if str(t).strip()}
+    out = []
+    for i, l in enumerate(L):
+        if i in rm_idx: continue
+        if l.strip().lower() in rm_text: continue
+        out.append(l)
+    _set_json_setting("autopilot.style_summary", _clean_style_summary("\n".join(out)))
+    return assistant_style_lines()
+
+@app.put("/assistant/style_summary")
+def assistant_style_summary_put(body: dict):
+    """Directly set the style summary text (with cleaning and dedupe)."""
+    text = str(body.get("text") or "")
+    cleaned = _clean_style_summary(text)
+    _set_json_setting("autopilot.style_summary", cleaned)
+    return {"style_summary": cleaned}
 
 
 # ---------- Globals ----------
@@ -109,16 +957,32 @@ def _risk_save(cfg: dict) -> None:
     RISK_PATH.write_text(json.dumps(cfg, indent=2))
 
 
+# yfinance fetch helper
+def fetch_yf(symbol: str):
+    attempts = [
+        {"period": "5d", "interval": "1m"},
+        {"period": "1mo", "interval": "5m"},
+        {"period": "1mo", "interval": "1d"},
+    ]
+    for kw in attempts:
+        df = yf.download(symbol, progress=False, repair=True, **kw)
+        if not df.empty:
+            return df
+    df = yf.Ticker(symbol).history(period="1mo", interval="1d")
+    if not df.empty:
+        return df
+    raise HTTPException(502, f"yfinance empty for '{symbol}' (check ticker, interval, or network)")
+
+
 # ---------- Request Models ----------
 
 class ConnectRequest(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
-    client_id: Optional[int] = None  # parity only
+    client_id: Optional[int] = None
 
 class SelectAccountRequest(BaseModel):
     account_id: str
-    trd_env: str = "SIMULATE"  # "SIMULATE" or "REAL"
 
 class PlaceOrderRequest(BaseModel):
     symbol: str                 # e.g., "AAPL" or "US.AAPL"
@@ -132,6 +996,12 @@ class CancelOrderRequest(BaseModel):
 
 class SubscribeQuotesRequest(BaseModel):
     symbols: list[str]
+
+class UnlockTradeRequest(BaseModel):
+    passcode: str
+
+class FlattenRequest(BaseModel):
+    symbols: Optional[List[str]] = None  # optional subset; if omitted, flatten all
 
 class StartMACrossoverRequest(BaseModel):
     # core
@@ -211,13 +1081,29 @@ class RiskConfig(BaseModel):
 
 # ---: simple models for bot mode & flatten ---
 class BotModeRequest(BaseModel):
-    mode: str  # 'assist' | 'semi' | 'auto'
+    mode: str  # 'automatic' | 'manual'
 
 class FlattenAllRequest(BaseModel):
     symbols: Optional[list[str]] = None  # if provided, only flatten these symbols
 
 
 # ---------- Helpers ----------
+
+def _two_mode() -> str:
+    """
+    Returns 'automatic' if Autopilot is ON, else 'manual'.
+    Falls back to persisted bot_mode only to disambiguate when manager is unavailable.
+    """
+    try:
+        mgr = _get_autopilot()
+        st = mgr.status()
+        if bool(st.get("on")):
+            return "automatic"
+        return "manual"
+    except Exception:
+        val = get_setting("bot_mode") or "manual"
+        return "automatic" if str(val).lower().strip() == "automatic" else "manual"
+
 
 def _env_from_str(name: str):
     return TrdEnv.SIMULATE if name.upper() == "SIMULATE" else TrdEnv.REAL
@@ -231,16 +1117,32 @@ def get_client() -> Optional[MoomooClient]:
     """Return the singleton broker client."""
     return client
 
+# Wire execution container with client accessor and mode on import
+try:
+    from execution import container as exec_container  # type: ignore
+    exec_container.set_client_accessor(get_client)  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 
 # ---------- App lifecycle (automation) ----------
 
 @app.on_event("startup")
 async def _on_startup():
-    # Start scheduler if automation modules are importable
     global scheduler
+    try:
+        c = reconnect_from_session()
+        if c:
+            set_client(c)
+            try:
+                set_mode("moomoo")
+            except Exception:
+                pass
+    except Exception:
+        pass
     if _AUTOMATION_AVAILABLE:
         init_db()
-        scheduler = TraderScheduler(get_client)  # pass accessor
+        scheduler = TraderScheduler(get_client)
         scheduler.register("ma_crossover", ma_crossover_step)
         scheduler.start()
 
@@ -260,6 +1162,31 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/debug/bars")
+def debug_bars(symbol: str, ktype: str = "K_DAY", n: int = 120):
+    """
+    Fetch recent bars via unified provider to help diagnose planner idling.
+    Returns source ('futu' or 'yfinance'), count, and last 3 rows.
+    """
+    try:
+        c = get_client()
+    except Exception:
+        c = None
+    try:
+        bars, source = get_bars_safely(c, symbol, ktype, n)
+        sample = bars[-3:] if isinstance(bars, list) else []
+        return {
+            "symbol": symbol,
+            "ktype": ktype,
+            "source": source,
+            "count": (len(bars) if isinstance(bars, list) else 0),
+            "last": sample,
+        }
+    except Exception as e:
+        # expose error to help diagnose fetch issues
+        return {"symbol": symbol, "ktype": ktype, "error": str(e)}
+
+
 # --- Connection & accounts ---
 
 @app.post("/connect")
@@ -268,14 +1195,25 @@ def connect(req: ConnectRequest):
     Connect to the OpenD gateway using host/port from request JSON
     or .env (MOOMOO_HOST/MOOMOO_PORT). Keeps a singleton client.
     """
-    host = req.host or os.getenv("MOOMOO_HOST", "127.0.0.1")
-    port = req.port or int(os.getenv("MOOMOO_PORT", "11111"))
-    _ = req.client_id or int(os.getenv("MOOMOO_CLIENT_ID", "1"))  # parity only
+    host = req.host or os.getenv("MOOMOO_HOST") or "127.0.0.1"
+    port_raw = req.port or os.getenv("MOOMOO_PORT") or "11111"
+    client_id = req.client_id or int(os.getenv("MOOMOO_CLIENT_ID", "1"))
+
+    if not (host and host.strip()):
+        raise HTTPException(status_code=400, detail="host empty")
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="port not numeric")
 
     try:
-        c = MoomooClient(host=host, port=port)  # client_id not required by current build
+        c = MoomooClient(host=host, port=port, client_id=client_id)
         c.connect()
         set_client(c)
+        try:
+            set_mode("moomoo")
+        except Exception:
+            pass
         # persist partial session (account may be None here)
         try:
             save_session(
@@ -283,10 +1221,11 @@ def connect(req: ConnectRequest):
                 port,
                 getattr(c, "account_id", None),
                 getattr(c, "env", None).name if getattr(c, "env", None) else None,
+                client_id,
             )
         except Exception:
             pass
-        return {"status": "connected", "host": host, "port": port}
+        return {"status": "connected", "host": host, "port": port, "client_id": client_id}
     except (RuntimeError, TypeError) as e:
         set_client(None)
         raise HTTPException(status_code=400, detail=f"Failed to connect: {e}")
@@ -297,7 +1236,7 @@ def connect(req: ConnectRequest):
 @app.get("/accounts")
 def list_accounts():
     """
-    Return available account IDs. Requires an active connection.
+    Return account IDs with trading env and type. Requires active connection.
     """
     c = get_client()
     if c is None or not c.connected:
@@ -312,25 +1251,33 @@ def list_accounts():
 @app.post("/accounts/select")
 def select_account(req: SelectAccountRequest):
     """
-    Select the active account + env (SIMULATE/REAL).
+    Select the active account. Env inferred from account list.
     """
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
     try:
-        env = _env_from_str(req.trd_env)
+        info = next((a for a in c.list_accounts() if a.get("account_id") == req.account_id), None)
+        if not info:
+            raise RuntimeError("account not found")
+        env = _env_from_str(info.get("trd_env", "SIMULATE"))
         c.set_account(req.account_id, env)
-        # persist full session
         try:
             save_session(
                 c.host,
                 c.port,
                 c.account_id,
                 c.env.name if c.env else None,
+                getattr(c, "client_id", None),
             )
         except Exception:
             pass
-        return {"status": "ok", "account_id": req.account_id, "trd_env": req.trd_env.upper()}
+        return {
+            "status": "ok",
+            "account_id": req.account_id,
+            "trd_env": info.get("trd_env", "SIMULATE"),
+            "account_type": info.get("account_type"),
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -344,10 +1291,76 @@ def accounts_active():
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
+    info = None
+    try:
+        for a in c.list_accounts():
+            if a.get("account_id") == str(c.account_id):
+                info = a
+                break
+    except Exception:
+        pass
     return {
         "account_id": c.account_id,
-        "trd_env": "SIMULATE" if getattr(c, "env", None) == TrdEnv.SIMULATE else "REAL"
+        "trd_env": "SIMULATE" if getattr(c, "env", None) == TrdEnv.SIMULATE else "REAL",
+        "account_type": info.get("account_type") if info else None,
     }
+
+@app.get("/accounts/info")
+def account_info(account_id: str):
+    """Get details for account_id."""
+    c = get_client()
+    if c is None or not c.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return c.get_account_info(account_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get account info: {e}")
+
+@app.get("/accounts/assets")
+def accounts_assets():
+    """
+    Best-effort account assets snapshot to help verify the selected account.
+    Queries broker via accinfo_query when available; falls back to estimating from
+    broker positions if necessary.
+    """
+    # Prefer execution mode; if unavailable, infer from client
+    try:
+        from execution.container import get_mode, get_execution  # type: ignore
+        mode = get_mode()
+    except Exception:
+        get_execution = lambda: None  # type: ignore
+        c_try = None
+        try:
+            c_try = get_client()
+        except Exception:
+            pass
+        mode = "moomoo" if c_try is not None and getattr(c_try, "connected", False) else "sim"
+
+    if mode == "moomoo":
+        c = get_client()
+        if c is None or not getattr(c, "connected", False):
+            raise HTTPException(status_code=400, detail="Not connected")
+        try:
+            info = c.get_account_assets()  # type: ignore[attr-defined]
+            return {"mode": "moomoo", **info}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch broker assets: {e}")
+
+    # Fallback: sum MV across broker-reported positions when asset API not available
+    try:
+        exec_service = get_execution()
+    except Exception:
+        exec_service = None
+    equity = None
+    if exec_service is not None and hasattr(exec_service, "list_positions"):
+        try:
+            poss = exec_service.list_positions() or []
+            equity = sum(float(p.get("mv") or 0.0) for p in poss)
+        except Exception:
+            equity = None
+    return {"mode": "sim", "equity": equity, "bp": None, "cash": None}
 
 @app.get("/debug/accounts_raw")
 def accounts_raw():
@@ -370,6 +1383,22 @@ def accounts_raw():
     except Exception:
         pass
     return df
+
+
+# --- Trade unlock ---
+
+@app.post("/trade/unlock")
+def trade_unlock(req: UnlockTradeRequest):
+    """Unlock trading with passcode."""
+    c = get_client()
+    if c is None or not c.connected:
+        raise HTTPException(status_code=400, detail="Not connected")
+    try:
+        return c.unlock_trade(req.passcode)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unlock: {e}")
 
 
 # --- Positions & orders ---
@@ -457,7 +1486,7 @@ def place_order(req: PlaceOrderRequest):
         )
     except ValueError as e:
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="risk_block", status="blocked", extra={"msg": str(e)}
         )
@@ -472,14 +1501,14 @@ def place_order(req: PlaceOrderRequest):
             price=req.price,
         )
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="manual/place_order", status="ok", extra={"result": result}
         )
         return {"status": "ok", "result": result}
     except Exception as e:
         insert_action_log(
-            "place", mode=(get_setting("bot_mode") or "assist"),
+            "place", mode=_two_mode(),
             symbol=req.symbol, side=side, qty=qty, price=req.price,
             reason="exception", status="error", extra={"msg": str(e)}
         )
@@ -495,16 +1524,16 @@ def cancel_order(req: CancelOrderRequest):
         raise HTTPException(status_code=400, detail="Not connected")
     try:
         res = c.cancel_order(req.order_id)
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           symbol=None, side=None, qty=None, price=None,
                           reason=f"cancel {req.order_id}", status="ok", extra={"result": res})
         return res
     except RuntimeError as e:
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           reason=f"runtime_error {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        insert_action_log("cancel", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("cancel", mode=_two_mode(),
                           reason=f"exception {req.order_id}", status="error", extra={"msg": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to cancel order: {e}")
 
@@ -542,81 +1571,59 @@ def quotes_latest(symbol: str):
         raise HTTPException(status_code=500, detail=f"Failed to get quote: {e}")
 
 
+# ---- Execution mode (SIM | Moomoo) ----
+class ExecMode(BaseModel):
+    mode: str  # 'sim' | 'moomoo'
+
+
+@app.get("/execution/mode")
+def exec_mode_get():
+    try:
+        from execution.container import get_mode  # type: ignore
+        mode = get_mode()
+    except Exception:
+        mode = "sim"
+    return {"mode": mode}
+
+
+@app.put("/execution/mode")
+def exec_mode_put(body: ExecMode):
+    mode = (body.mode or "sim").strip().lower()
+    if mode not in {"sim","moomoo"}:
+        raise HTTPException(status_code=400, detail="mode must be 'sim' or 'moomoo'")
+    try:
+        from execution.container import set_mode  # type: ignore
+        set_mode(mode)
+        insert_action_log("execution_mode", mode=_two_mode(), reason="user_update", status="ok", extra={"mode": mode})
+    except Exception:
+        pass
+    return {"mode": mode}
+
+
 # --- Sync deals + PnL ---
 
 @app.post("/sync/deals")
 def sync_deals(simulate_if_absent: bool = True):
-    """
-    Pull recent fills from broker and store them locally.
-
-    If the broker (paper trading) does not support deal_list_query, fall back to
-    synthesizing fills from orders:
-      - Use dealt_avg_price when available
-      - Otherwise pull a last close via unified market-data fallback and use that
-    This synthetic path is for development/testing only.
-    """
+    """Pull recent fills from broker and store them locally."""
     c = get_client()
     if c is None or not c.connected:
         raise HTTPException(status_code=400, detail="Not connected")
-
-    # 1) Try real fills first
     try:
-        recs = c.get_deals()
-        inserted = 0
-        for r in recs:
-            oid = r.get("order_id") or r.get("orderId") or ""
-            code = r.get("code") or r.get("stock_code") or ""
-            side = str(r.get("trd_side") or r.get("side") or "").upper()
-            qty = float(r.get("deal_qty") or r.get("qty") or r.get("fill_qty") or 0)
-            price = float(r.get("deal_price") or r.get("price") or r.get("fill_price") or 0)
-            ts = str(r.get("create_time") or r.get("time") or r.get("ts") or "")
-            if not code or not side or qty <= 0 or price <= 0 or not ts:
-                continue
-            record_fill(str(oid), str(code), "BUY" if "BUY" in side else "SELL", qty, price, ts)
-            inserted += 1
-        return {"status": "ok", "inserted": inserted, "source": "broker_deals"}
+        recs, source = fetch_deals(c, simulate_if_absent)
     except RuntimeError as e:
-        msg = str(e)
-
-    # 2) Paper trading fallback (orders → fills)
-    try_fallback = simulate_if_absent or "Simulated trade does not support deal list" in msg or "deal_list_query" in msg
-    if not try_fallback:
-        raise HTTPException(status_code=400, detail=msg)
-
-    try:
-        orders = c.get_orders()
-    except Exception as e2:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch orders for fallback: {e2}")
-
+        raise HTTPException(status_code=400, detail=str(e))
+    exec_service = get_execution()
     inserted = 0
-    for o in orders:
-        status = str(o.get("order_status") or "").upper()
-        code = str(o.get("code") or o.get("stock_code") or "")
-        side = str(o.get("trd_side") or "").upper()
-        oid = str(o.get("order_id") or o.get("orderId") or "")
-        qty = float(o.get("qty") or 0)
-
-        if not code or not side or not oid or qty <= 0:
-            continue
-
-        price = float(o.get("dealt_avg_price") or 0)
-        is_filled = status in {"FILLED", "FILLED_ALL", "DEALT", "SUCCESS"}
-        may_synthesize = simulate_if_absent and status in {"SUBMITTED", "SUBMITTING"} and price <= 0
-
-        if price <= 0 and (is_filled or may_synthesize):
-            try:
-                bars, _source = get_bars_safely(c, code, "K_1M", 1)
-                if bars:
-                    price = float(bars[-1].get("close", 0) or 0)
-            except Exception:
-                price = 0.0
-
-        if (is_filled or may_synthesize) and price > 0:
-            ts = str(o.get("updated_time") or o.get("create_time") or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
-            record_fill(oid, code, "BUY" if "BUY" in side else "SELL", qty, price, ts)
+    if exec_service and hasattr(exec_service, "sync_deals"):
+        try:
+            inserted = exec_service.sync_deals(recs)  # type: ignore[attr-defined]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"deal sync failed: {e}")
+    else:
+        for r in recs:
+            record_fill(r["order_id"], r["symbol"], r["side"], r["qty"], r["price"], r["ts"])
             inserted += 1
-
-    return {"status": "ok", "inserted": inserted, "source": "orders_fallback"}
+    return {"status": "ok", "inserted": inserted, "source": source}
 
 @app.get("/pnl/today")
 def pnl_today_endpoint():
@@ -640,36 +1647,42 @@ def pnl_history_endpoint(days: int = 7):
 @app.get("/bot/mode")
 def bot_mode_get():
     """
-    Return current bot autonomy mode (assist|semi|auto). Defaults to 'assist' if unset.
+    Two-mode model: 'automatic' when Autopilot is ON, else 'manual'.
+    Strict two-mode only: 'automatic' or 'manual'.
     """
-    val = get_setting("bot_mode") or "assist"
     try:
-        # Normalize JSON/string to plain string
-        if isinstance(val, str):
-            try:
-                j = json.loads(val)
-                if isinstance(j, str):
-                    val = j
-            except Exception:
-                pass
+        mgr = _get_autopilot()
+        st = mgr.status()
+        if bool(st.get("on")):
+            return {"mode": "automatic"}
     except Exception:
         pass
-    return {"mode": val}
+    return {"mode": "manual"}
 
 @app.put("/bot/mode")
-def bot_mode_put(req: BotModeRequest):
+async def bot_mode_put(req: BotModeRequest):
     """
-    Update bot autonomy mode.
+    Set mode to 'automatic' or 'manual' and sync Autopilot accordingly.
     """
-    mode = (req.mode or "").lower().strip()
-    if mode not in {"assist", "semi", "auto"}:
-        raise HTTPException(status_code=400, detail="mode must be one of: assist|semi|auto")
-    set_setting("bot_mode", mode)
-    insert_action_log("mode_change", mode=mode, reason="user_update", status="ok")
-    return {"mode": mode}
+    mode_in = (req.mode or "").lower().strip()
+    if mode_in not in {"automatic", "manual"}:
+        raise HTTPException(status_code=400, detail="mode must be 'automatic' or 'manual'")
 
+    # Persist the exact value (for transparency), though GET derives mode from Autopilot status.
+    set_setting("bot_mode", mode_in)
+    insert_action_log("mode_change", mode=mode_in, reason="user_update", status="ok")
 
-# --- Action Log API ---
+    try:
+        mgr = _get_autopilot()
+        if mode_in == "automatic":
+            await mgr.start()
+        else:
+            await mgr.stop()
+    except Exception:
+        # If Autopilot manager isn't available yet, GET will report 'manual' until running.
+        pass
+
+    return {"mode": mode_in}
 
 @app.get("/logs/actions")
 def action_logs(limit: int = 100, symbol: Optional[str] = None, since_hours: Optional[int] = None):
@@ -696,7 +1709,7 @@ def positions_flatten(body: FlattenAllRequest = FlattenAllRequest()):
     if not c.account_id:
         raise HTTPException(status_code=400, detail="No account selected")
     if getattr(c, "env", None) == TrdEnv.REAL:
-        insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+        insert_action_log("flatten", mode=_two_mode(),
                           reason="blocked_real_env", status="blocked")
         raise HTTPException(status_code=400, detail="Flatten disabled in REAL environment")
 
@@ -731,12 +1744,12 @@ def positions_flatten(body: FlattenAllRequest = FlattenAllRequest()):
         try:
             res = c.place_order(symbol=code, qty=abs(qty), side=side, order_type="MARKET", price=None)
             attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "ok", "result": res})
-            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+            insert_action_log("flatten", mode=_two_mode(),
                               symbol=code, side=side, qty=abs(qty),
                               reason="flatten_all", status="ok", extra={"result": res})
         except Exception as e:
             attempts.append({"symbol": code, "qty": abs(qty), "side": side, "status": "error", "error": str(e)})
-            insert_action_log("flatten", mode=(get_setting("bot_mode") or "assist"),
+            insert_action_log("flatten", mode=_two_mode(),
                               symbol=code, side=side, qty=abs(qty),
                               reason="exception", status="error", extra={"msg": str(e)})
 
@@ -779,7 +1792,7 @@ def automation_start_ma(req: StartMACrossoverRequest):
     }
     
     sid = insert_strategy("ma_crossover", req.symbol.strip(), params, int(req.interval_sec))
-    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("start_strategy", mode=_two_mode(),
                       symbol=req.symbol.strip(), reason="ma_crossover", status="ok",
                       extra={"strategy_id": sid, "params": params})
     return {"status": "ok", "strategy_id": sid, "name": "ma_crossover", "symbol": req.symbol, "params": params}
@@ -828,7 +1841,7 @@ def automation_update(strategy_id: int, req: UpdateStrategyRequest):
     )
     if not updated:
         raise HTTPException(status_code=404, detail="strategy not found")
-    insert_action_log("update_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("update_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok", extra={"params": p, "interval_sec": req.interval_sec, "active": req.active})
     return updated
 
@@ -853,9 +1866,34 @@ def automation_stop(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, False)
-    insert_action_log("stop_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("stop_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": False}
+
+@app.post("/automation/stop_all")
+def automation_stop_all():
+    """
+    Stop all active strategies (set active=0 in SQLite).
+    Works even if you are not connected to the broker.
+    """
+    if not _AUTOMATION_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Automation modules not available: {_AUTOMATION_IMPORT_ERR}",
+        )
+
+    rows = list_strategies()
+    def _is_active(v):
+        s = str(v).strip().lower()
+        return v is True or s in {"1", "true", "yes"}
+
+    stopped = 0
+    for r in rows or []:
+        if _is_active(r.get("active")):
+            set_strategy_active(int(r["id"]), False)
+            stopped += 1
+
+    return {"status": "ok", "stopped": stopped}
 
 @app.post("/automation/start/{strategy_id}")
 def automation_reactivate(strategy_id: int):
@@ -867,7 +1905,7 @@ def automation_reactivate(strategy_id: int):
     if not get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="strategy not found")
     set_strategy_active(strategy_id, True)
-    insert_action_log("start_strategy", mode=(get_setting("bot_mode") or "assist"),
+    insert_action_log("start_strategy", mode=_two_mode(),
                       reason=f"id={strategy_id}", status="ok")
     return {"status": "ok", "strategy_id": strategy_id, "active": True}
 
@@ -922,12 +1960,20 @@ def risk_status():
 def session_status():
     s = load_session()
     c = get_client()
+    # env as string
+    env_obj = getattr(c, "env", None)
+    env_name = getattr(env_obj, "name", None)
+    if env_name is None:
+        if env_obj == TrdEnv.SIMULATE:
+            env_name = "SIMULATE"
+        elif env_obj == TrdEnv.REAL:
+            env_name = "REAL"
     return {
         "saved": s or {},
         "connected": bool(c and getattr(c, "connected", False)),
         "active_account": {
             "account_id": getattr(c, "account_id", None),
-            "trd_env": getattr(getattr(c, "env", None), "name", None),
+            "trd_env": env_name,
         } if c else None,
     }
 
@@ -935,11 +1981,12 @@ def session_status():
 def session_save_endpoint(body: dict):
     host = body.get("host")
     port = int(body.get("port", 0))
+    client_id = body.get("client_id")
     account_id = body.get("account_id")
     trd_env = body.get("trd_env")
     if not host or not port:
         raise HTTPException(status_code=400, detail="host and port required")
-    return {"ok": True, "saved": save_session(host, port, account_id, trd_env)}
+    return {"ok": True, "saved": save_session(host, port, account_id, trd_env, client_id)}
 
 @app.post("/session/clear")
 def session_clear_endpoint():
@@ -962,6 +2009,10 @@ def disconnect():
     except Exception:
         pass  # ignore errors on shutdown
     set_client(None)
+    try:
+        set_mode("sim")
+    except Exception:
+        pass
     return {"status": "disconnected"}
 
 
@@ -1039,3 +2090,1654 @@ def backtest_ma_grid(req: BacktestMAGridRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest grid failed: {e}")
+
+
+# --- Autopilot (planner/executor) scaffold ---
+try:
+    from autopilot.worker import AutopilotManager
+    from autopilot import schemas as ap_schemas
+    _AUTOPILOT_AVAILABLE = True
+    _AUTOPILOT_IMPORT_ERR = None
+except Exception as _ae:
+    AutopilotManager = None  # type: ignore
+    ap_schemas = None        # type: ignore
+    _AUTOPILOT_AVAILABLE = False
+    _AUTOPILOT_IMPORT_ERR = _ae
+
+autopilot_router = APIRouter(prefix="/autopilot", tags=["autopilot"])
+
+_autopilot_mgr = None  # lazy singleton
+
+def _get_autopilot():
+    global _autopilot_mgr
+    if _autopilot_mgr is None:
+        if not _AUTOPILOT_AVAILABLE:
+            raise HTTPException(status_code=500, detail=f"Autopilot unavailable: {_AUTOPILOT_IMPORT_ERR}")
+        # lazy-create manager; pass client accessor and risk-loader
+        def _risk_loader():
+            try:
+                return _risk_load()
+            except Exception:
+                return {}
+        _autopilot_mgr = AutopilotManager(get_client, _risk_loader, get_execution=get_execution)
+    return _autopilot_mgr
+
+def _resolve_watchlist_symbols(limit: Optional[int] = 4) -> List[str]:
+    """Best-effort universe snapshot for dashboard charts."""
+    candidates: List[str] = []
+
+    # Primary: explicit discovery seed list (user curated)
+    seed = _get_json_setting("autopilot.discovery_seed", None)
+    if isinstance(seed, list):
+        candidates.extend(str(s).strip() for s in seed if str(s).strip())
+
+    # Secondary: legacy/autopilot watchlist storage (manual overrides)
+    raw = _get_json_setting("autopilot.watchlist", None)
+    if isinstance(raw, list):
+        candidates.extend(str(s).strip() for s in raw if str(s).strip())
+    elif isinstance(raw, str):
+        candidates.extend(s.strip() for s in raw.split(",") if s and s.strip())
+
+    # Fallback to live universe the manager is using (may include discovery results)
+    if not candidates:
+        try:
+            mgr = _get_autopilot()
+            last_input = getattr(mgr, "last_input", {}) or {}
+            universe = last_input.get("universe") or last_input.get("watchlist") or last_input.get("symbols") or []
+            if isinstance(universe, list):
+                for item in universe:
+                    if isinstance(item, dict):
+                        sym = str(item.get("sym") or item.get("symbol") or "").strip()
+                    else:
+                        sym = str(item or "").strip()
+                    if sym:
+                        candidates.append(sym)
+        except Exception:
+            candidates = []
+
+    if not candidates:
+        fallback = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA").split(",")
+        candidates.extend(s.strip() for s in fallback if s and s.strip())
+
+    deduped: List[str] = []
+    seen = set()
+    cap = None if (limit is None or int(limit) <= 0) else max(1, int(limit))
+    for sym in candidates:
+        if sym and sym not in seen:
+            deduped.append(sym)
+            seen.add(sym)
+        if cap is not None and len(deduped) >= cap:
+            break
+    return deduped
+
+@autopilot_router.post("/enable")
+async def autopilot_enable(body: dict):
+    """
+    Enable/disable the Autopilot worker loop.
+    Body: {"on": bool}
+    """
+    on = bool(body.get("on", False))
+    mgr = _get_autopilot()
+    if on:
+        await mgr.start()
+        return {"on": True, "status": "started"}
+    else:
+        await mgr.stop()
+        return {"on": False, "status": "stopped"}
+
+@autopilot_router.get("/status")
+async def autopilot_status():
+    try:
+        mgr = _get_autopilot()
+        st = mgr.status()
+    except Exception as e:
+        # Return a minimal status payload instead of 500 to aid debugging
+        st = {"on": False, "last_tick": None, "last_decision": None, "stats": {}, "reject_streak": 0, "error": str(e)}
+    # Enrich with performance stats and model info (best-effort)
+    try:
+        from core.storage import performance_stats, exits_coverage  # type: ignore
+        perf = performance_stats(days=365)
+        coverage = exits_coverage(since_hours=24)
+        stats = dict(st.get("stats") or {})
+        stats.update(perf)
+        stats.update(coverage)
+        # Surface model name for UI badge
+        stats["model"] = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        st["stats"] = stats
+    except Exception:
+        pass
+    # Planner meta for UI (provider + enabled)
+    try:
+        provider = (os.getenv("PLANNER_PROVIDER", "stub") or "stub").strip().lower()
+        has_key = bool((os.getenv("OPENAI_API_KEY", "") or "").strip())
+        effective = ("gpt" if (provider == "stub" and has_key) else provider)
+        st["planner_info"] = {
+            "provider": effective,
+            "enabled": (effective == "gpt" and has_key),
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        }
+    except Exception:
+        pass
+    return st
+
+@autopilot_router.post("/preview")
+async def autopilot_preview():
+    """
+    Run a single Sense→Think (no Act). Returns planner input, raw planner output, and validation details.
+    """
+    mgr = _get_autopilot()
+    return await mgr.preview()
+
+@autopilot_router.get("/context")
+async def autopilot_context():
+    mgr = _get_autopilot()
+    return {"last_input": mgr.last_input or {}}
+
+@autopilot_router.get("/last_output")
+async def autopilot_last_output():
+    mgr = _get_autopilot()
+    return {"last_output": mgr.last_output or {}}
+
+@autopilot_router.get("/last_diff")
+async def autopilot_last_diff():
+    try:
+        mgr = _get_autopilot()
+    except Exception:
+        return {"proposed": [], "kept": [], "executed": []}
+    try:
+        proposed = getattr(mgr, "_last_proposed", []) or []
+    except Exception:
+        proposed = []
+    try:
+        kept = getattr(mgr, "_last_evaluated", []) or []
+    except Exception:
+        kept = []
+    try:
+        executed = getattr(mgr, "_last_executed", []) or []
+    except Exception:
+        executed = []
+    try:
+        note = getattr(mgr, "last_notes", None)
+    except Exception:
+        note = None
+    return {"proposed": proposed[:12], "kept": kept[:12], "executed": executed[:12], "notes": note}
+
+@autopilot_router.get("/watchlist_snapshot")
+def autopilot_watchlist_snapshot(limit: int = 4, interval: str = "K_1M", bars: int = 120, since_hours: int = 36):
+    """Compact market snapshot for dashboard watchlist visuals."""
+    try:
+        limit_int = int(limit)
+    except Exception:
+        limit_int = 4
+    symbols = _resolve_watchlist_symbols(limit=limit_int)
+    client = get_client()
+
+    def _norm_ts(value) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None).isoformat()
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            text = text.replace("/", "-")
+            if "T" not in text and " " in text:
+                text = text.replace(" ", "T")
+            clean = text[:-1] if text.endswith("Z") else text
+            try:
+                dt = datetime.fromisoformat(clean)
+                return dt.isoformat()
+            except Exception:
+                return text
+        except Exception:
+            return None
+
+    def _safe_json(raw) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    capped = int(max(20, min(bars, 360)))
+    series: List[Dict[str, Any]] = []
+    for sym in symbols:
+        entry: Dict[str, Any] = {"symbol": sym, "bars": [], "events": []}
+        closes: List[float] = []
+        source = ""
+        try:
+            raw_bars, source = get_bars_safely(client, sym, interval, capped)
+            normalized = []
+            for row in raw_bars[-capped:]:
+                try:
+                    close = float(row.get("close") or row.get("Close") or row.get("end_price") or 0.0)
+                except Exception:
+                    close = 0.0
+                try:
+                    high = float(row.get("high") or row.get("High") or close)
+                except Exception:
+                    high = close
+                try:
+                    low = float(row.get("low") or row.get("Low") or close)
+                except Exception:
+                    low = close
+                ts = _norm_ts(row.get("time_key") or row.get("time") or row.get("datetime") or row.get("Date") or row.get("ts"))
+                if ts is None:
+                    continue
+                normalized.append({"ts": ts, "close": close, "high": high, "low": low})
+                closes.append(close)
+            entry["bars"] = normalized
+        except Exception as e:
+            entry["error"] = str(e)
+        entry["source"] = source
+
+        fast_period = 8
+        slow_period = 21
+
+        def _sma(period: int) -> List[Optional[float]]:
+            out: List[Optional[float]] = []
+            for idx in range(len(closes)):
+                if idx + 1 < period:
+                    out.append(None)
+                    continue
+                window = closes[idx + 1 - period: idx + 1]
+                out.append(sum(window) / float(period))
+            return out
+
+        if closes:
+            fast = _sma(fast_period)
+            slow = _sma(slow_period)
+            bars_list = entry.get("bars")
+            if isinstance(bars_list, list):
+                for idx, bar in enumerate(bars_list):
+                    bar["sma_fast"] = fast[idx] if idx < len(fast) else None
+                    bar["sma_slow"] = slow[idx] if idx < len(slow) else None
+            try:
+                entry["change_pct"] = ((closes[-1] - closes[0]) / closes[0]) * 100.0 if closes and closes[0] else 0.0
+            except Exception:
+                entry["change_pct"] = None
+
+        try:
+            rows = list_action_logs(limit=400, symbol=sym, since_hours=max(6, since_hours))  # type: ignore[arg-type]
+        except Exception:
+            rows = []
+
+        order_actions: Dict[str, str] = {}
+        for row in rows:
+            if str(row.get("action") or "").lower() != "validator_executed":
+                continue
+            extra = _safe_json(row.get("extra_json"))
+            order_id = str(extra.get("order_id") or "").strip()
+            action_name = None
+            proposal = extra.get("proposal")
+            if isinstance(proposal, dict):
+                action_name = str(proposal.get("action") or "").lower()
+            if order_id and action_name:
+                order_actions[order_id] = action_name
+
+        events: List[Dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("action") or "").lower() != "autopilot_act":
+                continue
+            status = str(row.get("status") or "").lower()
+            if status in ("skipped", "blocked", "planned"):
+                continue
+            ts = _norm_ts(row.get("ts"))
+            if ts is None:
+                continue
+            extra = _safe_json(row.get("extra_json"))
+            order_id = str(extra.get("order_id") or "").strip()
+            action_name = order_actions.get(order_id, "")
+            side = str(row.get("side") or "").upper()
+            entry_type = "entry"
+            if action_name:
+                if action_name in ("close", "trim", "reduce") or "close" in action_name:
+                    entry_type = "exit"
+                elif action_name in ("open", "add"):
+                    entry_type = "entry"
+            elif side == "SELL":
+                entry_type = "exit"
+            price_val = row.get("price")
+            try:
+                price = float(price_val) if price_val is not None else None
+            except Exception:
+                price = None
+            qty_val = row.get("qty")
+            try:
+                qty = float(qty_val) if qty_val is not None else None
+            except Exception:
+                qty = None
+            events.append({
+                "ts": ts,
+                "side": side or None,
+                "status": status,
+                "qty": qty,
+                "price": price,
+                "order_id": order_id or None,
+                "action": action_name or None,
+                "type": entry_type,
+            })
+        events.sort(key=lambda e: str(e.get("ts") or ""))
+        entry["events"] = events
+
+        series.append(entry)
+
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "symbols": series,
+    }
+
+@autopilot_router.get("/env_debug")
+def autopilot_env_debug():
+    """Return minimal planner-related env info (sanitized) for troubleshooting."""
+    provider = (os.getenv("PLANNER_PROVIDER", "stub") or "stub").strip().lower()
+    has_key = bool((os.getenv("OPENAI_API_KEY", "") or "").strip())
+    model = os.getenv("OPENAI_MODEL", None)
+    effective = ("gpt" if (provider == "stub" and has_key) else provider)
+    return {
+        "provider_env": provider,
+        "has_openai_key": has_key,
+        "effective_provider": effective,
+        "model": model,
+        "json_mode": os.getenv("OPENAI_JSON_MODE", None),
+        "fallback_stub": os.getenv("PLANNER_FALLBACK_STUB", None),
+    }
+
+
+@autopilot_router.get("/logs")
+async def autopilot_logs(limit: int = 100, offset: int = 0, since_hours: int = 72):
+    """
+    Return Autopilot logs from persistent storage when available, with an in-memory fallback.
+    We prefer rows written via core.storage.insert_action_log() by the worker, filtered to
+    sources that start with 'autopilot' or mode == 'auto'.
+    """
+    # Try DB-backed logs first (core.storage.list_action_logs)
+    try:
+        rows = list_action_logs(limit=limit * 5, symbol=None, since_hours=since_hours)  # type: ignore[name-defined]
+        def _is_auto(r: dict) -> bool:
+            src = str(r.get("source", "")).lower()
+            md = str(r.get("mode", "")).lower()
+            return src.startswith("autopilot") or md in ("auto", "autopilot")
+        out = [r for r in rows if isinstance(r, dict) and _is_auto(r)]
+        out.sort(key=lambda x: str(x.get("ts", "")), reverse=True)
+        return out[offset: offset + limit]
+    except Exception:
+        # fall back to manager in-memory logs
+        mgr = _get_autopilot()
+        return mgr.get_logs(limit=limit, offset=offset)
+
+# stop Autopilot cleanly on shutdown (in addition to scheduler)
+@app.on_event("shutdown")
+async def _autopilot_shutdown():
+    try:
+        mgr = _get_autopilot()
+        await mgr.stop()
+    except Exception:
+        pass
+
+# ---------------- Autopilot: Preferences, Style, Watchlist ---------------- #
+
+class AutopilotPrefs(BaseModel):
+    target_winrate_pct: Optional[float] = None
+    target_rr: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    measured_move_atr_mult: Optional[float] = None
+    max_dd_pct: Optional[float] = None
+    per_trade_max_bps: Optional[int] = None
+
+
+class StyleUpdate(BaseModel):
+    text: str
+
+
+def _get_json_setting(key: str, default):
+    try:
+        raw = get_setting(key)  # type: ignore[name-defined]
+        if raw is None:
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    except Exception:
+        return default
+
+
+def _set_json_setting(key: str, value) -> None:
+    try:
+        set_setting(key, value)  # type: ignore[name-defined]
+    except Exception:
+        pass
+
+
+def _openai_chat(system: str, user: str) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests  # lazy import
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+        }
+        try:
+            if os.getenv("OPENAI_JSON_MODE", "0") not in ("0", "false", "no"):
+                payload["response_format"] = {"type": "json_object"}
+        except Exception:
+            pass
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+def _openai_chat_text(system: str, user: str) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests  # lazy import
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.2,
+        }
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+def _openai_chat_msgs(messages: list[dict]) -> Optional[str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    if not api_key:
+        return None
+    try:
+        import requests
+        payload = {"model": model, "messages": messages, "temperature": 0.2}
+        r = requests.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "15")),
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return None
+
+
+def _summarize_style(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    system = (
+        "You are a trading-style summarizer. Write a concise, actionable style note "
+        "(<= 6 bullet lines or 400 chars) for a trading assistant. "
+        "Prefer rules and thresholds (e.g., win rate target, RR, stop %, time windows)."
+    )
+    user = f"User preferences/notes to summarize:\n{text}"
+    out = _openai_chat_text(system, user)
+    if out and isinstance(out, str):
+        return out.strip()[:600]
+    # Fallback summary when model call fails
+    try:
+        import re
+        sents = [s.strip() for s in re.split(r"[\n.;]+", text) if s.strip()]
+        bullets = [f"- {s[:100].strip()}" for s in sents[:6]]
+        if bullets:
+            return "\n".join(bullets)[:600]
+    except Exception:
+        pass
+    return text[:600]
+
+def _extract_style_directives(text: str) -> str:
+    """Extract only actionable trading directives from user text and recent turns.
+    Ignore questions, small talk, or unrelated chatter. Return <= 12 bullet lines.
+    Examples to extract: side bias, horizon, reduce-only/no-new-opens, stop/take %, measured move ATR, risk appetite,
+    time windows (e.g., avoid lunch), specific approaches (e.g., Al Brooks price action), min confidence.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    system = (
+        "Extract ONLY actionable trading directives from the user's notes.\n"
+        "- Ignore chit-chat, questions, or unrelated conversation.\n"
+        "- Use short bullet lines (<= 12).\n"
+        "- Include items like: side bias (long/short), reduce-only/no new entries, trading horizon in minutes, target RR/win rate, stop/take %, measured_move_atr_mult, avoid windows (midday), and approaches (Al Brooks price action)."
+    )
+    user = f"User conversation notes to extract directives from:\n{text}"
+    out = _openai_chat_text(system, user)
+    if out and isinstance(out, str):
+        # Filter questions and settings toggles
+        try:
+            lines = [l.strip() for l in out.strip().split("\n") if l.strip()]
+            drop_cmd = re.compile(r"\b(turn|enable|disable)\b", re.I)
+            drop_kw = re.compile(r"\b(news|signals|discovery|auto\s*weight|strict\s*prefs)\b", re.I)
+            drop = re.compile(r"\?$|\b(what|what's|whats|how|why|should|could|would|tell|show|list|determine|find|review|pull|increase|decrease|up\b|down\b)\b", re.I)
+            keep = []
+            for l in lines:
+                low = l.lower()
+                if drop.search(low):
+                    continue
+                if drop_cmd.search(low) and drop_kw.search(low):
+                    continue
+                keep.append(l)
+            return "\n".join(keep)[:800]
+        except Exception:
+            return out.strip()[:800]
+    # Fallback: heuristics filter by directive keywords
+    try:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        keep = []
+        kws = [
+            r"short bias|prefer sells|long bias|prefer buys|reduce only|no new entries|pause opens",
+            r"horizon|minutes|min\b|hrs|hours",
+            r"stop|take profit|tp|rr\b|risk[- ]?reward|win rate|measured move|atr",
+            r"avoid|do not trade|midday|lunch|market hours|pre[- ]?market|after[- ]?hours",
+            r"al brooks|price action|trend follow|mean reversion|momentum",
+        ]
+        pat = re.compile("(" + ")|(".join(kws) + ")", re.I)
+        qdrop = re.compile(r"\?|\b(what|what's|whats|how|why|should|could|would|tell|show|list|determine|find|review|pull|increase|decrease|up\b|down\b|turn|enable|disable)\b", re.I)
+        setkw = re.compile(r"\b(news|signals|discovery|auto\s*weight|strict\s*prefs)\b", re.I)
+        for l in lines:
+            low = l.lower()
+            if qdrop.search(low):
+                continue
+            if ("turn" in low or "enable" in low or "disable" in low) and setkw.search(low):
+                continue
+            if pat.search(low):
+                keep.append(l)
+            if len(keep) >= 12: break
+        return "\n".join([("- " + l) for l in keep])[:800]
+    except Exception:
+        return text[:400]
+
+def _merge_lines(a: str, b: str, limit: int = 1200) -> str:
+    try:
+        import re as _re
+        def _norm(l: str) -> str:
+            l2 = _re.sub(r"\s+", " ", l.strip().lower())
+            l2 = _re.sub(r"[\.:;,]+$", "", l2)
+            return l2
+        def _lines(s: str):
+            return [l for l in str(s or "").split("\n") if l and l.strip()]
+        A = _lines(a); B = _lines(b)
+        seen = set(); outl = []
+        for l in A + B:
+            key = _norm(l)
+            if key and key not in seen:
+                outl.append(l.strip()); seen.add(key)
+        return "\n".join(outl)[:limit]
+    except Exception:
+        return (str(a or "") + ("\n" if a else "") + str(b or ""))[:limit]
+
+def _conversation_tail(max_msgs: int = 16) -> list[dict]:
+    try:
+        log = _get_json_setting("assistant.chat", []) or []
+        if not isinstance(log, list):
+            return []
+        tail = log[-max_msgs:]
+        out = []
+        for m in tail:
+            role = str(m.get("role") or "user")
+            content = str(m.get("content") or "")
+            if content:
+                out.append({"role": role, "content": content})
+        return out
+    except Exception:
+        return []
+
+def _style_lines(text: str) -> list[str]:
+    return [l.strip() for l in str(text or "").split("\n") if l and l.strip()]
+
+def _clean_style_summary(summary: str) -> str:
+    try:
+        prefs = _get_json_setting("autopilot.prefs", {}) or {}
+    except Exception:
+        prefs = {}
+    lines = _style_lines(summary)
+    out: list[str] = []
+    seen: set[str] = set()
+    stop = None; take = None; mm = None; horizon = None; bias = None; avoid_midday = False
+    for l in lines:
+        s = l.strip(); low = s.lower()
+        if not s or len(s) <= 2:
+            continue
+        if any(x in low for x in ["no actionable", "determine ", "review ", "pull ", "increase ", "decrease ", " up ", " in "]):
+            continue
+        m = re.search(r"stop[^\d]*(\d+(?:\.\d+)?)\s*%", low)
+        if m: stop = float(m.group(1)); continue
+        m = re.search(r"take[^\d]*(\d+(?:\.\d+)?)\s*%", low)
+        if m: take = float(m.group(1)); continue
+        m = re.search(r"(horizon|mins|minutes|min)\D*(\d+(?:\.\d+)?)", low)
+        if m: horizon = float(m.group(2)); continue
+        m = re.search(r"(atr|measured.*move)\D*(\d+(?:\.\d+)?)", low)
+        if m: mm = float(m.group(2)); continue
+        if "short bias" in low or "prefer sells" in low: bias = "short"; continue
+        if "long bias" in low or "prefer buys" in low: bias = "long"; continue
+        if "midday" in low or ("avoid" in low and "lunch" in low): avoid_midday = True; continue
+        # strategy/approach lines
+        if any(k in low for k in ["al brooks", "price action", "trend follow", "mean reversion", "momentum"]):
+            key = re.sub(r"\s+", " ", low)
+            if key not in seen:
+                seen.add(key); out.append(s)
+    # prefer prefs for canonical numeric values
+    try:
+        if float(prefs.get("stop_loss_pct") or 0) > 0: stop = float(prefs.get("stop_loss_pct"))
+        if float(prefs.get("take_profit_pct") or 0) > 0: take = float(prefs.get("take_profit_pct"))
+        if float(prefs.get("measured_move_atr_mult") or 0) > 0: mm = float(prefs.get("measured_move_atr_mult"))
+    except Exception:
+        pass
+    if bias == "short": out.insert(0, "Short bias (prefer sells)")
+    if bias == "long": out.insert(0, "Long bias (prefer buys)")
+    if stop is not None: out.append(f"Stop loss: {stop:g}%")
+    if take is not None: out.append(f"Take profit: {take:g}%")
+    if mm is not None: out.append(f"Measured move ATR: {mm:g}x")
+    if horizon is not None: out.append(f"Horizon: {int(horizon)} min")
+    if avoid_midday: out.append("Avoid trading midday")
+    # final dedupe
+    final = []
+    seen2: set[str] = set()
+    for s in out:
+        key = re.sub(r"\s+", " ", s.strip().lower())
+        if key not in seen2:
+            seen2.add(key); final.append(s)
+    return "\n".join(final[:24])
+
+def _apply_simple_commands(text: str) -> list[str]:
+    """Parse very simple natural commands and apply settings; return confirmations."""
+    confirms: list[str] = []
+    if not text:
+        return confirms
+    import re
+    # normalize quotes/punctuation and whitespace to make matching robust
+    t = str(text).lower()
+    t = re.sub(r"[\u2018\u2019\u201C\u201D'\"]+", "", t)  # remove smart quotes and quotes
+    t = re.sub(r"\s+", " ", t).strip()
+    # Reduce-only / pause opens
+    try:
+        if any(p in t for p in ["reduce only", "close only", "flatten only", "pause new opens", "no new entries", "block opens"]):
+            cur = _get_json_setting("autopilot.style_summary", "") or ""
+            nxt = _merge_lines(cur, "- reduce only\n- no new entries")
+            _set_json_setting("autopilot.style_summary", nxt)
+            confirms.append("reduce_only + no_new_entries on")
+        if any(p in t for p in ["resume opens", "allow new opens", "open entries ok"]):
+            cur = str(_get_json_setting("autopilot.style_summary", "") or "")
+            cur = cur.replace("- reduce only", "").replace("- no new entries", "")
+            _set_json_setting("autopilot.style_summary", cur)
+            confirms.append("allow_new_entries on")
+    except Exception:
+        pass
+    # Min confidence
+    m = re.search(r"min(?:imum)?\s*conf(?:idence)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t, re.I)
+    if m:
+        try:
+            val = float(m.group(1))
+            _set_json_setting("autopilot.min_confidence", val)
+            confirms.append(f"min_confidence set to {val}")
+        except Exception:
+            pass
+    # Numeric trading prefs
+    try:
+        prefs = _get_json_setting("autopilot.prefs", {}) or {}
+        changed = False
+        m = re.search(r"stop(?:\s*loss)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["stop_loss_pct"] = float(m.group(1)); changed = True; confirms.append(f"stop_loss_pct {prefs['stop_loss_pct']}%")
+        m = re.search(r"take\s*profit\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["take_profit_pct"] = float(m.group(1)); changed = True; confirms.append(f"take_profit_pct {prefs['take_profit_pct']}%")
+        m = re.search(r"measured\s*move\s*(?:atr)?\s*(?:x|mult|multiple)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            prefs["measured_move_atr_mult"] = float(m.group(1)); changed = True; confirms.append(f"measured_move_atr_mult {prefs['measured_move_atr_mult']}x")
+        m = re.search(r"win\s*rate\s*(?:target)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["target_winrate_pct"] = float(m.group(1)); changed = True; confirms.append(f"target_winrate_pct {prefs['target_winrate_pct']}%")
+        m = re.search(r"(rr|risk[- ]?reward)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            prefs["target_rr"] = float(m.group(2)); changed = True; confirms.append(f"target_rr {prefs['target_rr']}")
+        m = re.search(r"max\s*(?:drawdown|dd)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*%", t)
+        if m:
+            prefs["max_dd_pct"] = float(m.group(1)); changed = True; confirms.append(f"max_dd_pct {prefs['max_dd_pct']}%")
+        if changed:
+            _set_json_setting("autopilot.prefs", prefs)
+    except Exception:
+        pass
+    # Bias
+    if any(p in t for p in ["prefer sells", "short bias", "sell bias", "do more sells"]):
+        cur = _get_json_setting("autopilot.style_summary", "") or ""
+        nxt = _merge_lines(cur, "- short bias (prefer sells)")
+        _set_json_setting("autopilot.style_summary", nxt)
+        confirms.append("short_bias applied")
+    if any(p in t for p in ["prefer buys", "long bias", "buy bias", "do more buys"]):
+        cur = _get_json_setting("autopilot.style_summary", "") or ""
+        nxt = _merge_lines(cur, "- long bias (prefer buys)")
+        _set_json_setting("autopilot.style_summary", nxt)
+        confirms.append("long_bias applied")
+    # Feature toggles
+    try:
+        # News on/off (including "news momentum")
+        if re.search(r"\b(news\s+momentum|news)\s+off\b|\bturn\s+(news\s+momentum|news)\s+off\b|\bdisable\s+(news\s+momentum|news)\b", t, re.I):
+            _set_json_setting("autopilot.use_news", False); confirms.append("news disabled")
+        if re.search(r"\b(news\s+momentum|news)\s+on\b|\bturn\s+(news\s+momentum|news)\s+on\b|\benable\s+(news\s+momentum|news)\b", t, re.I):
+            _set_json_setting("autopilot.use_news", True); confirms.append("news enabled")
+        # Signals on/off
+        if re.search(r"\bsignals\s+off\b|\bdisable\s+signals\b", t, re.I):
+            _set_json_setting("autopilot.signals.enabled", False); confirms.append("signals disabled")
+        if re.search(r"\bsignals\s+on\b|\benable\s+signals\b", t, re.I):
+            _set_json_setting("autopilot.signals.enabled", True); confirms.append("signals enabled")
+        # Strict prefs
+        if re.search(r"\bstrict\s*(prefs)?\s*on\b|\benable\s*strict\s*(prefs)?\b", t, re.I):
+            _set_json_setting("autopilot.strict_prefs", True); confirms.append("strict_prefs on")
+        if re.search(r"\bstrict\s*(prefs)?\s*off\b|\bdisable\s*strict\s*(prefs)?\b", t, re.I):
+            _set_json_setting("autopilot.strict_prefs", False); confirms.append("strict_prefs off")
+        # Auto-weight
+        if re.search(r"\bauto\s*weight\s*on\b|\benable\s*auto\s*weight\b", t, re.I):
+            _set_json_setting("autopilot.signals.auto_weight", True); confirms.append("auto_weight on")
+        if re.search(r"\bauto\s*weight\s*off\b|\bdisable\s*auto\s*weight\b", t, re.I):
+            _set_json_setting("autopilot.signals.auto_weight", False); confirms.append("auto_weight off")
+        # Discovery
+        if re.search(r"\bdiscovery\s*only\s*on\b|\benable\s*discovery\s*only\b", t, re.I):
+            _set_json_setting("autopilot.discovery_only", True); confirms.append("discovery_only on")
+        if re.search(r"\bdiscovery\s*only\s*off\b|\bdisable\s*discovery\s*only\b", t, re.I):
+            _set_json_setting("autopilot.discovery_only", False); confirms.append("discovery_only off")
+        if re.search(r"\bdiscovery\s*on\b|\benable\s*discovery\b", t, re.I):
+            _set_json_setting("autopilot.discovery_enabled", True); confirms.append("discovery on")
+        if re.search(r"\bdiscovery\s*off\b|\bdisable\s*discovery\b", t, re.I):
+            _set_json_setting("autopilot.discovery_enabled", False); confirms.append("discovery off")
+        # Top-N
+        m = re.search(r"top\s*n\s*(?:to|=)?\s*(\d+)", t, re.I)
+        if m:
+            _set_json_setting("autopilot.top_n", int(m.group(1))); confirms.append(f"top_n {int(m.group(1))}")
+    except Exception:
+        pass
+    # Risk guardrails
+    try:
+        risk_cfg = _risk_load() or {}
+        if not isinstance(risk_cfg, dict):
+            risk_cfg = {}
+        changed = False
+        if re.search(r"\b(enable|turn on)\s*(risk|guardrails|safety)\b", t):
+            risk_cfg["enabled"] = True; changed = True; confirms.append("risk enabled")
+        if re.search(r"\b(disable|turn off)\s*(risk|guardrails|safety)\b", t):
+            risk_cfg["enabled"] = False; changed = True; confirms.append("risk disabled")
+        m = re.search(r"max\s*(?:usd|dollar)s?\s*(?:per\s*trade|trade)\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            risk_cfg["max_usd_per_trade"] = float(m.group(1)); changed = True; confirms.append(f"max_usd_per_trade {float(m.group(1))}")
+        m = re.search(r"max\s*(?:open\s*)?positions?\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            risk_cfg["max_open_positions"] = int(m.group(1)); changed = True; confirms.append(f"max_open_positions {int(m.group(1))}")
+        m = re.search(r"max\s*(?:daily\s*)?loss\s*(?:to|=)?\s*(\d+(?:\.\d+)?)\s*(?:usd|dollars|\$)?(?!\s*%)", t)
+        if m:
+            risk_cfg["max_daily_loss_usd"] = float(m.group(1)); changed = True; confirms.append(f"max_daily_loss_usd {float(m.group(1))}")
+        m = re.search(r"flatten\s*(?:before)?\s*(?:close)?\s*(?:to|=)?\s*(\d+)\s*(?:min|minute)s?", t)
+        if m:
+            risk_cfg["flatten_before_close_min"] = int(m.group(1)); changed = True; confirms.append(f"flatten_before_close_min {int(m.group(1))}")
+        def _norm_time(raw: str) -> str:
+            raw = raw.strip()
+            digits = re.sub(r"[^0-9]", "", raw)
+            if ":" in raw:
+                hh, mm = raw.split(":", 1)
+                return f"{int(hh):02d}:{mm[:2]}"
+            if len(digits) == 3:
+                return f"{digits[0]}:{digits[1:]}"
+            if len(digits) >= 4:
+                return f"{digits[:2]}:{digits[2:4]}"
+            return raw
+        m = re.search(r"trading\s*(?:hours?|session)?\s*(?:start|open)\s*(?:at|=)?\s*(\d{1,2}:?\d{2})", t)
+        if m:
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if not isinstance(hours, dict):
+                hours = {}
+            hours["start"] = _norm_time(m.group(1))
+            risk_cfg["trading_hours_pt"] = hours; changed = True; confirms.append(f"trading_start {hours['start']}")
+        m = re.search(r"trading\s*(?:hours?|session)?\s*(?:end|close)\s*(?:at|=)?\s*(\d{1,2}:?\d{2})", t)
+        if m:
+            hours = risk_cfg.get("trading_hours_pt") or {}
+            if not isinstance(hours, dict):
+                hours = {}
+            hours["end"] = _norm_time(m.group(1))
+            risk_cfg["trading_hours_pt"] = hours; changed = True; confirms.append(f"trading_end {hours['end']}")
+        if changed:
+            _risk_save(risk_cfg)
+    except Exception:
+        pass
+    # Data + news configuration tweaks
+    try:
+        data_changed = False
+        m = re.search(r"ktype\s*(?:to|=)?\s*(k[_\s]?[0-9a-z]+)", t)
+        if m:
+            kt = m.group(1).replace(" ", "_").upper()
+            if not kt.startswith("K_") and kt.startswith("K"):
+                kt = "K_" + kt.split("_", 1)[-1]
+            _set_json_setting("autopilot.ktype", kt)
+            data_changed = True
+            confirms.append(f"ktype {kt}")
+        m = re.search(r"bars?\s*ttl\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            _set_json_setting("autopilot.bars_ttl_sec", int(m.group(1)))
+            data_changed = True
+            confirms.append(f"bars_ttl_sec {int(m.group(1))}")
+        m = re.search(r"(deals|fills)\s*(?:sync)?\s*(?:every|to|=)?\s*(\d+)\s*(?:sec|seconds|s)", t)
+        if m:
+            _set_json_setting("autopilot.deals_sync_sec", int(m.group(2)))
+            data_changed = True
+            confirms.append(f"deals_sync_sec {int(m.group(2))}")
+        m = re.search(r"data\s*(?:source)?\s*(?:to|=)?\s*(futu|moomoo|yahoo|yfinance)", t)
+        if m:
+            src = m.group(1).strip().lower()
+            src = "futu" if src in ("futu", "moomoo") else "yfinance"
+            _set_json_setting("autopilot.data_source", src)
+            data_changed = True
+            confirms.append(f"data_source {src}")
+        m = re.search(r"news\s*ttl\s*(?:to|=)?\s*(\d+)", t)
+        if m:
+            _set_json_setting("autopilot.news_ttl_sec", int(m.group(1)))
+            confirms.append(f"news_ttl_sec {int(m.group(1))}")
+        m = re.search(r"news\s*provider\s*(?:to|=)?\s*(gpt|heuristic)", t)
+        if m:
+            provider = m.group(1).strip().lower()
+            _set_json_setting("autopilot.news_provider", provider)
+            confirms.append(f"news_provider {provider}")
+    except Exception:
+        pass
+    # Signal weights adjustments
+    try:
+        weights_raw = _get_json_setting("autopilot.signals.weights", {}) or {}
+        if not isinstance(weights_raw, dict):
+            weights_raw = {}
+        changed = False
+        mapping = {
+            "macd cross": "macd_cross",
+            "macd": "macd_cross",
+            "bollinger breakout": "bb_breakout",
+            "bollinger": "bb_breakout",
+            "stoch rsi": "stoch_rsi_extreme",
+            "stochastic rsi": "stoch_rsi_extreme",
+            "stoch": "stoch_rsi_extreme",
+            "ma trend": "ma_trend",
+            "moving average": "ma_trend",
+            "rsi extreme": "rsi_extreme",
+            "rsi": "rsi_extreme",
+            "news": "news",
+        }
+        for m in re.finditer(r"(macd cross|macd|bollinger breakout|bollinger|stoch rsi|stochastic rsi|stoch|ma trend|moving average|rsi extreme|rsi|news)\s*(?:signal\s*)?(?:weight|wt)?\s*(?:to|=)?\s*(\d+(?:\.\d+)?)", t):
+            key = mapping.get(m.group(1).strip())
+            if not key:
+                continue
+            try:
+                val = float(m.group(2))
+            except Exception:
+                continue
+            weights_raw[key] = val
+            changed = True
+            confirms.append(f"signal_weight {key}={val}")
+        if changed:
+            _set_json_setting("autopilot.signals.weights", weights_raw)
+    except Exception:
+        pass
+    # Discovery watchlist adjustments
+    try:
+        wl_raw = _get_json_setting("autopilot.discovery_seed", None)
+        wl = list(wl_raw) if isinstance(wl_raw, list) else []
+        changed = False
+        for m in re.finditer(r"add\s+([A-Za-z0-9\.]{1,10})\s+(?:to\s+)?watchlist", t):
+            sym = _normalize_symbol(m.group(1))
+            if sym and sym not in wl:
+                wl.append(sym)
+                changed = True
+                confirms.append(f"watchlist add {sym}")
+        for m in re.finditer(r"remove\s+([A-Za-z0-9\.]{1,10})\s+(?:from\s+)?watchlist", t):
+            sym = _normalize_symbol(m.group(1))
+            if sym and sym in wl:
+                wl = [s for s in wl if s != sym]
+                changed = True
+                confirms.append(f"watchlist remove {sym}")
+        if "clear watchlist" in t or "empty watchlist" in t:
+            if wl:
+                wl = []
+                changed = True
+                confirms.append("watchlist cleared")
+        if changed:
+            _set_json_setting("autopilot.discovery_seed", wl)
+    except Exception:
+        pass
+    return confirms
+
+def _extract_symbols(text: str) -> list[str]:
+    try:
+        import re
+    except Exception:
+        return []
+    if not text:
+        return []
+    txt = str(text).upper()
+    out: list[str] = []
+    # Explicit US.TICKER tokens
+    out += re.findall(r"\bUS\.[A-Z0-9]{1,6}\b", txt)
+    # Bare tickers (2–5 letters) excluding common words
+    COMMON = {"THE","AND","FOR","WITH","THIS","THAT","ONLY","WHEN","STOP","TAKE","LOSS","SELL","BUY","LONG","SHORT","NEWS","RSI","ATR","MA","UP","DOWN","HOLD","OPEN","CLOSE","DAY","WEEK","MONTH","YEARS"}
+    for token in re.findall(r"\b[A-Z]{2,5}\b", txt):
+        if token in COMMON:
+            continue
+        out.append(f"US.{token}")
+    # Dedup preserve order, cap length
+    seen = set()
+    uniq: list[str] = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq[:50]
+
+
+@autopilot_router.get("/prefs")
+def autopilot_prefs_get():
+    return _get_json_setting("autopilot.prefs", {})
+
+
+@autopilot_router.put("/prefs")
+def autopilot_prefs_put(prefs: AutopilotPrefs):
+    cur = _get_json_setting("autopilot.prefs", {})
+    upd = cur if isinstance(cur, dict) else {}
+    for k, v in prefs.dict().items():
+        if v is not None:
+            upd[k] = v
+    _set_json_setting("autopilot.prefs", upd)
+    insert_action_log("prefs_update", mode=_two_mode(), reason="user_update", status="ok", extra=upd)  # type: ignore[name-defined]
+    return upd
+
+
+@autopilot_router.get("/style")
+def autopilot_style_get():
+    return {
+        "raw": _get_json_setting("autopilot.style_raw", "") or "",
+        "summary": _get_json_setting("autopilot.style_summary", "") or "",
+    }
+
+
+@autopilot_router.post("/style")
+def autopilot_style_post(body: StyleUpdate):
+    raw = (body.text or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="text is required")
+    summary = _summarize_style(raw)
+    _set_json_setting("autopilot.style_raw", raw)
+    _set_json_setting("autopilot.style_summary", summary)
+    # Extract and store candidate symbols
+    syms = list(dict.fromkeys(_extract_symbols(raw) + _extract_symbols(summary)))
+    if syms:
+        _set_json_setting("autopilot.style_symbols", syms)
+    insert_action_log("style_update", mode=_two_mode(), reason="user_update", status="ok", extra={"len": len(raw), "symbols": len(syms)})  # type: ignore[name-defined]
+    return {"raw": raw, "summary": summary, "symbols": syms}
+
+
+@autopilot_router.delete("/style")
+def autopilot_style_delete():
+    """
+    Clear stored natural-language style and its summary (and any derived symbols).
+    Safe no-op if nothing is stored.
+    """
+    try:
+        _set_json_setting("autopilot.style_raw", "")
+        _set_json_setting("autopilot.style_summary", "")
+        # Also clear derived symbols and toggle (best-effort)
+        _set_json_setting("autopilot.style_symbols", [])
+        _set_json_setting("autopilot.style_symbols_enabled", False)
+        insert_action_log("style_update", mode=_two_mode(), reason="delete", status="ok", extra={})  # type: ignore[name-defined]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete style: {e}")
+    return {"raw": "", "summary": "", "symbols": []}
+
+
+class StyleSymbolsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    symbols: Optional[List[str]] = None
+
+
+@autopilot_router.get("/style_symbols")
+def autopilot_style_symbols_get():
+    enabled = bool(_get_json_setting("autopilot.style_symbols_enabled", False))
+    syms = _get_json_setting("autopilot.style_symbols", [])
+    if not isinstance(syms, list):
+        syms = []
+    return {"enabled": enabled, "symbols": syms}
+
+
+@autopilot_router.put("/style_symbols")
+def autopilot_style_symbols_put(body: StyleSymbolsUpdate):
+    if isinstance(body.symbols, list):
+        def _norm(x: str) -> str:
+            x = (x or "").strip().upper()
+            return x if "." in x else (f"US.{x}" if x else x)
+        symbols = list({ _norm(s) for s in body.symbols if isinstance(s, str) and s.strip() })
+        _set_json_setting("autopilot.style_symbols", symbols)
+        insert_action_log("style_symbols", mode=_two_mode(), reason="update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+    if body.enabled is not None:
+        _set_json_setting("autopilot.style_symbols_enabled", bool(body.enabled))
+        insert_action_log("style_symbols", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    return autopilot_style_symbols_get()
+
+
+class WatchlistUpdate(BaseModel):
+    symbols: List[str]
+
+
+def _normalize_symbol(s: str) -> str:
+    s = (s or "").strip().upper()
+    if not s:
+        return s
+    return s if "." in s else f"US.{s}"
+
+
+@autopilot_router.get("/watchlist")
+def autopilot_watchlist_get():
+    wl = _get_json_setting("autopilot.watchlist", None)
+    if isinstance(wl, list) and wl:
+        return {"symbols": wl}
+    env = os.getenv("AUTOPILOT_WATCHLIST", "US.AAPL,US.MSFT,US.TSLA")
+    syms = [_normalize_symbol(x) for x in env.split(",") if x.strip()]
+    return {"symbols": syms}
+
+
+@autopilot_router.put("/watchlist")
+def autopilot_watchlist_put(body: WatchlistUpdate):
+    symbols = list({_normalize_symbol(x) for x in (body.symbols or []) if str(x).strip()})
+    _set_json_setting("autopilot.watchlist", symbols)
+    insert_action_log("watchlist_update", mode=_two_mode(), reason="user_update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+    return {"symbols": symbols}
+
+
+# ---- Discovery config and preview ----
+class DiscoveryUpdate(BaseModel):
+    enabled: bool | None = None
+    only: bool | None = None
+    seed: List[str] | None = None
+
+
+@autopilot_router.get("/discovery")
+def autopilot_discovery_get():
+    enabled = True
+    try:
+        raw = _get_json_setting("autopilot.discovery_enabled", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    only = False
+    try:
+        raw = _get_json_setting("autopilot.discovery_only", None)
+        if raw is not None:
+            only = bool(raw)
+    except Exception:
+        pass
+    seed = _get_json_setting("autopilot.discovery_seed", None)
+    if not isinstance(seed, list):
+        seed = []
+    preview: List[str] = []
+    report = _get_json_setting("autopilot.discovery_report", {})
+    if isinstance(report, dict):
+        top = report.get("top_symbols")
+        if isinstance(top, list):
+            preview = [str(s).strip().upper() for s in top if isinstance(s, str)]
+    if not preview:
+        cached = _get_json_setting("autopilot.discovery_watchlist", [])
+        if isinstance(cached, list):
+            preview = [str(s).strip().upper() for s in cached if isinstance(s, str)]
+    return {"enabled": enabled, "only": only, "seed": seed, "preview": preview, "report": report if isinstance(report, dict) else {}}
+
+
+@autopilot_router.put("/discovery")
+def autopilot_discovery_put(body: DiscoveryUpdate):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.discovery_enabled", bool(body.enabled))
+        insert_action_log("discovery_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if body.only is not None:
+        _set_json_setting("autopilot.discovery_only", bool(body.only))
+        insert_action_log("discovery_update", mode=_two_mode(), reason="only_toggle", status="ok", extra={"only": bool(body.only)})  # type: ignore[name-defined]
+    refreshed: Optional[Dict[str, Any]] = None
+    if isinstance(body.seed, list):
+        # normalize seed to US.TICKER
+        symbols = list({_normalize_symbol(x) for x in body.seed if str(x).strip()})
+        _set_json_setting("autopilot.discovery_seed", symbols)
+        insert_action_log("discovery_update", mode=_two_mode(), reason="seed_update", status="ok", extra={"n": len(symbols)})  # type: ignore[name-defined]
+        try:
+            from autopilot.discovery_job import run_daily_discovery  # type: ignore
+            refreshed = run_daily_discovery(get_client(), force=True, reason="manual_seed")  # type: ignore[arg-type]
+        except Exception:
+            refreshed = None
+    if refreshed:
+        return {**autopilot_discovery_get(), "report": refreshed}
+    return autopilot_discovery_get()
+
+
+@autopilot_router.post("/discovery/run")
+def autopilot_discovery_run():
+    try:
+        from autopilot.discovery_job import run_daily_discovery  # type: ignore
+    except Exception as e:  # pragma: no cover - module import issues surface to user
+        raise HTTPException(status_code=500, detail=f"Discovery job unavailable: {e}")
+
+    try:
+        report = run_daily_discovery(get_client(), force=True, reason="manual_run")  # type: ignore[arg-type]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Discovery run failed: {e}")
+
+    # Return the latest discovery state, merging the fresh report if available.
+    state = autopilot_discovery_get()
+    if isinstance(report, dict) and report:
+        try:
+            state["report"] = report
+        except Exception:
+            pass
+    return state
+
+
+# ---- Planner settings (min confidence, top_n) ----
+class PlannerUpdate(BaseModel):
+    min_confidence: float | None = None
+    top_n: int | None = None
+    strict_prefs: bool | None = None
+
+
+@autopilot_router.get("/planner")
+def autopilot_planner_get():
+    try:
+        mc_raw = _get_json_setting("autopilot.min_confidence", None)
+        min_conf = float(mc_raw) if mc_raw is not None else 0.6
+    except Exception:
+        min_conf = 0.6
+    try:
+        tn_raw = _get_json_setting("autopilot.top_n", None)
+        top_n = int(tn_raw) if tn_raw is not None else int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+    except Exception:
+        top_n = int(os.getenv("AUTOPILOT_TOP_N", "8") or "8")
+    try:
+        sp_raw = _get_json_setting("autopilot.strict_prefs", None)
+        strict_prefs = bool(sp_raw) if sp_raw is not None else False
+    except Exception:
+        strict_prefs = False
+    return {"min_confidence": min_conf, "top_n": top_n, "strict_prefs": strict_prefs}
+
+
+@autopilot_router.put("/planner")
+def autopilot_planner_put(body: PlannerUpdate):
+    if body.min_confidence is not None:
+        _set_json_setting("autopilot.min_confidence", float(body.min_confidence))
+        insert_action_log("planner_update", mode=_two_mode(), reason="min_conf", status="ok", extra={"min_conf": float(body.min_confidence)})  # type: ignore[name-defined]
+    if isinstance(body.top_n, int) and body.top_n > 0:
+        _set_json_setting("autopilot.top_n", int(body.top_n))
+        insert_action_log("planner_update", mode=_two_mode(), reason="top_n", status="ok", extra={"top_n": int(body.top_n)})  # type: ignore[name-defined]
+    if body.strict_prefs is not None:
+        _set_json_setting("autopilot.strict_prefs", bool(body.strict_prefs))
+        insert_action_log("planner_update", mode=_two_mode(), reason="strict_prefs", status="ok", extra={"strict_prefs": bool(body.strict_prefs)})  # type: ignore[name-defined]
+    return autopilot_planner_get()
+
+
+# ---- News settings (toggle + ttl) ----
+class NewsUpdate(BaseModel):
+    enabled: bool | None = None
+    ttl_sec: int | None = None
+    provider: str | None = None  # 'heuristic' | 'gpt'
+
+
+@autopilot_router.get("/news")
+def autopilot_news_get():
+    enabled = True
+    try:
+        raw = _get_json_setting("autopilot.use_news", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    try:
+        ttl = int(_get_json_setting("autopilot.news_ttl_sec", None) or 0)
+    except Exception:
+        ttl = 0
+    if ttl <= 0:
+        ttl = int(os.getenv("AUTOPILOT_NEWS_TTL_SEC", "1800") or "1800")
+    # provider (default heuristic)
+    provider = "heuristic"
+    try:
+        pv = _get_json_setting("autopilot.news_provider", None)
+        if isinstance(pv, str) and pv.strip():
+            provider = pv.strip()
+    except Exception:
+        pass
+    return {"enabled": enabled, "ttl_sec": ttl, "provider": provider}
+
+
+@autopilot_router.put("/news")
+def autopilot_news_put(body: NewsUpdate):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.use_news", bool(body.enabled))
+        insert_action_log("news_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if isinstance(body.ttl_sec, int) and body.ttl_sec > 0:
+        _set_json_setting("autopilot.news_ttl_sec", int(body.ttl_sec))
+        insert_action_log("news_update", mode=_two_mode(), reason="ttl_update", status="ok", extra={"ttl_sec": int(body.ttl_sec)})  # type: ignore[name-defined]
+    if isinstance(body.provider, str) and body.provider.strip():
+        pv = body.provider.strip().lower()
+        if pv not in ("heuristic", "gpt"):
+            raise HTTPException(status_code=400, detail="provider must be 'heuristic' or 'gpt'")
+        _set_json_setting("autopilot.news_provider", pv)
+        insert_action_log("news_update", mode=_two_mode(), reason="provider", status="ok", extra={"provider": pv})  # type: ignore[name-defined]
+    return autopilot_news_get()
+
+
+# ---- Data settings (ktype, bars ttl) ----
+class DataUpdate(BaseModel):
+    ktype: str | None = None
+    bars_ttl_sec: int | None = None
+    deals_sync_sec: int | None = None
+    data_source: str | None = None
+
+
+_KTYPES = {"K_1M","K_5M","K_15M","K_30M","K_60M","K_DAY","K_1D"}
+
+
+@autopilot_router.get("/data")
+def autopilot_data_get():
+    ktype = str(_get_json_setting("autopilot.ktype", None) or os.getenv("AUTOPILOT_KTYPE", "K_DAY"))
+    bars_ttl = 0
+    try:
+        bars_ttl = int(_get_json_setting("autopilot.bars_ttl_sec", None) or 0)
+    except Exception:
+        bars_ttl = 0
+    if bars_ttl <= 0:
+        bars_ttl = int(os.getenv("AUTOPILOT_BARS_TTL_SEC", "60") or "60")
+    try:
+        deals_sync = int(_get_json_setting("autopilot.deals_sync_sec", None) or 0)
+    except Exception:
+        deals_sync = 0
+    if deals_sync <= 0:
+        deals_sync = int(os.getenv("AUTOPILOT_DEALS_SYNC_SEC", "180") or "180")
+    src = str(_get_json_setting("autopilot.data_source", None) or os.getenv("AUTOPILOT_DATA_SOURCE", "futu"))
+    return {"ktype": ktype, "bars_ttl_sec": bars_ttl, "deals_sync_sec": deals_sync, "data_source": src}
+
+
+@autopilot_router.put("/data")
+def autopilot_data_put(body: DataUpdate):
+    if body.ktype is not None:
+        kt = str(body.ktype).upper().strip()
+        if kt not in _KTYPES:
+            raise HTTPException(status_code=400, detail=f"ktype must be one of: {sorted(_KTYPES)}")
+        _set_json_setting("autopilot.ktype", kt)
+        insert_action_log("data_update", mode=_two_mode(), reason="ktype", status="ok", extra={"ktype": kt})  # type: ignore[name-defined]
+    if isinstance(body.bars_ttl_sec, int) and body.bars_ttl_sec > 0:
+        _set_json_setting("autopilot.bars_ttl_sec", int(body.bars_ttl_sec))
+        insert_action_log("data_update", mode=_two_mode(), reason="bars_ttl", status="ok", extra={"bars_ttl_sec": int(body.bars_ttl_sec)})  # type: ignore[name-defined]
+    if isinstance(body.deals_sync_sec, int) and body.deals_sync_sec > 0:
+        _set_json_setting("autopilot.deals_sync_sec", int(body.deals_sync_sec))
+        insert_action_log("data_update", mode=_two_mode(), reason="deals_sync", status="ok", extra={"deals_sync_sec": int(body.deals_sync_sec)})  # type: ignore[name-defined]
+    if body.data_source is not None:
+        ds = str(body.data_source).lower().strip()
+        if ds not in {"futu", "yfinance"}:
+            raise HTTPException(status_code=400, detail="data_source must be 'futu' or 'yfinance'")
+        _set_json_setting("autopilot.data_source", ds)
+        insert_action_log("data_update", mode=_two_mode(), reason="data_source", status="ok", extra={"data_source": ds})  # type: ignore[name-defined]
+    return autopilot_data_get()
+
+
+# ---- Signals settings (enable + per-strategy weights) ----
+class SignalsSettings(BaseModel):
+    enabled: Optional[bool] = None
+    strategies: Optional[Dict[str, bool]] = None
+    weights: Optional[Dict[str, float]] = None
+    auto_weight: Optional[bool] = None
+
+
+@autopilot_router.get("/signals")
+def autopilot_signals_get():
+    # defaults
+    enabled = True
+    strategies: Dict[str, bool] = {
+        "macd_cross": True,
+        "bb_breakout": True,
+        "stoch_rsi_extreme": True,
+        "ma_trend": True,
+        "rsi_extreme": True,
+        "news": True,
+    }
+    weights: Dict[str, float] = {
+        "macd_cross": 1.0,
+        "bb_breakout": 1.0,
+        "stoch_rsi_extreme": 1.0,
+        "ma_trend": 1.0,
+        "rsi_extreme": 1.0,
+        "news": 1.0,
+    }
+    try:
+        raw = _get_json_setting("autopilot.signals.enabled", None)
+        if raw is not None:
+            enabled = bool(raw)
+    except Exception:
+        pass
+    try:
+        m = _get_json_setting("autopilot.signals.strategies", None)
+        if isinstance(m, dict):
+            strategies.update({str(k): bool(v) for k, v in m.items()})
+    except Exception:
+        pass
+    try:
+        w = _get_json_setting("autopilot.signals.weights", None)
+        if isinstance(w, dict):
+            for k, v in w.items():
+                try:
+                    weights[str(k)] = float(v)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    # auto-weight flag
+    auto_weight = False
+    try:
+        raw = _get_json_setting("autopilot.signals.auto_weight", None)
+        if raw is not None:
+            auto_weight = bool(raw)
+    except Exception:
+        pass
+    return {"enabled": enabled, "strategies": strategies, "weights": weights, "auto_weight": auto_weight}
+
+
+@autopilot_router.put("/signals")
+def autopilot_signals_put(body: SignalsSettings):
+    if body.enabled is not None:
+        _set_json_setting("autopilot.signals.enabled", bool(body.enabled))
+        insert_action_log("signals_update", mode=_two_mode(), reason="enabled_toggle", status="ok", extra={"enabled": bool(body.enabled)})  # type: ignore[name-defined]
+    if isinstance(body.strategies, dict):
+        # sanitize to booleans
+        clean = {str(k): bool(v) for k, v in body.strategies.items()}
+        _set_json_setting("autopilot.signals.strategies", clean)
+        insert_action_log("signals_update", mode=_two_mode(), reason="strategies", status="ok", extra={"n": len(clean)})  # type: ignore[name-defined]
+    if isinstance(body.weights, dict):
+        clean_w: Dict[str, float] = {}
+        for k, v in body.weights.items():
+            try:
+                clean_w[str(k)] = float(v)
+            except Exception:
+                continue
+        _set_json_setting("autopilot.signals.weights", clean_w)
+        insert_action_log("signals_update", mode=_two_mode(), reason="weights", status="ok", extra={"n": len(clean_w)})  # type: ignore[name-defined]
+    # optional auto_weight toggle
+    try:
+        aw = getattr(body, 'auto_weight', None)  # type: ignore
+        if aw is not None:
+            _set_json_setting("autopilot.signals.auto_weight", bool(aw))
+            insert_action_log("signals_update", mode=_two_mode(), reason="auto_weight", status="ok", extra={"enabled": bool(aw)})  # type: ignore[name-defined]
+    except Exception:
+        pass
+    return autopilot_signals_get()
+
+# Ensure all /autopilot routes are registered only after definitions
+@autopilot_router.get("/weekly")
+def autopilot_weekly():
+    """
+    Weekly report: realized metrics, per-strategy attribution (from signals_used),
+    auto-weight adjustment summary, missed rules, and % dropped by validator.
+    """
+    try:
+        from core.storage import performance_stats, list_action_logs  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage unavailable: {e}")
+
+    out: Dict[str, Any] = {}
+    # Realized metrics (7d window)
+    try:
+        out["performance_7d"] = performance_stats(days=7)
+    except Exception:
+        out["performance_7d"] = {}
+
+    # Action logs in 7d for attribution + validator/evaluator summaries
+    rows = []
+    try:
+        rows = list_action_logs(limit=2000, symbol=None, since_hours=24*7)
+    except Exception:
+        rows = []
+
+    import json as _json
+
+    def _safe_json_local(raw: Any) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return {}
+
+    def _normalize_day(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        cleaned = text.replace("/", "-")
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1]
+        if "T" not in cleaned and " " in cleaned:
+            cleaned = cleaned.replace(" ", "T")
+        try:
+            dt = datetime.fromisoformat(cleaned)
+            return dt.date().isoformat()
+        except Exception:
+            # last resort: slice first 10 chars if they look like a date
+            head = cleaned[:10]
+            return head if head and head[0].isdigit() else None
+
+    hold_reason_keywords = {
+        "low_confidence",
+        "strict_prefs",
+        "policy_reduce_only",
+        "policy_long_only",
+        "policy_short_only",
+        "policy",
+        "flatten_window",
+        "market_closed",
+        "no_execution_service",
+        "planner_invalid",
+        "pref_check",
+    }
+    executed_statuses = {"filled", "executed", "completed", "done", "ok", "success"}
+    pending_statuses = {"submitted", "pending", "open", "accepted", "planned", "partially_filled", "partial", "working"}
+    blocked_statuses = {"blocked", "guardrail"}
+    skipped_statuses = {"skipped", "planned_no_exec", "skip_existing"}
+    drop_statuses = {"validator_dropped", "evaluator_dropped"}
+
+    decision_counts: Counter = Counter()
+    daily_counts: Dict[str, Counter] = defaultdict(Counter)
+
+    def _classify_decision(action: str, status: str, reason: str, qty_val: Any, extra: Dict[str, Any]) -> Optional[str]:
+        act = (action or "").lower()
+        st = (status or "").lower()
+        rs = (reason or "").lower()
+        try:
+            qty = float(qty_val or 0)
+        except Exception:
+            qty = 0.0
+        order_id = str(extra.get("order_id") or "") if extra else ""
+
+        if st in executed_statuses:
+            return "executed"
+        if st in blocked_statuses or rs.startswith("guardrail"):
+            return "blocked"
+        if st in skipped_statuses:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            return "skipped"
+        if st in drop_statuses:
+            return "blocked"
+        if st in pending_statuses:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            return "pending"
+        if st in {"rejected", "failed", "error", "cancelled", "canceled", "expired"}:
+            if order_id:
+                return "rejected"
+            if qty <= 0 and any(k in rs for k in hold_reason_keywords):
+                return "hold"
+            if "hold" in rs:
+                return "hold"
+            return "rejected"
+        if st == "planned" and any(k in rs for k in hold_reason_keywords):
+            return "hold"
+        if not st:
+            if any(k in rs for k in hold_reason_keywords):
+                return "hold"
+        if act == "autopilot_act" and qty <= 0 and (any(k in rs for k in hold_reason_keywords) or extra.get("next_action") == "hold"):
+            return "hold"
+        if act.startswith("validator") and extra.get("next_action") == "hold":
+            return "hold"
+        return None
+
+    # Per-strategy attribution: count strength weighted appearances in 'autopilot_act' signals_used
+    strat_use: Dict[str, float] = {}
+    reweights: int = 0
+    proposed_total = 0
+    validator_dropped = 0
+    evaluator_dropped = 0
+    missed_rules = {"planner_invalid_json": 0, "guardrails": 0}
+    proposed_counts: Dict[str, int] = {}
+    executed_counts: Dict[str, int] = {}
+    decision_reasons: Dict[str, List[str]] = {}
+    for r in rows:
+        try:
+            act = str(r.get("action") or "")
+            src = str(r.get("source") or "")
+            reason = str(r.get("reason") or "")
+            status_txt = str(r.get("status") or "")
+            extra = _safe_json_local(r.get("extra_json"))
+            day_key = _normalize_day(r.get("ts") or r.get("created_at"))
+            verdict = _classify_decision(act, status_txt, reason, r.get("qty"), extra)
+            if verdict:
+                decision_counts[verdict] += 1
+                if day_key:
+                    daily_counts[day_key][verdict] += 1
+
+            if act == "autopilot_act":
+                for s in extra.get("signals_used", []) or []:
+                    k = str(s.get("strategy") or "")
+                    if not k:
+                        continue
+                    strat_use[k] = strat_use.get(k, 0.0) + float(s.get("strength") or 0.0)
+                sym = str(r.get("symbol") or "")
+                if sym:
+                    executed_counts[sym] = executed_counts.get(sym, 0) + 1
+                    rc = extra.get("rule_checks") or {}
+                    try:
+                        bad = [k for k, v in rc.items() if v is False and k != "unusual_flow"]
+                        if bad:
+                            decision_reasons.setdefault(sym, []).extend(bad)
+                    except Exception:
+                        pass
+            elif act == "autopilot" and reason == "signals_reweighted":
+                reweights += 1
+            elif act == "planner_proposed":
+                proposed_total += int(extra.get("n") or 0)
+                for s in extra.get("syms") or []:
+                    sym = str(s)
+                    if sym:
+                        proposed_counts[sym] = proposed_counts.get(sym, 0) + 1
+                if day_key:
+                    try:
+                        daily_counts[day_key]["proposed"] += int(extra.get("n") or 0)
+                    except Exception:
+                        pass
+            elif act == "validator_result":
+                validator_dropped += int(extra.get("dropped") or 0)
+            elif act == "evaluator_result":
+                evaluator_dropped += int(extra.get("dropped") or 0)
+            elif act == "autopilot" and reason == "planner_invalid_json":
+                missed_rules["planner_invalid_json"] += 1
+            elif act == "autopilot_act" and reason == "guardrail":
+                missed_rules["guardrails"] += 1
+        except Exception:
+            continue
+
+    out["attribution"] = strat_use
+    out["auto_weight_adjustments"] = reweights
+    out["dropped"] = {
+        "proposed_total": proposed_total,
+        "validator_dropped": validator_dropped,
+        "evaluator_dropped": evaluator_dropped,
+        "pct_dropped_validator": (0 if proposed_total==0 else round(validator_dropped / proposed_total * 100.0, 2)),
+    }
+    out["missed_rules"] = missed_rules
+    out["proposed_counts"] = proposed_counts
+    out["executed_counts"] = executed_counts
+    out["decision_reasons"] = decision_reasons
+    try:
+        out["watchlist_symbols"] = _resolve_watchlist_symbols(limit=None)
+    except Exception:
+        out["watchlist_symbols"] = []
+    out["decision_breakdown"] = dict(decision_counts)
+    if daily_counts:
+        days_sorted = sorted(daily_counts.keys())[-7:]
+        out["daily_activity"] = [
+            {
+                "date": day,
+                "proposed": int(daily_counts[day].get("proposed", 0)),
+                "executed": int(daily_counts[day].get("executed", 0)),
+                "holds": int(daily_counts[day].get("hold", 0)),
+                "blocked": int(daily_counts[day].get("blocked", 0)),
+                "rejected": int(daily_counts[day].get("rejected", 0)),
+                "skipped": int(daily_counts[day].get("skipped", 0)),
+                "pending": int(daily_counts[day].get("pending", 0)),
+            }
+            for day in days_sorted
+        ]
+    else:
+        out["daily_activity"] = []
+    return out
+
+@autopilot_router.get("/pnl_series")
+def autopilot_pnl_series(days: int = 30):
+    try:
+        from core.storage import pnl_history  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage unavailable: {e}")
+    try:
+        d = max(1, int(days))
+    except Exception:
+        d = 30
+    try:
+        return {"series": pnl_history(days=d)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"pnl history failed: {e}")
+
+# Ensure router registration happens after all route definitions
+app.include_router(autopilot_router)

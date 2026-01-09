@@ -97,6 +97,18 @@ def init_db() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_symbol ON action_log(symbol)")
 
+        # per-symbol stats
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS symbol_stats (
+            symbol TEXT PRIMARY KEY,
+            last_action TEXT,
+            realized_r REAL DEFAULT 0.0
+        )""")
+
+    try:
+        recalc_symbol_realized_r()
+    except Exception:
+        pass
 
 # ----- strategies & runs (existing API) -----
 
@@ -207,7 +219,7 @@ def update_strategy(
     return get_strategy(strategy_id)
 
 
-# ----- NEW: settings helpers -----
+# ----- settings helpers -----
 
 def get_setting(key: str) -> Optional[str]:
     with _conn() as c:
@@ -232,7 +244,76 @@ def all_settings() -> Dict[str, Any]:
         return out
 
 
-# ----- NEW: orders/fills recording -----
+# ----- per-symbol stats -----
+
+def update_symbol_last_action(symbol: str, action: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO symbol_stats(symbol, last_action) VALUES(?, ?) "
+            "ON CONFLICT(symbol) DO UPDATE SET last_action=excluded.last_action",
+            (symbol, action),
+        )
+
+
+def realized_r_per_symbol() -> Dict[str, float]:
+    from collections import defaultdict
+
+    pos = defaultdict(float)
+    avg = defaultdict(float)
+    out = defaultdict(float)
+    stop_loss_pct = 0.0
+    try:
+        raw = get_setting("autopilot.prefs")
+        if raw:
+            prefs = json.loads(raw)
+            stop_loss_pct = float(prefs.get("stop_loss_pct") or 0.0)
+    except Exception:
+        stop_loss_pct = 0.0
+    for r in _iter_fills_ordered():
+        sym = str(r["symbol"])
+        side = str(r["side"]).upper()
+        q = float(r["qty"])
+        px = float(r["price"])
+        if side == "BUY":
+            new_pos = pos[sym] + q
+            avg[sym] = ((avg[sym] * pos[sym]) + (px * q)) / new_pos if new_pos > 0 else 0.0
+            pos[sym] = new_pos
+        else:
+            move_pct = 0.0 if avg[sym] == 0 else (px - avg[sym]) / avg[sym] * 100.0
+            if stop_loss_pct > 0:
+                out[sym] += move_pct / stop_loss_pct
+            pos[sym] = max(0.0, pos[sym] - q)
+            if pos[sym] <= 0:
+                pos[sym] = 0.0
+                avg[sym] = 0.0
+    return {s: float(v) for s, v in out.items()}
+
+
+def recalc_symbol_realized_r() -> None:
+    rr_map = realized_r_per_symbol()
+    with _conn() as c:
+        for sym, val in rr_map.items():
+            c.execute(
+                "INSERT INTO symbol_stats(symbol, realized_r) VALUES(?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET realized_r=excluded.realized_r",
+                (sym, float(val)),
+            )
+
+
+def get_symbol_stats() -> Dict[str, Dict[str, Any]]:
+    with _conn() as c:
+        cur = c.execute("SELECT symbol, last_action, realized_r FROM symbol_stats")
+        rows = cur.fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            out[str(r["symbol"])] = {
+                "last_action": r["last_action"],
+                "realized_r": float(r["realized_r"] or 0.0),
+            }
+        return out
+
+
+# ----- orders/fills recording -----
 
 def record_order(
     broker_order_id: Optional[str],
@@ -277,6 +358,10 @@ def record_fill(
              symbol, side, float(qty), float(price), ts_str),
         )
 
+    try:
+        recalc_symbol_realized_r()
+    except Exception:
+        pass
 
 # ----- NEW: Action log helpers -----
 
@@ -324,6 +409,21 @@ def list_action_logs(
     with _conn() as c:
         cur = c.execute(q, tuple(vals))
         return [dict(r) for r in cur.fetchall()]
+
+
+# ----- updates for reconciliation -----
+def update_action_status_for_order(order_id: str, status: str) -> int:
+    """Best-effort: mark placement logs as filled when a matching broker order fills.
+    Matches rows with action='autopilot_act' and extra_json containing the order_id string.
+    Returns number of rows updated.
+    """
+    like = f'%"order_id":"{order_id}"%'
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE action_log SET status=? WHERE action='autopilot_act' AND extra_json LIKE ?",
+            (status, like),
+        )
+        return cur.rowcount
 
 
 # ----- PnL (FIFO/avg-cost style, computed from fills) -----
@@ -377,3 +477,144 @@ def pnl_today() -> Dict[str, Any]:
             today = float(row["realized_pnl"])
             break
     return {"date": today_str, "realized_pnl": today}
+
+
+# ----- Performance stats (wins, losses, drawdown) -----
+
+def performance_stats(days: int = 365) -> Dict[str, Any]:
+    """
+    Approximate performance metrics computed from fills history.
+    - Counts a 'trade' when a SELL occurs (realizing PnL against current avg cost).
+    - Computes win rate over all such realized events.
+    - Tracks cumulative realized PnL to derive simple drawdown metrics.
+
+    Returns keys:
+      - trades, wins, losses
+      - win_rate (0..1), win_rate_pct (0..100)
+      - realized_pnl (sum over all fills)
+      - drawdown_pct (current from peak), max_dd (maximum drawdown pct)
+      - avg_rr (avg R multiple), avg_realized_move_pct (avg % move per trade)
+    """
+    from collections import defaultdict
+
+    pos = defaultdict(float)
+    avg = defaultdict(float)
+
+    wins = 0
+    losses = 0
+    trades = 0
+    realized_total = 0.0
+
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+
+    # Track realized move % and R multiple
+    sum_move_pct = 0.0
+    sum_rr = 0.0
+
+    # Use current stop-loss setting for R multiple (best effort)
+    stop_loss_pct = 0.0
+    try:
+        raw = get_setting("autopilot.prefs")
+        if raw:
+            prefs = json.loads(raw)
+            stop_loss_pct = float(prefs.get("stop_loss_pct") or 0.0)
+    except Exception:
+        pass
+
+    for r in _iter_fills_ordered():
+        sym = r["symbol"]
+        side = str(r["side"]).upper()
+        q = float(r["qty"])
+        px = float(r["price"])
+
+        if side == "BUY":
+            new_pos = pos[sym] + q
+            new_avg = ((avg[sym] * pos[sym]) + (px * q)) / new_pos if new_pos > 0 else 0.0
+            pos[sym] = new_pos
+            avg[sym] = new_avg
+        else:  # SELL
+            entry_px = avg[sym]
+            realized = (px - entry_px) * q
+            realized_total += realized
+            equity += realized  # track cumulative realized equity
+            peak = max(peak, equity)
+            cur_dd = 0.0 if peak <= 0 else (peak - equity) / peak * 100.0
+            max_dd = max(max_dd, cur_dd)
+
+            trades += 1
+            move_pct = 0.0 if entry_px == 0 else (px - entry_px) / entry_px * 100.0
+            sum_move_pct += move_pct
+            if stop_loss_pct > 0:
+                sum_rr += (move_pct / stop_loss_pct)
+
+            if realized > 1e-9:
+                wins += 1
+            elif realized < -1e-9:
+                losses += 1
+
+            pos[sym] = max(0.0, pos[sym] - q)
+            if pos[sym] <= 0:
+                pos[sym] = 0.0
+                avg[sym] = 0.0
+
+    win_rate = (wins / trades) if trades > 0 else 0.0
+    avg_move = sum_move_pct / trades if trades > 0 else 0.0
+    avg_rr = sum_rr / trades if trades > 0 else 0.0
+    out = {
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate * 100.0, 2),  # keep backcompat with UI expecting % sometimes
+        "win_rate_pct": round(win_rate * 100.0, 2),
+        "realized_pnl": float(realized_total),
+        "drawdown_pct": round((0.0 if peak <= 0 else (peak - equity) / peak * 100.0), 2),
+        "max_dd": round(max_dd, 2),
+        "avg_rr": round(avg_rr, 2),
+        "avg_realized_move_pct": round(avg_move, 2),
+    }
+    return out
+
+
+def exits_coverage(since_hours: int = 24) -> Dict[str, Any]:
+    """
+    Estimate coverage of protective exits on entries based on action_log.
+    Considers action='autopilot_act' and reason in ('order','order_augmented') within since_hours.
+    Counts an entry as covered if either a stop or a take-profit was present or augmented.
+    Returns: { total_entries, with_stop, with_take, exits_coverage_pct, stops_coverage_pct, tp_coverage_pct }
+    """
+    q = (
+        "SELECT reason, extra_json FROM action_log "
+        "WHERE action = 'autopilot_act' AND (reason='order' OR reason='order_augmented') "
+        "AND ts >= datetime('now', ?)"
+    )
+    params = (f"-{int(max(1, since_hours))} hours",)
+    total = 0
+    with_stop = 0
+    with_take = 0
+    with_either = 0
+    with _conn() as c:
+        for r in c.execute(q, params).fetchall():
+            total += 1
+            try:
+                extra = json.loads(r["extra_json"]) if r["extra_json"] else {}
+            except Exception:
+                extra = {}
+            has_stop = bool(extra.get("has_stop")) or bool(extra.get("aug_stop"))
+            has_take = bool(extra.get("has_take")) or bool(extra.get("aug_take"))
+            if has_stop:
+                with_stop += 1
+            if has_take:
+                with_take += 1
+            if has_stop or has_take:
+                with_either += 1
+    pct = lambda a, b: (round((a / b) * 100.0, 2) if b > 0 else 0.0)
+    return {
+        "total_entries": total,
+        "with_stop": with_stop,
+        "with_take": with_take,
+        "exits_coverage_pct": pct(with_either, total),
+        "stops_coverage_pct": pct(with_stop, total),
+        "tp_coverage_pct": pct(with_take, total),
+    }
